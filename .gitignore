@@ -1,0 +1,69 @@
+## Node
+node_modules/
+/.pnp/
+/.pnp.js
+dist/
+build/
+.vite/
+/.turbo/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+package-lock.json
+pnpm-lock.yaml
+yarn.lock
+
+## Vite / Frontend
+/.vite
+/public/build
+/.parcel-cache
+
+## TypeScript
+*.tsbuildinfo
+
+## Logs
+*.log
+
+## Environment
+.env
+.env.local
+.env.*.local
+
+## Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.pytest_cache/
+dist/
+build/
+eggs/
+.eggs/
+*.egg-info/
+
+## IDEs and editors
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+## OS files
+.DS_Store
+Thumbs.db
+
+## Misc
+coverage/
+coverage.xml
+*.sqlite3
+*.db
+
+LinuxCommands/
