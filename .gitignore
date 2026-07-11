@@ -65,5 +65,4 @@ coverage/
 coverage.xml
 *.sqlite3
 *.db
-
 LinuxCommands/
