@@ -1,12 +1,16 @@
 from fastapi import FastAPI, Depends, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 
 # Import our database connection and models
+from app.api.upload import router as upload_router
 from app.core.database import get_db
 from app.models import models
 
 # Initialize the FastAPI application
 app = FastAPI(title="AgriSureGIS API", version="1.0")
+
+app.include_router(upload_router)
 
 @app.get("/")
 def root():
@@ -53,8 +57,8 @@ def get_all_assessments(db: Session = Depends(get_db)):
         models.RiskAssessment.estimated_damage,
         models.InsuranceRecord.policy_no,
         models.InsuranceRecord.amount_cover,
-        models.Farm.georef_id
-    ).join(models.InsuranceRecord).join(models.Farm).all()
+        models.Farm.georef_id,
+    ).join(models.RiskAssessment.insurance_record).join(models.InsuranceRecord.farm).all()
 
     # Format the data cleanly for the frontend developer to consume
     payload = []
