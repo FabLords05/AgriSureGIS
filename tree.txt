@@ -1,0 +1,113 @@
+.
+├── backend
+│   ├── app
+│   │   ├── api
+│   │   ├── core
+│   │   │   ├── config.py
+│   │   │   └── database.py
+│   │   ├── __init__.py
+│   │   ├── main.py
+│   │   ├── models
+│   │   ├── __pycache__
+│   │   │   ├── __init__.cpython-314.pyc
+│   │   │   └── main.cpython-314.pyc
+│   │   ├── schemas
+│   │   ├── services
+│   │   └── workers
+│   └── requirements.txt
+├── frontend
+│   ├── ATTRIBUTIONS.md
+│   ├── default_shadcn_theme.css
+│   ├── guidelines
+│   │   └── Guidelines.md
+│   ├── index.html
+│   ├── package.json
+│   ├── package-lock.json
+│   ├── pnpm-workspace.yaml
+│   ├── postcss.config.mjs
+│   ├── README.md
+│   ├── src
+│   │   ├── app
+│   │   │   ├── App.tsx
+│   │   │   └── components
+│   │   │       ├── AssessmentModule.tsx
+│   │   │       ├── DashboardLayout.tsx
+│   │   │       ├── figma
+│   │   │       │   └── ImageWithFallback.tsx
+│   │   │       ├── Login.tsx
+│   │   │       ├── MonitoringModule.tsx
+│   │   │       ├── SettingsModule.tsx
+│   │   │       ├── SpatialModule.tsx
+│   │   │       └── ui
+│   │   │           ├── accordion.tsx
+│   │   │           ├── alert-dialog.tsx
+│   │   │           ├── alert.tsx
+│   │   │           ├── aspect-ratio.tsx
+│   │   │           ├── avatar.tsx
+│   │   │           ├── badge.tsx
+│   │   │           ├── breadcrumb.tsx
+│   │   │           ├── button.tsx
+│   │   │           ├── calendar.tsx
+│   │   │           ├── card.tsx
+│   │   │           ├── carousel.tsx
+│   │   │           ├── chart.tsx
+│   │   │           ├── checkbox.tsx
+│   │   │           ├── collapsible.tsx
+│   │   │           ├── command.tsx
+│   │   │           ├── context-menu.tsx
+│   │   │           ├── dialog.tsx
+│   │   │           ├── drawer.tsx
+│   │   │           ├── dropdown-menu.tsx
+│   │   │           ├── form.tsx
+│   │   │           ├── hover-card.tsx
+│   │   │           ├── input-otp.tsx
+│   │   │           ├── input.tsx
+│   │   │           ├── label.tsx
+│   │   │           ├── menubar.tsx
+│   │   │           ├── navigation-menu.tsx
+│   │   │           ├── pagination.tsx
+│   │   │           ├── popover.tsx
+│   │   │           ├── progress.tsx
+│   │   │           ├── radio-group.tsx
+│   │   │           ├── resizable.tsx
+│   │   │           ├── scroll-area.tsx
+│   │   │           ├── select.tsx
+│   │   │           ├── separator.tsx
+│   │   │           ├── sheet.tsx
+│   │   │           ├── sidebar.tsx
+│   │   │           ├── skeleton.tsx
+│   │   │           ├── slider.tsx
+│   │   │           ├── sonner.tsx
+│   │   │           ├── switch.tsx
+│   │   │           ├── table.tsx
+│   │   │           ├── tabs.tsx
+│   │   │           ├── textarea.tsx
+│   │   │           ├── toggle-group.tsx
+│   │   │           ├── toggle.tsx
+│   │   │           ├── tooltip.tsx
+│   │   │           ├── use-mobile.ts
+│   │   │           └── utils.ts
+│   │   ├── imports
+│   │   │   ├── 591746491_998810072688257_8809114197302689478_n.png
+│   │   │   ├── 679455901_1007254881757226_4238142727864436251_n.png
+│   │   │   ├── 702098237_26626315987061626_297975591306708277_n.png
+│   │   │   ├── 706216885_1298065022483176_2992341758332792056_n.png
+│   │   │   ├── pasted_text
+│   │   │   │   └── functional-requirements.md
+│   │   │   ├── Screenshot_2026-05-23_152221.png
+│   │   │   └── Screenshot_2026-05-23_152300.png
+│   │   ├── main.tsx
+│   │   └── styles
+│   │       ├── fonts.css
+│   │       ├── globals.css
+│   │       ├── index.css
+│   │       ├── tailwind.css
+│   │       └── theme.css
+│   ├── tsconfig.json
+│   └── vite.config.ts
+├── LinuxCommands
+│   └── postgres initiation guide
+├── README.md
+└── tree.txt
+
+21 directories, 90 files

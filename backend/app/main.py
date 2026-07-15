@@ -1,7 +1,71 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends, HTTPException
+from sqlalchemy.orm import Session
 
-app = FastAPI(title="AgriSureGIS Backend")
+# Import our database connection and models
+from app.core.database import get_db
+from app.models import models
+
+# Initialize the FastAPI application
+app = FastAPI(title="AgriSureGIS API", version="1.0")
 
 @app.get("/")
-def read_root():
-    return {"status": "AgriSureGIS Engine Active"}
+def root():
+    return {"message": "Welcome to the AgriSureGIS Backend!"}
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"], # This is Vite's default React port
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# --- THE TEST ENDPOINT ---
+@app.get("/api/test-db")
+def test_database_connection(db: Session = Depends(get_db)):
+    """
+    This endpoint attempts to connect to the database using SQLAlchemy
+    and count the number of farms in tbl_farms.
+    """
+    try:
+        # We use our Python ORM Model (models.Farm) instead of raw SQL!
+        farm_count = db.query(models.Farm).count()
+        
+        return {
+            "status": "success",
+            "message": "Successfully connected to PostGIS via SQLAlchemy!",
+            "total_farms_found": farm_count
+        }
+    except Exception as e:
+        # If the database is off or the password is wrong, this catches the error safely
+        raise HTTPException(status_code=500, detail=f"Database connection failed: {str(e)}")
+
+@app.get("/api/assessments")
+def get_all_assessments(db: Session = Depends(get_db)):
+    """
+    Provides the frontend developer with a complete list of risk assessments,
+    joining the damage calculations with the specific farm and policy.
+    """
+    # This acts like a massive SQL JOIN across three tables
+    results = db.query(
+        models.RiskAssessment.assessment_id,
+        models.RiskAssessment.crop_stage,
+        models.RiskAssessment.estimated_damage,
+        models.InsuranceRecord.policy_no,
+        models.InsuranceRecord.amount_cover,
+        models.Farm.georef_id
+    ).join(models.InsuranceRecord).join(models.Farm).all()
+
+    # Format the data cleanly for the frontend developer to consume
+    payload = []
+    for r in results:
+        payload.append({
+            "assessment_id": r.assessment_id,
+            "policy_no": r.policy_no,
+            "georef_id": r.georef_id,
+            "crop_stage": r.crop_stage,
+            "estimated_damage_percentage": float(r.estimated_damage) if r.estimated_damage else 0,
+            "financial_cover": float(r.amount_cover)
+        })
+
+    return {"status": "success", "data": payload}
