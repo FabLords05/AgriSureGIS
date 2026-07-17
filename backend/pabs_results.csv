@@ -1,0 +1,3 @@
+Province,Municipality,Barangay,RSBSA No.,Surname,Firstname,Middlename,Farm ID,Georef ID,Area,Policy No.,Program Type,Effectivity Date,Expiry Date,InsuredAmountofCover,Stage No.,Stage,EstimatedDamage,Adjuster's Stage of Crop Calculation
+Misamis Oriental,Claveria,Poblacion,10-43-01-0001,Dela Cruz,Juan,A.,FARM-001,R10-MIS-CLV-0001,2.50,POL-10001,Rice Parametric,2026-06-01,2026-09-01,62500.00,2,Flowering,18750.00,Calculated based on 24 hours exposure to TCWS No. 2
+Bukidnon,Talakag,San Isidro,10-13-16-0002,Tugonon,Fabio,Joseph,FARM-002,R10-BUK-TAL-0002,1.80,POL-10002,Rice Parametric,2026-06-15,2026-09-15,45000.00,3,Maturity,9000.00,Calculated based on 12 hours exposure to TCWS No. 3
