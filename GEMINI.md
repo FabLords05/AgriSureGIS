@@ -19,8 +19,8 @@ Before doing anything:
 * **Project Study:** AgriSureGIS (Parametric insurance assessment platform)
 
 ## Current Status
-* **Current Sprint:** Sprint 2 - Bulletins & Scraping Module (Current)
-* **Current Task:** Build the BeautifulSoup web scraper and pdfplumber parser for PAGASA Tropical Cyclone Bulletins.
+* **Current Sprint:** Sprint 3 - Spatial Processing & Data Ingestion (Current)
+* **Current Task:** Build the GPX boundary parser, GeoJSON mapping, geoprocessing of storm trajectories, and exposure calculations.
 
 ## Development Constraints & Requirements
 * **Diagrams:** Follow the Use Case Diagram in the `docs/` folder.

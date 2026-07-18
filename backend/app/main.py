@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 # Import our database connection and models
 from app.api.upload import router as upload_router
+from app.api.bulletins import router as bulletins_router
 from app.core.database import get_db
 from app.models import models
 
@@ -11,6 +12,7 @@ from app.models import models
 app = FastAPI(title="AgriSureGIS API", version="1.0")
 
 app.include_router(upload_router)
+app.include_router(bulletins_router, prefix="/api")
 
 @app.get("/")
 def root():

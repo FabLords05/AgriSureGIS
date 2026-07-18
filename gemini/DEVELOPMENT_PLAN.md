@@ -8,14 +8,14 @@
   - Implement basic REST endpoints in FastAPI (`/api/health`, `/api/upload/csv`). [Done]
   - Create the multi-module dashboard UI (Home, Spatial, Assessment, Settings). [Done]
 
-## Sprint 2: Bulletins & Scraping Module (Current)
+## Sprint 2: Bulletins & Scraping Module (Completed)
 * **Objectives:** Real-time PAGASA bulletin retrieval and PDF text/coordinate parsing.
 * **Tasks:**
-  - Build BeautifulSoup web scraper for PAGASA Tropical Cyclone Bulletin PDFs.
-  - Integrate `pdfplumber` to extract TCWS levels, meteorological center coordinates, and affected municipalities.
-  - Write test cases for bulletin normalization and coordinate parsing.
+  - Build BeautifulSoup web scraper for PAGASA Tropical Cyclone Bulletin PDFs. [Done]
+  - Integrate `pdfplumber` to extract TCWS levels, meteorological center coordinates, and affected municipalities. [Done]
+  - Write test cases for bulletin normalization and coordinate parsing. [Done]
 
-## Sprint 3: Spatial Processing & Data Ingestion
+## Sprint 3: Spatial Processing & Data Ingestion (Current)
 * **Objectives:** GPX boundary parser, GeoJSON mapping, geoprocessing of storm trajectories, and exposure calculations.
 * **Tasks:**
   - Create the GPX parser utilizing `gpxpy`, converting track points to Polygon geometries.

@@ -26,3 +26,30 @@ This file tracks granular, function-level modifications made in the codebase, do
 ### 3. File: `backend/pabs_results.csv`
 * **Changes to Data Structure:**
   * Populated the file with sample agricultural policies, boundaries (Claveria, Misamis Oriental and Talakag, Bukidnon), and crop stages to support database seeding verification.
+
+---
+
+## [2026-07-18] - Sprint 2 Implementation
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* **Changes to Functions (Class: `BulletinParserService`):**
+  * Added **`fetch_active_bulletin_links()`**: Asynchronously scrapes the PAGASA active bulletins index page using BeautifulSoup to detect and return PDF links.
+  * Added **`download_bulletin_pdf()`**: Asynchronously downloads bulletin PDFs from the PAGASA portal, saving them to a local temporary archive.
+  * Added **`parse_bulletin_text()`**: Utilizes `pdfplumber` to extract text from a downloaded PDF and parses it using regular expressions to extract the typhoon name, issue dates, wind/gust speeds, eye coordinates, and segment signal wind hazard text blocks.
+  * Added **`save_bulletin_to_db()`**: Normalized and saved parsed bulletin data into `tbl_typhoons`, `tbl_tropical_cyclone_bulletins` (storing spatial `center_geom`), and parsed Signal levels/municipalities into `tbl_tcb_signals`.
+
+### 2. File: `backend/app/api/bulletins.py`
+* **Changes to API Routes:**
+  * Added **`list_bulletins()`** (`GET /api/bulletins/`): Lists all parsed bulletins alongside typhoon names and metadata.
+  * Added **`trigger_pagasa_scrape()`** (`POST /api/bulletins/parse`): Runs the scraper/parser workflow on current PAGASA active PDF links.
+  * Added **`upload_bulletin_pdf()`** (`POST /api/bulletins/upload`): Serves as a fallback route allowing manual PDF upload and parsing when the online portal is unreachable.
+  * Added **`get_bulletin_signals()`** (`GET /api/bulletins/{tcb_id}/signals`): Returns signal assignments and affected municipalities.
+
+### 3. File: `backend/app/main.py`
+* **Changes to Configurations:**
+  * Registered the new `bulletins_router` router under the prefix `/api`.
+
+### 4. File: `backend/tests/test_bulletin_parser.py`
+* **Changes to Tests (Class: `BulletinParserTests`):**
+  * Added **`test_parse_bulletin_text_extracts_correct_metadata()`**: Uses unit test mock patches to assert that the parser correctly extracts metadata and signal areas from mock PDF bulletin layouts.
+
