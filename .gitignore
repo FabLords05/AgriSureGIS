@@ -67,7 +67,6 @@ coverage.xml
 *.db
 LinuxCommands/
 
-## Gemini / Workspace isolation
-gemini/
+## Workspace isolation
 image-bg/
 ui-prototype/
