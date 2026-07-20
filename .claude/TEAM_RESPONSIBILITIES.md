@@ -1,10 +1,11 @@
 # AgriSureGIS - Team Responsibilities
 
 ## Roles & Areas of Ownership
-* **Fabio Joseph Tugonon (Database Admin):** Database setup, `init_schema.sql`, PostgreSQL/PostGIS optimizations, data backups, and seeder scripts.
-* **Cristian & Albritch (Full-Stack Developers):** Main FastAPI app setup, Pydantic schemas, report exportation, and frontend API client.
-* **James (Backend Developer):** BeautifulSoup scraping logic, `pdfplumber` bulletin reading, and GeoPandas geoprocessing engines.
-* **Karylle (Frontend Developer):** Dashboard UI views, Leaflet interactive mapping components, filters, and form dialogs.
+* **Fabio Joseph Tugonon (Database Administrator):** Database schema architecture, creation, and maintenance (Postgres + PostGIS); spatial indexing, query optimization, and geoprocessing logic at the DB level; database backup and recovery configurations.
+* **Cristian A. Aton (Backend Developer):** Application architecture and API design (FastAPI); web scraping pipeline for PAGASA PDF bulletin parsing; integration of Python GIS libraries (GeoPandas, Shapely, pyproj).
+* **James Andrew B. Gayla (Frontend Developer):** Frontend shell development and mapping component integration; map UI rendering using Leaflet JS; interactive dashboard layouts and data visualization screens.
+* **Karylle Anne Maagad (Technical Writer):** Documentation of system architecture, API contracts, and setup/workflow guides; maintaining the development plan, environment guide, and project context references; user-facing guides and onboarding materials for the platform.
+* **Albritch Benj S. Tragico (System Analyst):** Requirements gathering and specification for payout generation algorithms and export functionalities; process and workflow analysis to define system use cases and functional requirements.
 
 ## Review and Merging Workflow
 - Any database structure modifications must be proposed to Fabio.
