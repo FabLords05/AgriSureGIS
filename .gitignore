@@ -66,3 +66,7 @@ coverage.xml
 *.sqlite3
 *.db
 LinuxCommands/
+
+## Workspace isolation
+image-bg/
+ui-prototype/
