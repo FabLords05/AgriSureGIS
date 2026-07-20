@@ -82,7 +82,7 @@ gantt
 * **Objective:** Establish the localized database, apply schemas, and seed baseline profiles.
 * **Step-by-Step Backend Tasks:**
   1. **Provision DB:** Enable PostGIS extension: `CREATE EXTENSION IF NOT EXISTS postgis;`
-  2. **Apply Schema:** Apply [init_schema.sql](file:///home/fabio/Documents/AgriSureGIS/backend/init_schema.sql) containing constraints, foreign keys, and spatial indices (`GIST` index on `tbl_farms.location_geom`).
+  2. **Apply Schema:** Apply [init_schema.sql](../backend/init_schema.sql) containing constraints, foreign keys, and spatial indices (`GIST` index on `tbl_farms.location_geom`).
   3. **Write DB Models:** Map SQLAlchemy models in `app/models/models.py`.
   4. **Seeding Script:** Complete `seed_database.py` to ingest legacy `pabs_results.csv` and normalize records into `tbl_farmers_profile` and `tbl_insurance_record`.
   5. **Base API:** Expose CRUD routes for farmers and policies.
