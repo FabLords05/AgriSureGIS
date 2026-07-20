@@ -62,4 +62,4 @@ Before writing any code or making modifications, you must first summarize and pr
 4. **Questions or concerns.**
 
 > [!IMPORTANT]
-> **Do not write code yet.** Wait for Fabio's explicit approval before making any changes.
+> **Do not write code yet.** Wait for User's explicit approval before making any changes.
