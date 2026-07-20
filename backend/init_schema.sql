@@ -7,6 +7,7 @@ DROP TABLE IF EXISTS tbl_tcb_signals CASCADE;
 DROP TABLE IF EXISTS tbl_tropical_cyclone_bulletins CASCADE;
 DROP TABLE IF EXISTS tbl_typhoons CASCADE;
 DROP TABLE IF EXISTS tbl_risk_assessment CASCADE;
+DROP TABLE IF EXISTS tbl_recsap_matrix CASCADE;
 DROP TABLE IF EXISTS tbl_insurance_records CASCADE;
 DROP TABLE IF EXISTS tbl_farms CASCADE;
 DROP TABLE IF EXISTS tbl_admin_boundaries CASCADE;
@@ -45,6 +46,16 @@ CREATE TABLE tbl_admin_boundaries (
     barangay VARCHAR(100) NOT NULL
 );
 
+CREATE TABLE tbl_recsap_matrix (
+    matrix_id SERIAL PRIMARY KEY,
+    crop_stage_no INT NOT NULL,
+    wind_signal_tcws INT NOT NULL,
+    exposure_hours INT NOT NULL,
+    estimated_yield_loss NUMERIC(5,2) NOT NULL,
+    indemnity_factor NUMERIC(5,4) NOT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE
+);
+
 -- 4. Build the Spatial Table (Child of Farmers & Boundaries)
 CREATE TABLE tbl_farms (
     farm_id SERIAL PRIMARY KEY,
@@ -80,7 +91,7 @@ CREATE TABLE tbl_risk_assessment (
     assessment_id SERIAL PRIMARY KEY,
     insurance_records_id INT REFERENCES tbl_insurance_records(insurance_records_id) ON DELETE CASCADE,
     summary_id INT,
-    matrix_id INT,
+    matrix_id INT REFERENCES tbl_recsap_matrix(matrix_id) ON DELETE SET NULL,
     crop_stage_no INT,
     crop_stage VARCHAR(150),
     period_of_exposure INT,

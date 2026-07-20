@@ -76,13 +76,25 @@ class InsuranceRecord(Base):
     farm = relationship("Farm")
 
 
+class RecsapMatrix(Base):
+    __tablename__ = "tbl_recsap_matrix"
+
+    matrix_id = Column(Integer, primary_key=True, index=True)
+    crop_stage_no = Column(Integer, nullable=False)
+    wind_signal_tcws = Column(Integer, nullable=False)
+    exposure_hours = Column(Integer, nullable=False)
+    estimated_yield_loss = Column(Numeric(5, 2), nullable=False)
+    indemnity_factor = Column(Numeric(5, 4), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+
 class RiskAssessment(Base):
     __tablename__ = "tbl_risk_assessment"
 
     assessment_id = Column(Integer, primary_key=True, index=True)
     insurance_records_id = Column(Integer, ForeignKey("tbl_insurance_records.insurance_records_id", ondelete="CASCADE"))
     summary_id = Column(Integer)
-    matrix_id = Column(Integer)
+    matrix_id = Column(Integer, ForeignKey("tbl_recsap_matrix.matrix_id", ondelete="SET NULL"))
     crop_stage_no = Column(Integer)
     crop_stage = Column(String(150))
     period_of_exposure = Column(Integer)
@@ -94,6 +106,7 @@ class RiskAssessment(Base):
     user_id = Column(Integer, ForeignKey("tbl_system_users.user_id"))
 
     insurance_record = relationship("InsuranceRecord")
+    matrix = relationship("RecsapMatrix")
     user = relationship("SystemUser")
 
 
