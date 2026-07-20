@@ -2,6 +2,13 @@
 
 **Base URL:** `/api/`
 
+## Conventions (current, as implemented)
+- Request/response bodies: JSON.
+- **Error shape:** FastAPI's default `{"detail": "<message>"}` on non-2xx responses — there is no custom error envelope in the codebase.
+- **Pagination:** not implemented on any list endpoint yet.
+- **Authentication:** not implemented in code yet. The Authentication section below (`/api/auth/login/`, `/api/auth/logout/`) describes the *planned* contract — no JWT/auth code exists in `backend/app/` today, and no endpoint currently enforces a role check.
+- **Response envelope is currently inconsistent** — e.g. `GET /api/assessments` returns `{"status": "success", "data": [...]}`, while `GET /api/bulletins/` returns a bare array. This is a known gap, not a standard to copy.
+
 ## 1. Authentication
 * **POST `/api/auth/login/`** - Authenticate user and return JWT tokens.
 * **POST `/api/auth/logout/`** - Blacklist JWT refresh token.
