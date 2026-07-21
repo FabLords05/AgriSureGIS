@@ -148,3 +148,49 @@ CREATE TABLE tbl_area_exposure_summary (
 -- 6. Optimize Spatial Queries
 CREATE INDEX idx_farms_location_geom ON tbl_farms USING GIST(location_geom);
 CREATE INDEX idx_tcb_center_geom ON tbl_tropical_cyclone_bulletins USING GIST(center_geom);
+
+-- 7. PLACEHOLDER Sprint 4 seed data for tbl_recsap_matrix.
+-- These are made-up, deliberately round numbers so the payout engine has something
+-- to compute against. REPLACE THIS ENTIRE BLOCK with the real PCIC "Table 11"
+-- (Damage Matrix for Parametric Insurance, Typhoon-Induced Strong Winds - Rice)
+-- values once available -- see .claude/FUNCTION_CHANGES.md, "Recsap Matrix Persistence"
+-- entry, for what's blocked on this. crop_stage_no: 1=Booting, 2=Flowering, 3=Maturity
+-- (2 and 3 are confirmed against backend/pabs_results.csv; 1=Booting is inferred from
+-- MASTER_DEVELOPMENT_CONTEXT.md's stage ordering, not independently confirmed).
+INSERT INTO tbl_recsap_matrix (crop_stage_no, wind_signal_tcws, exposure_hours, estimated_yield_loss, indemnity_factor) VALUES
+(1, 2, 6, 15.00, 0.15),  -- Booting, signal 2, 6h
+(1, 2, 12, 20.00, 0.20), -- Booting, signal 2, 12h
+(1, 2, 24, 30.00, 0.30), -- Booting, signal 2, 24h
+(1, 3, 6, 20.00, 0.20),  -- Booting, signal 3, 6h
+(1, 3, 12, 30.00, 0.30), -- Booting, signal 3, 12h
+(1, 3, 24, 45.00, 0.45), -- Booting, signal 3, 24h
+(1, 4, 6, 30.00, 0.30),  -- Booting, signal 4, 6h
+(1, 4, 12, 45.00, 0.45), -- Booting, signal 4, 12h
+(1, 4, 24, 60.00, 0.60), -- Booting, signal 4, 24h
+(1, 5, 6, 35.00, 0.35),  -- Booting, signal 5, 6h
+(1, 5, 12, 55.00, 0.55), -- Booting, signal 5, 12h
+(1, 5, 24, 70.00, 0.70), -- Booting, signal 5, 24h
+(2, 2, 6, 20.00, 0.20),  -- Flowering, signal 2, 6h
+(2, 2, 12, 25.00, 0.25), -- Flowering, signal 2, 12h
+(2, 2, 24, 35.00, 0.35), -- Flowering, signal 2, 24h
+(2, 3, 6, 25.00, 0.25),  -- Flowering, signal 3, 6h
+(2, 3, 12, 40.00, 0.40), -- Flowering, signal 3, 12h
+(2, 3, 24, 55.00, 0.55), -- Flowering, signal 3, 24h
+(2, 4, 6, 35.00, 0.35),  -- Flowering, signal 4, 6h
+(2, 4, 12, 55.00, 0.55), -- Flowering, signal 4, 12h
+(2, 4, 24, 70.00, 0.70), -- Flowering, signal 4, 24h
+(2, 5, 6, 45.00, 0.45),  -- Flowering, signal 5, 6h
+(2, 5, 12, 70.00, 0.70), -- Flowering, signal 5, 12h
+(2, 5, 24, 90.00, 0.90), -- Flowering, signal 5, 24h
+(3, 2, 6, 10.00, 0.10),  -- Maturity, signal 2, 6h
+(3, 2, 12, 15.00, 0.15), -- Maturity, signal 2, 12h
+(3, 2, 24, 20.00, 0.20), -- Maturity, signal 2, 24h
+(3, 3, 6, 15.00, 0.15),  -- Maturity, signal 3, 6h
+(3, 3, 12, 25.00, 0.25), -- Maturity, signal 3, 12h
+(3, 3, 24, 30.00, 0.30), -- Maturity, signal 3, 24h
+(3, 4, 6, 20.00, 0.20),  -- Maturity, signal 4, 6h
+(3, 4, 12, 30.00, 0.30), -- Maturity, signal 4, 12h
+(3, 4, 24, 45.00, 0.45), -- Maturity, signal 4, 24h
+(3, 5, 6, 25.00, 0.25),  -- Maturity, signal 5, 6h
+(3, 5, 12, 40.00, 0.40), -- Maturity, signal 5, 12h
+(3, 5, 24, 55.00, 0.55); -- Maturity, signal 5, 24h

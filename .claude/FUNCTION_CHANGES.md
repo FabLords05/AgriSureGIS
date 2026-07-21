@@ -199,3 +199,36 @@ Checked Sprint 1's "[Done]" items in `.claude/DEVELOPMENT_PLAN.md` against `.cla
   * **`Frontend Local Environment Execution`**: `npm i`/`npm install`, `npm run dev`, `vite build` (see `frontend/package.json` scripts) must likewise be handed off rather than run via tool call, since they install into and run against Fabio's local `frontend/node_modules`.
 * Companion memory entries were added outside the repo (`feedback_db_command_handoff.md`, `feedback_frontend_handoff.md` in the Claude Code memory store) so future sessions apply this immediately instead of rediscovering it.
 
+---
+
+## [2026-07-21] - Sprint 4: Parametric Payout Engine & CSV Export
+
+**Branch:** `fabio/backend/sprint4-payout-engine` (based on `cristian/backend/sprint3-gpx-exposure`, since eligibility depends on that branch's `AreaExposureSummary`/`tbl_area_exposure_summary` work; committed locally, not pushed, no PR open yet).
+
+### Two assumptions this entry depends on (confirmed with Fabio before writing code)
+1. **Crop growth stage source:** the schema has no live-updated place tracking a policy's current crop stage — `crop_stage_no`/`crop_stage` only exist on `tbl_risk_assessment`, populated once at legacy CSV-import time (`pabs_results.csv`'s `Stage No.`/`Stage` columns). The payout engine reuses each policy's most recent existing `RiskAssessment` row for this value. This is a real architecture gap, not a new abstraction invented here — flagging for whoever eventually builds real crop-stage tracking.
+2. **`tbl_recsap_matrix` placeholder data:** real PCIC "Table 11" values are still not available (blocked since the "Recsap Matrix Persistence" entry above). Seeded 36 placeholder rows instead so the engine has something to compute against.
+
+### 1. File: `backend/init_schema.sql`
+* Appended a `-- PLACEHOLDER` seed block: 36 `tbl_recsap_matrix` rows (`crop_stage_no` 1–3 × `wind_signal_tcws` 2–5 × `exposure_hours` 6/12/24), made-up but monotonically increasing yield-loss/indemnity values. `crop_stage_no` 2=Flowering and 3=Maturity are confirmed against `pabs_results.csv`; 1=Booting is inferred from `MASTER_DEVELOPMENT_CONTEXT.md`'s stage ordering, not independently confirmed. **Replace this entire block** once real Table 11 values are available.
+
+### 2. File: `backend/app/services/assessment_service.py` (new)
+* Added **`AssessmentService.calculate_for_bulletin()`**: given `(typhoon_id, bulletin_id, db)`, re-runs `ExposureCalculatorService.compute_for_typhoon()`, filters to boundaries meeting eligibility (`max_signal_level >= 2` and `total_exposure_hours >= 6`), finds each eligible boundary's active policies via `Farm.boundary_id` (the same text-matched boundary linkage Sprint 3 uses — no boundary geometry column exists to spatially intersect against, so this stands in for the "typhoon path overlay" step), filters further by crop stage (Booting/Flowering/Maturity per assumption #1 above), looks up the matrix rule and computes the payout via the existing `ParametricAssessment` (`indemnity_calc.py`, untouched), and upserts one `RiskAssessment` row per `(insurance_records_id, summary_id)` pair.
+* "Active policy" is determined by `InsuranceRecord.effectivity_date <= bulletin.issued_at.date() <= expiry_date` — evaluated as of the typhoon event, not "today".
+
+### 3. File: `backend/app/api/assessments.py` (new)
+* Added **`POST /api/assessments/calculate`**: thin wrapper around `AssessmentService.calculate_for_bulletin()`, matching the documented `.claude/API_CONTRACT.md` contract (`{typhoon_id, bulletin_id}` payload).
+* Added **`GET /api/assessments/`**: lists `RiskAssessment` rows with optional `typhoon_id` (via an explicit join on `summary_id` — `tbl_risk_assessment.summary_id` is a bare `INT`, not an FK, so there's no relationship to join through) and `policy_no` filters.
+  * **Known duplication, not resolved here:** `backend/app/main.py` already has an ad hoc `GET /api/assessments` (no trailing slash) doing a similar but simpler join. Left untouched since something (possibly the frontend) may already call it and this wasn't in scope to audit; FastAPI treats the two paths as distinct routes, so both coexist without conflict, but this is worth cleaning up later.
+* Added **`GET /api/assessments/export`**: streams a CSV matching `pabs_results.csv`'s original column layout with computed columns (`Wind Signal (TCWS)`, `Period of Exposure (Hours)`, `Final Indemnity Payment`, `Assessment Date`) appended, per the manuscript's "append to original row layouts" spec. Only includes rows this engine computed (`matrix_id IS NOT NULL`) — excludes the legacy CSV-imported rows, which have no `matrix_id`.
+* Registered `assessments_router` in `backend/app/main.py` under the `/api` prefix.
+
+### 4. File: `backend/tests/test_assessment_service.py` (new)
+* Added `AssessmentServiceTests` covering: a full eligible-policy payout calculation (asserts the exact `I = (AC/1000) × IF × Area` result and `estimated_damage`), a policy skipped for an ineligible crop stage, a boundary skipped for wind signal below threshold, and a `ValueError` when the bulletin isn't found. Mocks `ExposureCalculatorService.compute_for_typhoon()` directly rather than its internals, since that method already has its own test coverage in `test_exposure_calculator.py`.
+
+### Status / Next Steps
+* **Not merged anywhere** — sits on top of `cristian/backend/sprint3-gpx-exposure`, which itself isn't merged into `develop` yet. This branch inherits that same blocker.
+* `GET /api/assessments/` vs. the pre-existing `GET /api/assessments` duplication (noted above) should be cleaned up in a follow-up, ideally by whoever owns the frontend's existing call site.
+* Real PCIC Table 11 values still needed before any of this is production-usable — everything downstream of `tbl_recsap_matrix` is placeholder-driven until then.
+* Not run against a live database — verified by reading the code and the new unit tests only; Fabio needs to run the test suite and a real `/api/assessments/calculate` call himself (per `CLAUDE.md`'s venv-handoff rule).
+
