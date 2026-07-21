@@ -87,3 +87,15 @@ Checked Sprint 1's "[Done]" items in `.claude/DEVELOPMENT_PLAN.md` against `.cla
 * Branch is **not pushed** and has **no PR open** — needs review before merging into `main`.
 * Bug found in passing, **not fixed**: `backend/app/api/upload.py` passes `adjuster_calculation=...` into `models.RiskAssessment(...)`, but that column doesn't exist on the model — `/api/upload/csv` will raise a `TypeError` on any real upload.
 
+---
+
+## [2026-07-21] - Workflow Documentation Update
+
+### 1. File: `.claude/CLAUDE.md`
+* **Changes to Documentation:**
+  * Added a **Changelog Requirement** section: before handing off any commit for Fabio to push, this file (`FUNCTION_CHANGES.md`) must be updated in the same commit with an entry documenting what changed and why, following the existing dated/sprint-grouped format. Applies to every commit destined for push, not just sprint-completion milestones.
+
+### 2. File: `.claude/TEAM.md`
+* **Changes to Documentation:**
+  * Added a **Tooling** bullet under Fabio Joseph Tugonon's entry noting his use of Claude Code as an AI pair-programming assistant for implementation, documentation, and workflow tasks in this repository.
+

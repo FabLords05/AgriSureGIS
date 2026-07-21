@@ -60,6 +60,10 @@ If documentation conflicts:
 * When a task needs a *sequence* of these (e.g. push, then delete a remote branch, then verify), give Fabio one command at a time — don't dump the whole sequence and assume it all ran. After each command, use AskUserQuestion to ask whether he ran it (and whether it succeeded) before continuing to the next step or treating it as done. Never assume success and proceed silently.
 * Local-only git commands (`commit`, `merge`, `branch`, `checkout`, `log`, `diff`, `status`) are unaffected and should still be run directly.
 
+## Changelog Requirement
+* Before handing off any commit for Fabio to push, update [.claude/FUNCTION_CHANGES.md](.claude/FUNCTION_CHANGES.md) in the same commit with an entry documenting what changed and why (functions, classes, files touched), following the file's existing dated/sprint-grouped format.
+* This applies to every commit destined for push, not just sprint-completion milestones.
+
 ## Required Process for All Tasks
 Before writing any code or making modifications, you must first summarize and present the following:
 1. **Your understanding of my task.**

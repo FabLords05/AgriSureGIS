@@ -6,6 +6,7 @@
   - Database schema architecture, creation, and maintenance (Postgres + PostGIS).
   - Spatial indexing, query optimization, and geoprocessing logic at the DB level.
   - Database backup and recovery configurations.
+* **Tooling:** Uses Claude Code as an AI pair-programming assistant for implementation, documentation, and workflow tasks in this repository.
 
 ## Cristian A. Aton
 * **Role:** Backend Developer
