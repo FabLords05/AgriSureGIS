@@ -280,5 +280,13 @@ Resolves the "Table 11 placeholder data" blocker noted in the two entries above.
 ### Status / Next Steps
 * Not run against a live database or the test suite — Fabio needs to re-run `init_schema.sql` and the test suite himself (per `CLAUDE.md`'s DB/venv handoff rules) to confirm the migration and tests pass.
 * `docs/ERD.drawio.png` itself is now stale (still shows the old single `tbl_recsap_matrix` shape) and needs a manual update in the drawio tool by whoever owns that source file — `docs/RECSAP_MATRIX_SCHEMA.md` is a stopgap, not a replacement.
-* This branch/commit is not yet pushed — needs to go through the same handoff flow as prior entries.
+* Merged locally (`--no-ff`) into `develop` on Fabio's instruction, matching the Sprint 3/4 merge precedent above — no PR opened for this one. Push to `origin/develop` still pending Fabio's own terminal.
+
+---
+
+## [2026-07-21] - Recsap Matrix Real-Data Branch Merged into develop
+
+`fabio/backend/recsap-matrix-real-data` merged locally (`--no-ff`) into `develop`, closing out the "not yet pushed" status noted in the entry above. Clean merge, no conflicts. Not yet pushed to `origin/develop` — pending Fabio running the push himself.
+
+Outstanding items from the entry above (live-DB/test-suite verification, stale `docs/ERD.drawio.png`) are unchanged by the merge and still need follow-up.
 
