@@ -232,3 +232,13 @@ Checked Sprint 1's "[Done]" items in `.claude/DEVELOPMENT_PLAN.md` against `.cla
 * Real PCIC Table 11 values still needed before any of this is production-usable — everything downstream of `tbl_recsap_matrix` is placeholder-driven until then.
 * Not run against a live database — verified by reading the code and the new unit tests only; Fabio needs to run the test suite and a real `/api/assessments/calculate` call himself (per `CLAUDE.md`'s venv-handoff rule).
 
+---
+
+## [2026-07-21] - Sprint 3 & Sprint 4 Merged into develop
+
+Both branches above are now on `develop`, closing out the "not merged" status noted in their respective entries:
+* `cristian/backend/sprint3-gpx-exposure` → `develop`: merged via PR, commit `9f7c2cf`.
+* `fabio/backend/sprint4-payout-engine` → `develop`: merged locally (`--no-ff`) on top of the updated `develop`, commit `6227ec2`, then pushed. Merge was clean (verified with `git merge-tree --write-tree` before merging) aside from an auto-mergeable append conflict in this file.
+
+Outstanding items from both entries above (Table 11 placeholder data, `GET /api/assessments/` duplication, live-DB verification, `boundary_id`/`geom` FK gap) are unchanged by the merge and still need follow-up.
+
