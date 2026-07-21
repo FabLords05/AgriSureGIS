@@ -99,3 +99,24 @@ Checked Sprint 1's "[Done]" items in `.claude/DEVELOPMENT_PLAN.md` against `.cla
 * **Changes to Documentation:**
   * Added a **Tooling** bullet under Fabio Joseph Tugonon's entry noting his use of Claude Code as an AI pair-programming assistant for implementation, documentation, and workflow tasks in this repository.
 
+---
+
+## [2026-07-21] - Branch Model: `develop` as Integration Branch
+
+**Branch:** `develop` (new, cut from `main` at `3dfc695`; committed locally, not pushed yet).
+
+### 1. File: `.claude/GITHUB_WORKFLOW.md`
+* **Process/doc change, no code touched.** Restructured the branch model from "feature branches → PR directly into `main`" to a three-tier model, per Fabio's direction that `main` should stay untouched until final, release-ready code:
+  * `main`: now frozen — only receives merges from `develop`, and only at a deliberate release point.
+  * `develop` (new): integration branch. All feature branches now branch off `develop` (not `main`) and PR back into `develop` (Phase 1, Phase 2's rebase step, and Phase 4 all updated accordingly).
+  * Added **Phase 7 — Release to `main`**: describes the `develop` → `main` PR at a release milestone, same review bar as Phase 5.
+  * Added a **Setup Note** flagging that GitHub branch protection for `main`/`develop` (blocking direct pushes, requiring PR review) must be configured by Fabio in the GitHub repo settings — not achievable from the local git CLI.
+* Existing in-flight branch `cristian/backend/sprint3-gpx-exposure` (already pushed, based on `main`) retargets to merge into `develop` going forward per Fabio's decision, rather than being treated as an exception into `main`.
+
+### 2. File: `.claude/TEAM_RESPONSIBILITIES.md`
+* Updated the "Review and Merging Workflow" bullet: PR approval requirement now targets merging into `develop`, with a note that `main` only receives merges from `develop` at a release point.
+
+### Status / Next Steps
+* `develop` branch is **not pushed** — needs Fabio to push it himself (no stored GitHub credentials in this environment) before the team can start branching off it or retargeting open PRs.
+* GitHub branch protection rules for `main` and `develop` still need to be configured by Fabio via the GitHub web UI — this doc change only updates the *documented* workflow, it does not enforce it on GitHub.
+
