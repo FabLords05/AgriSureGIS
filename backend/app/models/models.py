@@ -84,7 +84,17 @@ class RecsapMatrix(Base):
     wind_signal_tcws = Column(Integer, nullable=False)
     exposure_hours = Column(Integer, nullable=False)
     estimated_yield_loss = Column(Numeric(5, 2), nullable=False)
-    indemnity_factor = Column(Numeric(5, 4), nullable=False)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+
+class IndemnityFactorMatrix(Base):
+    __tablename__ = "tbl_indemnity_factor_matrix"
+
+    indemnity_id = Column(Integer, primary_key=True, index=True)
+    crop_stage_group = Column(String(30), nullable=False)
+    yield_loss_min = Column(Numeric(5, 2), nullable=False)
+    yield_loss_max = Column(Numeric(5, 2), nullable=False)
+    indemnity_factor = Column(Numeric(7, 2), nullable=False)
     is_active = Column(Boolean, nullable=False, default=True)
 
 
@@ -95,11 +105,12 @@ class RiskAssessment(Base):
     insurance_records_id = Column(Integer, ForeignKey("tbl_insurance_records.insurance_records_id", ondelete="CASCADE"))
     summary_id = Column(Integer)
     matrix_id = Column(Integer, ForeignKey("tbl_recsap_matrix.matrix_id", ondelete="SET NULL"))
+    indemnity_matrix_id = Column(Integer, ForeignKey("tbl_indemnity_factor_matrix.indemnity_id", ondelete="SET NULL"))
     crop_stage_no = Column(Integer)
     crop_stage = Column(String(150))
     period_of_exposure = Column(Integer)
     wind_velocity = Column(Integer)
-    indemnity_factor = Column(Numeric(5, 4))
+    indemnity_factor = Column(Numeric(7, 2))
     estimated_damage = Column(Numeric(15, 2), nullable=False)
     final_indemnity_payment = Column(Numeric(15, 2), nullable=False)
     assessment_date = Column(DateTime, server_default=func.now())
@@ -107,6 +118,7 @@ class RiskAssessment(Base):
 
     insurance_record = relationship("InsuranceRecord")
     matrix = relationship("RecsapMatrix")
+    indemnity_matrix = relationship("IndemnityFactorMatrix")
     user = relationship("SystemUser")
 
 

@@ -8,6 +8,7 @@ DROP TABLE IF EXISTS tbl_tropical_cyclone_bulletins CASCADE;
 DROP TABLE IF EXISTS tbl_typhoons CASCADE;
 DROP TABLE IF EXISTS tbl_risk_assessment CASCADE;
 DROP TABLE IF EXISTS tbl_recsap_matrix CASCADE;
+DROP TABLE IF EXISTS tbl_indemnity_factor_matrix CASCADE;
 DROP TABLE IF EXISTS tbl_insurance_records CASCADE;
 DROP TABLE IF EXISTS tbl_farms CASCADE;
 DROP TABLE IF EXISTS tbl_admin_boundaries CASCADE;
@@ -46,13 +47,31 @@ CREATE TABLE tbl_admin_boundaries (
     barangay VARCHAR(100) NOT NULL
 );
 
+-- Step 1 of the parametric lookup: (crop stage, wind signal, exposure hours) -> yield loss %.
+-- Source: PCIC "Table 11" damage matrix (Typhoon-Induced Strong Winds - Rice).
 CREATE TABLE tbl_recsap_matrix (
     matrix_id SERIAL PRIMARY KEY,
     crop_stage_no INT NOT NULL,
     wind_signal_tcws INT NOT NULL,
     exposure_hours INT NOT NULL,
     estimated_yield_loss NUMERIC(5,2) NOT NULL,
-    indemnity_factor NUMERIC(5,4) NOT NULL,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+-- Step 2 of the parametric lookup: (crop stage group, yield loss % bracket) -> indemnity factor.
+-- Source: PCIC Rice Indemnity Factor Table. crop_stage_group uses PCIC's own 5-stage
+-- taxonomy, which differs from tbl_recsap_matrix.crop_stage_no's 3-stage taxonomy
+-- (Booting/Flowering/Maturity); the mapping is Booting->Late Vegetative,
+-- Flowering->Reproductive, Maturity->Maturity (confirmed with Fabio, not stated
+-- verbatim in the manuscript). Brackets are exclusive-lower/inclusive-upper, e.g.
+-- ">10 to 15" means yield_loss_min=10, yield_loss_max=15, matched as
+-- (estimated_yield_loss > yield_loss_min AND estimated_yield_loss <= yield_loss_max).
+CREATE TABLE tbl_indemnity_factor_matrix (
+    indemnity_id SERIAL PRIMARY KEY,
+    crop_stage_group VARCHAR(30) NOT NULL,
+    yield_loss_min NUMERIC(5,2) NOT NULL,
+    yield_loss_max NUMERIC(5,2) NOT NULL,
+    indemnity_factor NUMERIC(7,2) NOT NULL,
     is_active BOOLEAN NOT NULL DEFAULT TRUE
 );
 
@@ -92,11 +111,12 @@ CREATE TABLE tbl_risk_assessment (
     insurance_records_id INT REFERENCES tbl_insurance_records(insurance_records_id) ON DELETE CASCADE,
     summary_id INT,
     matrix_id INT REFERENCES tbl_recsap_matrix(matrix_id) ON DELETE SET NULL,
+    indemnity_matrix_id INT REFERENCES tbl_indemnity_factor_matrix(indemnity_id) ON DELETE SET NULL,
     crop_stage_no INT,
     crop_stage VARCHAR(150),
     period_of_exposure INT,
     wind_velocity INT,
-    indemnity_factor NUMERIC(5,4),
+    indemnity_factor NUMERIC(7,2),
     estimated_damage NUMERIC(15,2) NOT NULL,
     final_indemnity_payment NUMERIC(15,2) NOT NULL,
     assessment_date TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -149,48 +169,84 @@ CREATE TABLE tbl_area_exposure_summary (
 CREATE INDEX idx_farms_location_geom ON tbl_farms USING GIST(location_geom);
 CREATE INDEX idx_tcb_center_geom ON tbl_tropical_cyclone_bulletins USING GIST(center_geom);
 
--- 7. PLACEHOLDER Sprint 4 seed data for tbl_recsap_matrix.
--- These are made-up, deliberately round numbers so the payout engine has something
--- to compute against. REPLACE THIS ENTIRE BLOCK with the real PCIC "Table 11"
--- (Damage Matrix for Parametric Insurance, Typhoon-Induced Strong Winds - Rice)
--- values once available -- see .claude/FUNCTION_CHANGES.md, "Recsap Matrix Persistence"
--- entry, for what's blocked on this. crop_stage_no: 1=Booting, 2=Flowering, 3=Maturity
--- (2 and 3 are confirmed against backend/pabs_results.csv; 1=Booting is inferred from
--- MASTER_DEVELOPMENT_CONTEXT.md's stage ordering, not independently confirmed).
-INSERT INTO tbl_recsap_matrix (crop_stage_no, wind_signal_tcws, exposure_hours, estimated_yield_loss, indemnity_factor) VALUES
-(1, 2, 6, 15.00, 0.15),  -- Booting, signal 2, 6h
-(1, 2, 12, 20.00, 0.20), -- Booting, signal 2, 12h
-(1, 2, 24, 30.00, 0.30), -- Booting, signal 2, 24h
-(1, 3, 6, 20.00, 0.20),  -- Booting, signal 3, 6h
-(1, 3, 12, 30.00, 0.30), -- Booting, signal 3, 12h
-(1, 3, 24, 45.00, 0.45), -- Booting, signal 3, 24h
-(1, 4, 6, 30.00, 0.30),  -- Booting, signal 4, 6h
-(1, 4, 12, 45.00, 0.45), -- Booting, signal 4, 12h
-(1, 4, 24, 60.00, 0.60), -- Booting, signal 4, 24h
-(1, 5, 6, 35.00, 0.35),  -- Booting, signal 5, 6h
-(1, 5, 12, 55.00, 0.55), -- Booting, signal 5, 12h
-(1, 5, 24, 70.00, 0.70), -- Booting, signal 5, 24h
-(2, 2, 6, 20.00, 0.20),  -- Flowering, signal 2, 6h
-(2, 2, 12, 25.00, 0.25), -- Flowering, signal 2, 12h
-(2, 2, 24, 35.00, 0.35), -- Flowering, signal 2, 24h
-(2, 3, 6, 25.00, 0.25),  -- Flowering, signal 3, 6h
-(2, 3, 12, 40.00, 0.40), -- Flowering, signal 3, 12h
-(2, 3, 24, 55.00, 0.55), -- Flowering, signal 3, 24h
-(2, 4, 6, 35.00, 0.35),  -- Flowering, signal 4, 6h
-(2, 4, 12, 55.00, 0.55), -- Flowering, signal 4, 12h
-(2, 4, 24, 70.00, 0.70), -- Flowering, signal 4, 24h
-(2, 5, 6, 45.00, 0.45),  -- Flowering, signal 5, 6h
-(2, 5, 12, 70.00, 0.70), -- Flowering, signal 5, 12h
-(2, 5, 24, 90.00, 0.90), -- Flowering, signal 5, 24h
-(3, 2, 6, 10.00, 0.10),  -- Maturity, signal 2, 6h
-(3, 2, 12, 15.00, 0.15), -- Maturity, signal 2, 12h
-(3, 2, 24, 20.00, 0.20), -- Maturity, signal 2, 24h
-(3, 3, 6, 15.00, 0.15),  -- Maturity, signal 3, 6h
-(3, 3, 12, 25.00, 0.25), -- Maturity, signal 3, 12h
-(3, 3, 24, 30.00, 0.30), -- Maturity, signal 3, 24h
-(3, 4, 6, 20.00, 0.20),  -- Maturity, signal 4, 6h
-(3, 4, 12, 30.00, 0.30), -- Maturity, signal 4, 12h
-(3, 4, 24, 45.00, 0.45), -- Maturity, signal 4, 24h
-(3, 5, 6, 25.00, 0.25),  -- Maturity, signal 5, 6h
-(3, 5, 12, 40.00, 0.40), -- Maturity, signal 5, 12h
-(3, 5, 24, 55.00, 0.55); -- Maturity, signal 5, 24h
+-- 7. Real PCIC seed data for the two-step parametric lookup (replaces the old
+-- made-up placeholder block). Source: PCIC "Table 11" damage matrix and Rice
+-- Indemnity Factor Table, transcribed from the manuscript figures.
+-- crop_stage_no: 1=Booting, 2=Flowering, 3=Maturity (2 and 3 confirmed against
+-- backend/pabs_results.csv; 1=Booting inferred from MASTER_DEVELOPMENT_CONTEXT.md's
+-- stage ordering, not independently confirmed).
+--
+-- Step 1: yield loss %. The source table's "TCWS No.04 (118-184 KPH) AND > 184 KPH"
+-- header groups signal 4 and signal 5 under one set of values, so both are seeded
+-- identically here. The "Maturity, signal 2, 6h" cell reads "<10" in the source
+-- (no exact figure) and is intentionally omitted rather than guessing a number --
+-- it falls under the indemnity table's own >10% floor either way, so the payout
+-- engine already returns $0 for it via the no-matching-rule path.
+INSERT INTO tbl_recsap_matrix (crop_stage_no, wind_signal_tcws, exposure_hours, estimated_yield_loss) VALUES
+(1, 2, 6, 10.00),  -- Booting, signal 2, 6h
+(1, 2, 12, 15.00), -- Booting, signal 2, 12h
+(1, 2, 24, 20.00), -- Booting, signal 2, 24h
+(2, 2, 6, 15.00),  -- Flowering, signal 2, 6h
+(2, 2, 12, 20.00), -- Flowering, signal 2, 12h
+(2, 2, 24, 25.00), -- Flowering, signal 2, 24h
+(3, 2, 12, 10.00), -- Maturity, signal 2, 12h
+(3, 2, 24, 15.00), -- Maturity, signal 2, 24h
+(1, 3, 6, 15.00),  -- Booting, signal 3, 6h
+(1, 3, 12, 20.00), -- Booting, signal 3, 12h
+(1, 3, 24, 25.00), -- Booting, signal 3, 24h
+(2, 3, 6, 20.00),  -- Flowering, signal 3, 6h
+(2, 3, 12, 25.00), -- Flowering, signal 3, 12h
+(2, 3, 24, 30.00), -- Flowering, signal 3, 24h
+(3, 3, 6, 10.00),  -- Maturity, signal 3, 6h
+(3, 3, 12, 15.00), -- Maturity, signal 3, 12h
+(3, 3, 24, 20.00), -- Maturity, signal 3, 24h
+(1, 4, 6, 20.00),  -- Booting, signal 4, 6h
+(1, 4, 12, 25.00), -- Booting, signal 4, 12h
+(1, 4, 24, 30.00), -- Booting, signal 4, 24h
+(2, 4, 6, 25.00),  -- Flowering, signal 4, 6h
+(2, 4, 12, 30.00), -- Flowering, signal 4, 12h
+(2, 4, 24, 35.00), -- Flowering, signal 4, 24h
+(3, 4, 6, 15.00),  -- Maturity, signal 4, 6h
+(3, 4, 12, 20.00), -- Maturity, signal 4, 12h
+(3, 4, 24, 25.00), -- Maturity, signal 4, 24h
+(1, 5, 6, 20.00),  -- Booting, signal 5 (>184kph), 6h
+(1, 5, 12, 25.00), -- Booting, signal 5 (>184kph), 12h
+(1, 5, 24, 30.00), -- Booting, signal 5 (>184kph), 24h
+(2, 5, 6, 25.00),  -- Flowering, signal 5 (>184kph), 6h
+(2, 5, 12, 30.00), -- Flowering, signal 5 (>184kph), 12h
+(2, 5, 24, 35.00), -- Flowering, signal 5 (>184kph), 24h
+(3, 5, 6, 15.00),  -- Maturity, signal 5 (>184kph), 6h
+(3, 5, 12, 20.00), -- Maturity, signal 5 (>184kph), 12h
+(3, 5, 24, 25.00); -- Maturity, signal 5 (>184kph), 24h
+
+-- Step 2: indemnity factor by yield loss % bracket and PCIC's 5-stage taxonomy.
+-- All 5 stage-groups from the source table are seeded for fidelity, though only 3
+-- (Late Vegetative <- Booting, Reproductive <- Flowering, Maturity <- Maturity) are
+-- reachable via crop_stage_no's mapping today -- Early Vegetative and Late
+-- Reproductive sit unqueried until crop-stage tracking covers those stages.
+INSERT INTO tbl_indemnity_factor_matrix (crop_stage_group, yield_loss_min, yield_loss_max, indemnity_factor) VALUES
+('Early Vegetative', 10.00, 15.00, 146.00),
+('Early Vegetative', 15.00, 20.00, 198.00),
+('Early Vegetative', 20.00, 25.00, 248.00),
+('Early Vegetative', 25.00, 30.00, 294.00),
+('Early Vegetative', 30.00, 35.00, 336.00),
+('Late Vegetative', 10.00, 15.00, 170.00),
+('Late Vegetative', 15.00, 20.00, 231.00),
+('Late Vegetative', 20.00, 25.00, 289.00),
+('Late Vegetative', 25.00, 30.00, 343.00),
+('Late Vegetative', 30.00, 35.00, 392.00),
+('Reproductive', 10.00, 15.00, 194.00),
+('Reproductive', 15.00, 20.00, 264.00),
+('Reproductive', 20.00, 25.00, 330.00),
+('Reproductive', 25.00, 30.00, 392.00),
+('Reproductive', 30.00, 35.00, 448.00),
+('Late Reproductive', 10.00, 15.00, 218.00),
+('Late Reproductive', 15.00, 20.00, 297.00),
+('Late Reproductive', 20.00, 25.00, 372.00),
+('Late Reproductive', 25.00, 30.00, 441.00),
+('Late Reproductive', 30.00, 35.00, 504.00),
+('Maturity', 10.00, 15.00, 243.00),
+('Maturity', 15.00, 20.00, 330.00),
+('Maturity', 20.00, 25.00, 413.00),
+('Maturity', 25.00, 30.00, 490.00),
+('Maturity', 30.00, 35.00, 560.00);
