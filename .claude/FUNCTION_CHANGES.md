@@ -152,3 +152,17 @@ Checked Sprint 1's "[Done]" items in `.claude/DEVELOPMENT_PLAN.md` against `.cla
 * Adjacent, out of scope: `upload.py`'s pre-existing `adjuster_calculation` bug (passed into `RiskAssessment` where no such column exists — flagged in the 2026-07-21 "Recsap Matrix Persistence" entry above, still unfixed). Not touched here since it's Sprint 1/CSV path, unrelated to GPX/exposure.
 * Branch is **not pushed** and has **no PR open** — needs review before merging into `main`.
 
+---
+
+## [2026-07-21] - PAGASA Scraper Fix: Dead Index URL & Overly-Strict PDF Filter
+
+**Branch:** `cristian/backend/sprint3-gpx-exposure` (committed locally, not pushed, no PR open yet).
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* **Bug fix:** `PAGASA_INDEX_URL` changed from `.../tamss/weather/bulletin.html` to `.../tamss/weather/bulletin/` — the `.html` path was not the live directory-listing endpoint. The trailing slash is required, not stylistic: `fetch_active_bulletin_links()` derives the base URL via `PAGASA_INDEX_URL.rsplit("/", 1)[0]`, which only strips the correct (empty) trailing segment when the constant ends in `/`; without it, `rsplit` would strip the real `bulletin` path segment and misresolve every relative link.
+* **Bug fix:** Removed the `"bulletin" in href.lower()` condition from `fetch_active_bulletin_links()`'s link filter (now just `href.endswith(".pdf")`). Real PAGASA filenames follow a `TCB#<n>_<stormname>.pdf` pattern (e.g. `TCB#10_francisco.pdf`) with no literal "bulletin" substring, so the old filter silently matched zero links against the live server. Verified against the live index: 0 links found before the fix, 55 found after.
+
+### Status / Next Steps
+* Verified against the live PAGASA server only (`fetch_active_bulletin_links()`); `download_bulletin_pdf()` / `parse_bulletin_text()` / `save_bulletin_to_db()` were not exercised against a real downloaded PDF as part of this fix.
+* Branch is **not pushed** and has **no PR open** — needs review before merging into `main`.
+

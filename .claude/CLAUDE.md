@@ -60,6 +60,11 @@ If documentation conflicts:
 * When a task needs a *sequence* of these (e.g. push, then delete a remote branch, then verify), give Fabio one command at a time — don't dump the whole sequence and assume it all ran. After each command, use AskUserQuestion to ask whether he ran it (and whether it succeeded) before continuing to the next step or treating it as done. Never assume success and proceed silently.
 * Local-only git commands (`commit`, `merge`, `branch`, `checkout`, `log`, `diff`, `status`) are unaffected and should still be run directly.
 
+## Python Environment (venv) Execution
+* Do not activate a project virtual environment (`.venv`, `venv`), install/upgrade packages into it, or run backend scripts/tests through it via tool calls. This is Fabio's local environment; changing or executing in it silently is the same category of overreach as running `git push` myself.
+* Any command needed to verify a backend change (running a script, installing a missing dependency, running the test suite) must be handed to Fabio as the exact command to run himself, in his own terminal.
+* When a task needs a *sequence* of these, give Fabio one command at a time — don't dump the whole sequence and assume it all ran. After each command, use AskUserQuestion to ask whether he ran it and what the output/result was, before continuing to the next step or treating it as done. Never assume success and proceed silently.
+
 ## Changelog Requirement
 * Before handing off any commit for Fabio to push, update [.claude/FUNCTION_CHANGES.md](.claude/FUNCTION_CHANGES.md) in the same commit with an entry documenting what changed and why (functions, classes, files touched), following the file's existing dated/sprint-grouped format.
 * This applies to every commit destined for push, not just sprint-completion milestones.

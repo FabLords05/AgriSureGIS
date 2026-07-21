@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from app.models.models import Typhoon, TropicalCycloneBulletin, TcbSignal, AdminBoundary
 
 # Base URL for PAGASA tropical cyclone bulletins (mock or real index page)
-PAGASA_INDEX_URL = "https://pubfiles.pagasa.dost.gov.ph/tamss/weather/bulletin.html"
+PAGASA_INDEX_URL = "https://pubfiles.pagasa.dost.gov.ph/tamss/weather/bulletin/"
 
 class BulletinParserService:
     @staticmethod
@@ -29,7 +29,7 @@ class BulletinParserService:
                 pdf_links = []
                 for link in soup.find_all("a", href=True):
                     href = link["href"]
-                    if href.endswith(".pdf") and "bulletin" in href.lower():
+                    if href.endswith(".pdf"):
                         # Resolve relative links to absolute URLs if necessary
                         if not href.startswith("http"):
                             base_url = PAGASA_INDEX_URL.rsplit("/", 1)[0]
