@@ -3,11 +3,12 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import pandas as pd
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.models import models
+from app.services.gpx_parser import GpxParserService
 
 router = APIRouter(prefix="/api/upload", tags=["upload"])
 
@@ -228,4 +229,52 @@ def upload_csv(
         "rows_processed": processed_rows,
         "rows_inserted": inserted_rows,
         "rows_skipped": skipped_rows,
+    }
+
+
+@router.post("/gpx", status_code=status.HTTP_200_OK)
+def upload_gpx(
+    file: UploadFile = File(...),
+    farmer_id: int = Form(...),
+    farm_id: int = Form(...),
+    db: Session = Depends(get_db),
+):
+    if not file.filename or not file.filename.lower().endswith(".gpx"):
+        raise HTTPException(status_code=400, detail="Please upload a GPX file.")
+
+    farm = (
+        db.query(models.Farm)
+        .filter(models.Farm.farm_id == farm_id, models.Farm.farmer_id == farmer_id)
+        .first()
+    )
+    if farm is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Farm not found for the given farmer_id and farm_id.",
+        )
+
+    if file.file.seekable():
+        file.file.seek(0)
+    raw_bytes = file.file.read()
+
+    try:
+        gpx_text = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(status_code=400, detail="GPX file must be UTF-8 encoded.") from exc
+
+    try:
+        location_geom = GpxParserService.parse_gpx_to_polygon(gpx_text)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Unable to parse GPX file: {exc}") from exc
+
+    farm.location_geom = location_geom
+    db.commit()
+    db.refresh(farm)
+
+    return {
+        "status": "success",
+        "message": "Farm boundary geometry updated from GPX file.",
+        "farm_id": farm.farm_id,
     }

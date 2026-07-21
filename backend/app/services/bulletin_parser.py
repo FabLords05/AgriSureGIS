@@ -3,6 +3,7 @@ import os
 import httpx
 from bs4 import BeautifulSoup
 import pdfplumber
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 from geoalchemy2.elements import WKTElement
 from datetime import datetime, timezone
@@ -10,7 +11,7 @@ from datetime import datetime, timezone
 from app.models.models import Typhoon, TropicalCycloneBulletin, TcbSignal, AdminBoundary
 
 # Base URL for PAGASA tropical cyclone bulletins (mock or real index page)
-PAGASA_INDEX_URL = "https://pubfiles.pagasa.dost.gov.ph/tamss/weather/bulletin.html"
+PAGASA_INDEX_URL = "https://pubfiles.pagasa.dost.gov.ph/tamss/weather/bulletin/"
 
 class BulletinParserService:
     @staticmethod
@@ -28,7 +29,7 @@ class BulletinParserService:
                 pdf_links = []
                 for link in soup.find_all("a", href=True):
                     href = link["href"]
-                    if href.endswith(".pdf") and "bulletin" in href.lower():
+                    if href.endswith(".pdf"):
                         # Resolve relative links to absolute URLs if necessary
                         if not href.startswith("http"):
                             base_url = PAGASA_INDEX_URL.rsplit("/", 1)[0]
@@ -95,6 +96,26 @@ class BulletinParserService:
         lat = float(coords_match.group(1)) if coords_match else 0.0
         lon = float(coords_match.group(2)) if coords_match else 0.0
 
+        # 4b. Parse Issued-At Timestamp
+        # Standard PAGASA phrasing: "Issued at 5:00 PM, 15 October 2024" (wording around
+        # the date varies between bulletins, so this is intentionally loose — falls back
+        # to None, which callers treat as "use the current time" rather than guessing).
+        issued_at = None
+        issued_match = re.search(
+            r"Issued\s+at\s+(\d{1,2}):(\d{2})\s*(AM|PM)[^,\d]*,?\s*(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})",
+            text,
+            re.IGNORECASE,
+        )
+        if issued_match:
+            hour, minute, meridiem, day, month_name, year = issued_match.groups()
+            try:
+                issued_at = datetime.strptime(
+                    f"{day} {month_name} {year} {hour}:{minute} {meridiem.upper()}",
+                    "%d %B %Y %I:%M %p",
+                ).replace(tzinfo=timezone.utc)
+            except ValueError:
+                issued_at = None
+
         # 5. Extract Signal Text Blocks (Signal 1 to 5)
         signals_data = {}
         # Find start indices of signal blocks
@@ -120,6 +141,7 @@ class BulletinParserService:
             "gustiness": gustiness,
             "latitude": lat,
             "longitude": lon,
+            "issued_at": issued_at,
             "signals": signals_data,
             "raw_text": text
         }
@@ -163,8 +185,8 @@ class BulletinParserService:
                 category=parsed_data["category"],
                 max_sustained_winds=parsed_data["max_sustained_winds"],
                 gustiness=parsed_data["gustiness"],
-                issued_at=datetime.now(timezone.utc),  # Placeholder, PAGASA date parsing optional
-                expires_at=datetime.now(timezone.utc),  # Expiry date placeholder
+                issued_at=parsed_data.get("issued_at") or datetime.now(timezone.utc),
+                expires_at=datetime.now(timezone.utc),  # Expiry date placeholder — PAGASA bulletins don't reliably state their own expiry
                 center_geom=center_geom
             )
             db.add(bulletin)
