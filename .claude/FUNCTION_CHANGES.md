@@ -242,3 +242,43 @@ Both branches above are now on `develop`, closing out the "not merged" status no
 
 Outstanding items from both entries above (Table 11 placeholder data, `GET /api/assessments/` duplication, live-DB verification, `boundary_id`/`geom` FK gap) are unchanged by the merge and still need follow-up.
 
+---
+
+## [2026-07-21] - Real PCIC Table 11 Data: Recsap Matrix Split Into Two Lookups
+
+Resolves the "Table 11 placeholder data" blocker noted in the two entries above. Fabio supplied the actual PCIC damage-matrix and Rice Indemnity Factor Table figures (screenshots transcribed from the manuscript). While wiring them in, found the real tables don't share one key structure the way the placeholder assumed — they're two chained lookups, not one flat table — and that `indemnity_factor`'s column precision couldn't have held the real values anyway.
+
+### Two things confirmed with Fabio before writing code
+1. **Growth-stage taxonomy mismatch:** the yield-loss matrix uses 3 stages (Booting, Flowering, Maturity — `tbl_recsap_matrix.crop_stage_no` 1/2/3), but the indemnity-factor table uses PCIC's own 5-stage taxonomy (Early Vegetative, Late Vegetative, Reproductive, Late Reproductive, Maturity). The manuscript's worked example only confirms Flowering → Reproductive. Fabio confirmed Booting → Late Vegetative; Maturity → Maturity by same name. Early Vegetative and Late Reproductive are consequently unreachable via the current 3-stage crop tracking, but per a follow-up request from Fabio all 5 stage-groups were seeded anyway for fidelity to the source table (see updated bullet 1 below).
+2. **Data completeness:** the 3 screenshots are the complete source tables — yield loss ≤10% has no bracket (no payout) and 30-35% is the top bracket, not partial data.
+
+### 1. File: `backend/init_schema.sql`
+* **Schema:** `tbl_recsap_matrix` dropped its `indemnity_factor` column — it now only resolves step 1, `(crop_stage_no, wind_signal_tcws, exposure_hours) → estimated_yield_loss`.
+* **Schema:** Added **`tbl_indemnity_factor_matrix`** for step 2: `(crop_stage_group, yield_loss_min, yield_loss_max) → indemnity_factor`. Brackets are exclusive-lower/inclusive-upper per the source table's ">10 to 15" style labels. `indemnity_factor` is `NUMERIC(7,2)`, not `NUMERIC(5,4)` — the old precision (max 9.9999) couldn't have stored real values like 392.00 or 560.00 even before this change; this was a latent bug in the Sprint 4 placeholder work, not something introduced by real data.
+* **Schema:** `tbl_risk_assessment.indemnity_factor` widened to `NUMERIC(7,2)` to match; added `indemnity_matrix_id` FK to `tbl_indemnity_factor_matrix`, alongside the existing `matrix_id` FK to `tbl_recsap_matrix`.
+* **Seed data:** Replaced the 36-row made-up placeholder block with the real transcribed values: 35 `tbl_recsap_matrix` rows (one cell, Maturity/signal-2/6h, reads "<10" with no exact figure in the source and was intentionally omitted rather than inventing a number — it resolves to $0 payout either way since the indemnity table's floor is >10%) and 25 `tbl_indemnity_factor_matrix` rows (5 yield-loss brackets × all 5 stage groups, per Fabio's follow-up request — only 3 of the 5 are reachable by the app today, see taxonomy note above). The source table's "TCWS No.04 (118-184 KPH) AND > 184 KPH" header groups wind signals 4 and 5 under identical values, so both were seeded identically.
+
+### 2. File: `backend/app/models/models.py`
+* Trimmed **`RecsapMatrix`**: removed `indemnity_factor`.
+* Added **`IndemnityFactorMatrix`**: mapped `tbl_indemnity_factor_matrix`.
+* Updated **`RiskAssessment`**: `indemnity_factor` widened to `Numeric(7, 2)`; added `indemnity_matrix_id` FK column and `indemnity_matrix` relationship.
+
+### 3. File: `backend/app/core/indemnity_calc.py`
+* Added **`CROP_STAGE_TO_INDEMNITY_GROUP`**: the 3-stage → 5-stage taxonomy mapping confirmed with Fabio above.
+* Added **`ParametricRule`** dataclass: bundles both lookup steps' results (`matrix_id`, `indemnity_matrix_id`, `estimated_yield_loss`, `indemnity_factor`) so callers get one object instead of juggling two query results.
+* Rewrote **`ParametricAssessment.get_matrix_rule()`**: now chains the two lookups — queries `tbl_recsap_matrix` for yield loss %, maps the crop stage to its indemnity-table stage group, then queries `tbl_indemnity_factor_matrix` for the bracket containing that yield loss %. Returns `None` (→ `$0` payout via the existing `calculate_final_payout()` path, unchanged) if either step has no match.
+
+### 4. File: `backend/app/services/assessment_service.py`
+* `calculate_for_bulletin()`: now also sets `existing.indemnity_matrix_id = rule.indemnity_matrix_id` alongside the existing `matrix_id` assignment.
+
+### 5. File: `backend/tests/test_assessment_service.py`
+* Updated `_build_mock_db()` and the eligible-policy test to mock both chained queries (`RecsapMatrix` then `IndemnityFactorMatrix`) instead of one flat `RecsapMatrix` row, and to use a real indemnity value (330.00, from the Reproductive/>20-25% bracket) instead of the old made-up `0.25` multiplier. Recomputed the expected payout accordingly (`(50000/1000) × 330.00 × 2.5 = 41250.0`, was `31.25`).
+
+### 6. File: `docs/RECSAP_MATRIX_SCHEMA.md` (new)
+* Added a text record of the new `tbl_recsap_matrix` / `tbl_indemnity_factor_matrix` / `tbl_risk_assessment` structure — column-by-column tables, the 3-stage→5-stage taxonomy mapping, and the full seeded source data (yield-loss and indemnity-factor tables) — per Fabio's request. `docs/ERD.drawio.png` is a static PNG exported from a `.drawio` source not checked into this repo, so it can't be regenerated here; this file is the interim text record until the visual diagram is updated separately.
+
+### Status / Next Steps
+* Not run against a live database or the test suite — Fabio needs to re-run `init_schema.sql` and the test suite himself (per `CLAUDE.md`'s DB/venv handoff rules) to confirm the migration and tests pass.
+* `docs/ERD.drawio.png` itself is now stale (still shows the old single `tbl_recsap_matrix` shape) and needs a manual update in the drawio tool by whoever owns that source file — `docs/RECSAP_MATRIX_SCHEMA.md` is a stopgap, not a replacement.
+* This branch/commit is not yet pushed — needs to go through the same handoff flow as prior entries.
+

@@ -103,6 +103,7 @@ class AssessmentService:
                     db.add(existing)
 
                 existing.matrix_id = rule.matrix_id
+                existing.indemnity_matrix_id = rule.indemnity_matrix_id
                 existing.crop_stage_no = prior.crop_stage_no
                 existing.crop_stage = prior.crop_stage
                 existing.period_of_exposure = exposure_hours

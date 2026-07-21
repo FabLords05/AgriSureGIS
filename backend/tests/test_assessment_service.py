@@ -3,7 +3,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
-from app.models.models import InsuranceRecord, RecsapMatrix, RiskAssessment, TropicalCycloneBulletin
+from app.models.models import IndemnityFactorMatrix, InsuranceRecord, RecsapMatrix, RiskAssessment, TropicalCycloneBulletin
 from app.services.assessment_service import AssessmentService
 
 
@@ -35,7 +35,15 @@ class AssessmentServiceTests(unittest.TestCase):
             expiry_date=date(2026, 12, 31),
         )
 
-    def _build_mock_db(self, bulletin, insurance_records, prior_assessment, matrix_rule, existing_assessment=None):
+    def _build_mock_db(
+        self,
+        bulletin,
+        insurance_records,
+        prior_assessment,
+        yield_loss_rule,
+        indemnity_rule=None,
+        existing_assessment=None,
+    ):
         mock_db = MagicMock()
 
         bulletin_query = MagicMock()
@@ -44,8 +52,13 @@ class AssessmentServiceTests(unittest.TestCase):
         insurance_query = MagicMock()
         insurance_query.join.return_value.filter.return_value.all.return_value = insurance_records
 
-        matrix_query = MagicMock()
-        matrix_query.filter.return_value.first.return_value = matrix_rule
+        # get_matrix_rule() does two chained lookups: RecsapMatrix (yield loss %)
+        # then, only if that matched, IndemnityFactorMatrix (indemnity factor).
+        yield_loss_query = MagicMock()
+        yield_loss_query.filter.return_value.first.return_value = yield_loss_rule
+
+        indemnity_query = MagicMock()
+        indemnity_query.filter.return_value.first.return_value = indemnity_rule
 
         risk_assessment_returns = []
         for _ in insurance_records:
@@ -62,7 +75,9 @@ class AssessmentServiceTests(unittest.TestCase):
             if model is InsuranceRecord:
                 return insurance_query
             if model is RecsapMatrix:
-                return matrix_query
+                return yield_loss_query
+            if model is IndemnityFactorMatrix:
+                return indemnity_query
             if model is RiskAssessment:
                 return next(risk_assessment_calls)
             raise AssertionError(f"Unexpected model queried in test: {model}")
@@ -78,11 +93,11 @@ class AssessmentServiceTests(unittest.TestCase):
 
         insurance = self._insurance_record()
         prior = MagicMock(spec=RiskAssessment, crop_stage_no=2, crop_stage="Flowering")
-        matrix_rule = MagicMock(
-            spec=RecsapMatrix, matrix_id=3, estimated_yield_loss=Decimal("25.00"), indemnity_factor=Decimal("0.25")
-        )
+        # Flowering -> Reproductive stage group; 25.00% falls in the >20 to 25 bracket.
+        yield_loss_rule = MagicMock(spec=RecsapMatrix, matrix_id=3, estimated_yield_loss=Decimal("25.00"))
+        indemnity_rule = MagicMock(spec=IndemnityFactorMatrix, indemnity_id=8, indemnity_factor=Decimal("330.00"))
 
-        mock_db = self._build_mock_db(bulletin, [insurance], prior, matrix_rule)
+        mock_db = self._build_mock_db(bulletin, [insurance], prior, yield_loss_rule, indemnity_rule)
 
         results = AssessmentService.calculate_for_bulletin(1, 12, mock_db)
 
@@ -91,12 +106,13 @@ class AssessmentServiceTests(unittest.TestCase):
         self.assertEqual(result.insurance_records_id, 7)
         self.assertEqual(result.summary_id, 99)
         self.assertEqual(result.matrix_id, 3)
+        self.assertEqual(result.indemnity_matrix_id, 8)
         self.assertEqual(result.crop_stage_no, 2)
         self.assertEqual(result.crop_stage, "Flowering")
         self.assertEqual(result.period_of_exposure, 12)
         self.assertEqual(result.wind_velocity, 3)
-        # I = (AC / 1000) * IF * Area = (50000 / 1000) * 0.25 * 2.5 = 31.25
-        self.assertEqual(result.final_indemnity_payment, 31.25)
+        # I = (AC / 1000) * IF * Area = (50000 / 1000) * 330.00 * 2.5 = 41250.0
+        self.assertEqual(result.final_indemnity_payment, 41250.0)
         self.assertEqual(result.estimated_damage, 12500.0)  # 50000 * 25 / 100
         mock_db.commit.assert_called_once()
 
@@ -109,7 +125,7 @@ class AssessmentServiceTests(unittest.TestCase):
         insurance = self._insurance_record()
         prior = MagicMock(spec=RiskAssessment, crop_stage_no=5, crop_stage="Ripening")
 
-        mock_db = self._build_mock_db(bulletin, [insurance], prior, matrix_rule=None)
+        mock_db = self._build_mock_db(bulletin, [insurance], prior, yield_loss_rule=None)
 
         results = AssessmentService.calculate_for_bulletin(1, 12, mock_db)
 
@@ -122,7 +138,7 @@ class AssessmentServiceTests(unittest.TestCase):
         summary = self._summary(max_signal_level=1)
         mock_compute.return_value = [summary]
 
-        mock_db = self._build_mock_db(bulletin, [], prior_assessment=None, matrix_rule=None)
+        mock_db = self._build_mock_db(bulletin, [], prior_assessment=None, yield_loss_rule=None)
 
         results = AssessmentService.calculate_for_bulletin(1, 12, mock_db)
 
