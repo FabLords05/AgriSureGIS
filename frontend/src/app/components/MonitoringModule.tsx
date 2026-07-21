@@ -1,48 +1,47 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Card, CardContent, Button, Chip, Alert } from '@mui/material';
-import { CloudDownload, AlertCircle, CheckCircle, Clock, Download, Bell } from 'lucide-react';
-
-interface TyphoonBulletin {
-  id: string;
-  name: string;
-  timestamp: string;
-  signal: string;
-  status: 'active' | 'completed';
-  downloaded: boolean;
-}
+import { CloudDownload, AlertCircle, Clock, Download, Bell } from 'lucide-react';
+import { getBulletins, parseBulletins, type Bulletin } from '@/lib/api';
 
 export function MonitoringModule() {
-  const [bulletins] = useState<TyphoonBulletin[]>([
-    {
-      id: 'TCB-001',
-      name: 'Typhoon AMBO',
-      timestamp: '2026-05-23 14:00:00',
-      signal: 'Signal No. 3',
-      status: 'active',
-      downloaded: true
-    },
-    {
-      id: 'TCB-002',
-      name: 'Typhoon AMBO',
-      timestamp: '2026-05-23 11:00:00',
-      signal: 'Signal No. 2',
-      status: 'completed',
-      downloaded: true
-    },
-    {
-      id: 'TCB-003',
-      name: 'Typhoon AMBO',
-      timestamp: '2026-05-23 08:00:00',
-      signal: 'Signal No. 1',
-      status: 'completed',
-      downloaded: true
-    }
-  ]);
+  const [bulletins, setBulletins] = useState<Bulletin[]>([]);
+  const [isLoadingBulletins, setIsLoadingBulletins] = useState(false);
+  const [isParsing, setIsParsing] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
-  const [latestAlert] = useState({
+  const loadBulletins = async () => {
+    setIsLoadingBulletins(true);
+    setLoadError(null);
+    try {
+      setBulletins(await getBulletins());
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : 'Failed to load bulletins.');
+    } finally {
+      setIsLoadingBulletins(false);
+    }
+  };
+
+  useEffect(() => {
+    loadBulletins();
+  }, []);
+
+  const latestAlert = {
     message: 'New PAGASA Tropical Cyclone Bulletin detected!',
     timestamp: '2 minutes ago'
-  });
+  };
+
+  const handleParseLatest = async () => {
+    setIsParsing(true);
+    setLoadError(null);
+    try {
+      await parseBulletins();
+      await loadBulletins();
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : 'Failed to parse latest bulletin.');
+    } finally {
+      setIsParsing(false);
+    }
+  };
 
   return (
     <div className="p-6 space-y-6">
@@ -137,84 +136,68 @@ export function MonitoringModule() {
             <Button
               variant="contained"
               startIcon={<CloudDownload />}
+              onClick={handleParseLatest}
+              disabled={isParsing}
               sx={{
                 bgcolor: 'var(--primary)',
                 '&:hover': { bgcolor: 'var(--green-600)' }
               }}
             >
-              Parse Latest Bulletin
+              {isParsing ? 'Parsing...' : 'Parse Latest Bulletin'}
             </Button>
           </div>
+
+          {loadError && (
+            <div
+              className="mb-4 text-sm p-3 rounded"
+              style={{ backgroundColor: 'var(--destructive)', color: 'white' }}
+            >
+              {loadError}
+            </div>
+          )}
+
+          {isLoadingBulletins && (
+            <p className="text-sm text-muted-foreground mb-3">Loading bulletins...</p>
+          )}
+
+          {!isLoadingBulletins && bulletins.length === 0 && !loadError && (
+            <p className="text-sm text-muted-foreground mb-3">No bulletins found.</p>
+          )}
 
           <div className="space-y-3">
             {bulletins.map((bulletin) => (
               <div
-                key={bulletin.id}
+                key={bulletin.tcb_id}
                 className="flex items-center justify-between p-4 rounded-lg border"
                 style={{ borderColor: 'var(--border)', backgroundColor: 'var(--card)' }}
               >
                 <div className="flex items-center gap-4">
                   <div
                     className="w-12 h-12 rounded-full flex items-center justify-center"
-                    style={{
-                      backgroundColor: bulletin.status === 'active' ? 'var(--green-100)' : 'var(--muted)'
-                    }}
+                    style={{ backgroundColor: 'var(--muted)' }}
                   >
-                    {bulletin.status === 'active' ? (
-                      <AlertCircle className="w-6 h-6" style={{ color: 'var(--green-500)' }} />
-                    ) : (
-                      <CheckCircle className="w-6 h-6" style={{ color: 'var(--muted-foreground)' }} />
-                    )}
+                    <AlertCircle className="w-6 h-6" style={{ color: 'var(--muted-foreground)' }} />
                   </div>
 
                   <div>
                     <div className="flex items-center gap-2">
-                      <h4 className="font-medium">{bulletin.name}</h4>
-                      <Chip
-                        label={bulletin.signal}
-                        size="small"
-                        sx={{
-                          bgcolor: 'var(--accent)',
-                          color: 'var(--accent-foreground)',
-                          fontSize: '0.75rem'
-                        }}
-                      />
-                      {bulletin.status === 'active' && (
+                      <h4 className="font-medium">{bulletin.typhoon_name}</h4>
+                      {bulletin.category && (
                         <Chip
-                          label="ACTIVE"
+                          label={bulletin.category}
                           size="small"
                           sx={{
-                            bgcolor: 'var(--green-500)',
-                            color: 'white',
+                            bgcolor: 'var(--accent)',
+                            color: 'var(--accent-foreground)',
                             fontSize: '0.75rem'
                           }}
                         />
                       )}
                     </div>
                     <p className="text-sm text-muted-foreground mt-1">
-                      {bulletin.id} - {bulletin.timestamp}
+                      TCB-{bulletin.tcb_id} (Bulletin #{bulletin.bulletin_count}) - {bulletin.issued_at ?? 'Unknown time'}
                     </p>
                   </div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  {bulletin.downloaded && (
-                    <Chip
-                      icon={<CheckCircle className="w-4 h-4" />}
-                      label="Downloaded"
-                      size="small"
-                      variant="outlined"
-                      sx={{ borderColor: 'var(--green-500)', color: 'var(--green-500)' }}
-                    />
-                  )}
-                  <Button
-                    variant="outlined"
-                    size="small"
-                    startIcon={<Download />}
-                    sx={{ borderColor: 'var(--border)' }}
-                  >
-                    View PDF
-                  </Button>
                 </div>
               </div>
             ))}

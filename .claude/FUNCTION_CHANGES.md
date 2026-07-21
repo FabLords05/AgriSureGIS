@@ -99,3 +99,31 @@ Checked Sprint 1's "[Done]" items in `.claude/DEVELOPMENT_PLAN.md` against `.cla
 * **Changes to Documentation:**
   * Added a **Tooling** bullet under Fabio Joseph Tugonon's entry noting his use of Claude Code as an AI pair-programming assistant for implementation, documentation, and workflow tasks in this repository.
 
+---
+
+## [2026-07-21] - Frontend-Backend Wiring (Sprint 3)
+
+Connected the static React frontend to the backend endpoints that already exist and match its data needs.
+
+### 1. File: `frontend/src/lib/api.ts` (new)
+* **Changes to Functions:**
+  * Added **`uploadCsv()`** → routes to `POST /api/upload/csv`.
+  * Added **`getBulletins()`** → routes to `GET /api/bulletins/`.
+  * Added **`parseBulletins()`** → routes to `POST /api/bulletins/parse`.
+
+### 2. File: `frontend/src/app/components/SpatialModule.tsx`
+* **Changes to Functions/Behavior:**
+  * Added **`handleCsvFileSelected()`**: wires the CSV dropzone's file input to `uploadCsv()`, with a success/error status banner.
+
+### 3. File: `frontend/src/app/components/MonitoringModule.tsx`
+* **Changes to Functions/Behavior:**
+  * Added **`loadBulletins()`**: fetches the bulletin list from `getBulletins()` on mount, replacing the mock array.
+  * Added **`handleParseLatest()`**: wires the "Parse Latest Bulletin" button to `parseBulletins()`, then reloads the list.
+
+### 4. File: `frontend/tsconfig.json`
+* **Changes to Configuration:**
+  * Added `"ignoreDeprecations": "6.0"` to silence a TypeScript warning on `baseUrl` (still required for the `@/*` path alias).
+
+### Status / Next Steps
+* Not pushed yet — awaiting Fabio's push per the git workflow rules in `.claude/CLAUDE.md`.
+
