@@ -65,6 +65,15 @@ If documentation conflicts:
 * Any command needed to verify a backend change (running a script, installing a missing dependency, running the test suite) must be handed to Fabio as the exact command to run himself, in his own terminal.
 * When a task needs a *sequence* of these, give Fabio one command at a time — don't dump the whole sequence and assume it all ran. After each command, use AskUserQuestion to ask whether he ran it and what the output/result was, before continuing to the next step or treating it as done. Never assume success and proceed silently.
 
+## Database Command Execution (sudo / psql)
+* Do not run `sudo` commands (e.g. `sudo systemctl start postgresql`), connect via raw `psql`, or run DB provisioning/schema commands (`sudo -iu postgres psql`, `CREATE USER`, `CREATE DATABASE`, `psql -U agrisure_admin -d agrisure_db -f init_schema.sql`) via tool calls. Fabio is the DB Admin — these need his `sudo` access and DB superuser credentials, which live only in his environment. This is the same class of overreach as `git push` or activating his venv.
+* Any command needed to start/check the PostgreSQL service, create or provision the database/user, or apply/re-apply `init_schema.sql` must be handed to Fabio as the exact command to run himself, in his own terminal.
+* When a task needs a *sequence* of these, give Fabio one command at a time and use AskUserQuestion to confirm what happened before continuing or treating it as done. Never assume success and proceed silently.
+
+## Frontend Local Environment Execution
+* Do not run `npm install`/`npm i`, `npm run dev`, `vite build`, or other commands that install into `frontend/node_modules` or start/build the frontend via tool calls. This is Fabio's local environment, same category as the backend venv rule above.
+* Hand these off as the exact command for Fabio to run himself, one at a time, confirming the result via AskUserQuestion before continuing.
+
 ## Changelog Requirement
 * Before handing off any commit for Fabio to push, update [.claude/FUNCTION_CHANGES.md](.claude/FUNCTION_CHANGES.md) in the same commit with an entry documenting what changed and why (functions, classes, files touched), following the file's existing dated/sprint-grouped format.
 * This applies to every commit destined for push, not just sprint-completion milestones.

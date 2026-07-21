@@ -166,3 +166,15 @@ Checked Sprint 1's "[Done]" items in `.claude/DEVELOPMENT_PLAN.md` against `.cla
 * Verified against the live PAGASA server only (`fetch_active_bulletin_links()`); `download_bulletin_pdf()` / `parse_bulletin_text()` / `save_bulletin_to_db()` were not exercised against a real downloaded PDF as part of this fix.
 * Branch is **not pushed** and has **no PR open** — needs review before merging into `main`.
 
+---
+
+## [2026-07-21] - CLAUDE.md: Handoff Rules for DB/sudo and Frontend Commands
+
+**Branch:** `cristian/backend/sprint3-gpx-exposure` (committed locally, not pushed, no PR open yet).
+
+### 1. File: `.claude/CLAUDE.md`
+* **Process/doc change, no code touched.** Added two new sections following the existing "Git Command Execution" / "Python Environment (venv) Execution" pattern, closing gaps found while auditing the codebase for commands that require Fabio's own terminal/credentials:
+  * **`Database Command Execution (sudo / psql)`**: `sudo systemctl start postgresql`, `sudo -iu postgres psql`, `CREATE USER`/`CREATE DATABASE`, and applying `backend/init_schema.sql` via `psql -f` must be handed to Fabio, one command at a time, confirmed via AskUserQuestion — same handoff pattern as `git push`, since these need his `sudo` access and DB superuser credentials.
+  * **`Frontend Local Environment Execution`**: `npm i`/`npm install`, `npm run dev`, `vite build` (see `frontend/package.json` scripts) must likewise be handed off rather than run via tool call, since they install into and run against Fabio's local `frontend/node_modules`.
+* Companion memory entries were added outside the repo (`feedback_db_command_handoff.md`, `feedback_frontend_handoff.md` in the Claude Code memory store) so future sessions apply this immediately instead of rediscovering it.
+
