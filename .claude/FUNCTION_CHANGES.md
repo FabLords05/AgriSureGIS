@@ -99,3 +99,56 @@ Checked Sprint 1's "[Done]" items in `.claude/DEVELOPMENT_PLAN.md` against `.cla
 * **Changes to Documentation:**
   * Added a **Tooling** bullet under Fabio Joseph Tugonon's entry noting his use of Claude Code as an AI pair-programming assistant for implementation, documentation, and workflow tasks in this repository.
 
+---
+
+## [2026-07-21] - Sprint 3 Backend: GPX Parser & Exposure Calculation (+ Sprint 2 Fixes)
+
+**Branch:** `cristian/backend/sprint3-gpx-exposure` (committed locally, not pushed, no PR open yet).
+
+### Sprint 2 Fixes
+### 1. File: `backend/app/services/bulletin_parser.py`
+* **Bug fix:** Added the missing `from sqlalchemy import func` import. `save_bulletin_to_db()` called `func.lower(...)` without it, so every DB-save attempt raised `NameError` — this code path had never actually run successfully since Sprint 2 was marked "Done."
+* **Changes to Functions:**
+  * `parse_bulletin_text()`: added `issued_at` extraction (regex for PAGASA's typical "Issued at HH:MM AM/PM, DD Month YYYY" phrasing), returned in the parsed-data dict. Falls back to `None` if not found — no bulletin sample exists in the repo/tests to validate the exact real-world phrasing yet, so this needs validation against a real PAGASA bulletin before being fully trusted.
+  * `save_bulletin_to_db()`: now uses the parsed `issued_at` when available, falling back to `datetime.now(timezone.utc)` only if parsing failed. `expires_at` is unchanged (still a placeholder — PAGASA bulletins don't reliably state their own expiry).
+* **Audit finding, not changed:** the `island_group = 2` hardcode is not a bug — the platform is scoped to PCIC Region X (Northern Mindanao) only (`PROJECT_CONTEXT.md`), so every `AdminBoundary` row in this dataset is Mindanao by definition. Left as-is rather than inventing an unfounded Luzon/Visayas mapping.
+
+### 2. File: `backend/tests/test_bulletin_parser.py`
+* **Changes to Tests:**
+  * Added `test_parse_bulletin_text_extracts_issued_at()` and `test_parse_bulletin_text_issued_at_missing_defaults_to_none()`.
+  * Added new class `BulletinParserSaveToDbTests` with `test_save_bulletin_to_db_creates_bulletin_and_signals()` — a regression test for the `func` import bug (mocked `Session`, dispatches `db.query(Model)` per model class). Previously only `parse_bulletin_text()` was tested; `save_bulletin_to_db()` had zero coverage.
+
+### Sprint 3 Backend: GPX Boundary Parser
+### 3. File: `backend/app/services/gpx_parser.py` (new)
+* Added **`GpxParserService.parse_gpx_to_polygon()`**: parses an uploaded `.gpx` file with `gpxpy`, builds a Shapely `Polygon` from track points (falls back to route points if no tracks), auto-closes the ring, and returns a `WKTElement` (`MULTIPOLYGON`, SRID 4326) matching the geometry pattern `bulletin_parser.py` already uses for `center_geom`.
+
+### 4. File: `backend/app/api/upload.py`
+* **Changes to API Routes:**
+  * Added **`upload_gpx()`** (`POST /api/upload/gpx`): accepts a multipart GPX file + `farmer_id` + `farm_id` per `API_CONTRACT.md` §2, parses it via `GpxParserService`, and updates that `Farm.location_geom`.
+
+### 5. File: `backend/tests/test_gpx_parser.py` (new)
+* Added `GpxParserServiceTests` covering: a valid closed-ring track, route-only fallback, and a `ValueError` for files with fewer than 3 points.
+
+### Sprint 3 Backend: Exposure-Hours Calculation
+### 6. File: `backend/app/services/exposure_calculator.py` (new)
+* Added **`ExposureCalculatorService.compute_for_typhoon()`**: walks a typhoon's `TropicalCycloneBulletin` rows in `issued_at` order, matches each `TcbSignal.area_name` against `AdminBoundary.municipality` (same text-matching approach Sprint 2 already uses — no schema change), and upserts per-boundary `start_time`/`end_time`/`max_signal_level`/`total_exposure_hours`/`is_eligible_6hr` (≥6h threshold) into `tbl_area_exposure_summary`.
+  * Deliberately does **not** model a circular "signal radius" geometry — PAGASA publishes TCWS signal areas as named municipality/province lists per bulletin, not a radius around the storm center, so exposure is a time-series aggregation over named areas rather than a spatial buffer intersection. Confirmed against `docs/ERD.drawio.png` (`tbl_area_exposure_summary` has `start_time`/`end_time`/`total_exposure_hours`, no radius/geometry column).
+
+### 7. File: `backend/app/api/bulletins.py`
+* **Changes to API Routes:**
+  * Added **`compute_exposure()`** (`POST /api/bulletins/{tcb_id}/compute-exposure`). This is **not** the documented `POST /api/assessments/calculate` contract — that endpoint bundles in yield-loss/payout output which depends on Sprint 4's `RecsapMatrix`/`RiskAssessment` work, not built yet. Sprint 4 can add the real `/api/assessments/calculate` on top of this later.
+
+### 8. File: `backend/tests/test_exposure_calculator.py` (new)
+* Added `ExposureCalculatorServiceTests` covering: multi-bulletin aggregation (exposure hours + max signal level across two bulletins), a single-bulletin case (0 hours, not eligible), and no-bulletins (empty result).
+
+### 9. File: `backend/requirements.txt`
+* Added `gpxpy==1.6.2`, `geopandas==1.1.4`, `shapely==2.1.2`, `pyproj==3.7.2` for this sprint's GPX/exposure work.
+* Also added `beautifulsoup4==4.15.0` and `pdfplumber==0.11.10` — these were already imported by Sprint 2's `bulletin_parser.py` but were missing from `requirements.txt` entirely (a pre-existing gap; `backend/venv` had nothing installed beyond `pip` itself when this branch started). Also added `pytest==9.1.1` to actually run the test suite (existing tests use stdlib `unittest`, no runner was previously pinned).
+
+### Status / Next Steps
+* **Flagging for Fabio, not built:** `docs/ERD.drawio.png` shows `tbl_tcb_signals` should have a `boundary_id` FK to `tbl_admin_boundaries`, and `tbl_admin_boundaries` should have a `geom` column. Neither exists in `models.py`/`init_schema.sql` today — Sprint 2 stores `area_name` as free text instead, and this branch's exposure calculator matches on that same text field. Adding the FK/geom columns would make the matching robust and align the schema with the ERD, but it's a DB structure change and needs to be proposed to Fabio per `GITHUB_WORKFLOW.md`, not done unilaterally here.
+* `issued_at` regex parsing (Sprint 2 fix above) is unvalidated against a real PAGASA bulletin — only tested against a hand-written sample string.
+* Frontend Leaflet map integration for Sprint 3 (visualizing farm boundaries and typhoon path overlaps) is out of scope for this branch — that's James's (Frontend Developer) piece per `TEAM_RESPONSIBILITIES.md`.
+* Adjacent, out of scope: `upload.py`'s pre-existing `adjuster_calculation` bug (passed into `RiskAssessment` where no such column exists — flagged in the 2026-07-21 "Recsap Matrix Persistence" entry above, still unfixed). Not touched here since it's Sprint 1/CSV path, unrelated to GPX/exposure.
+* Branch is **not pushed** and has **no PR open** — needs review before merging into `main`.
+

@@ -5,6 +5,7 @@ import shutil
 
 from app.core.database import get_db
 from app.services.bulletin_parser import BulletinParserService
+from app.services.exposure_calculator import ExposureCalculatorService
 from app.models.models import TropicalCycloneBulletin, TcbSignal, Typhoon
 
 router = APIRouter(prefix="/bulletins", tags=["bulletins"])
@@ -107,6 +108,41 @@ async def upload_bulletin_pdf(file: UploadFile = File(...), db: Session = Depend
         if os.path.exists(temp_path):
             os.remove(temp_path)
         raise HTTPException(status_code=500, detail=f"Failed to parse PDF: {str(e)}")
+
+@router.post("/{tcb_id}/compute-exposure")
+def compute_exposure(tcb_id: int, db: Session = Depends(get_db)):
+    """
+    Recomputes per-municipality exposure-duration summaries (tbl_area_exposure_summary)
+    for the typhoon this bulletin belongs to, using all of that typhoon's bulletins
+    parsed so far. Sprint 3 scope only — does not compute yield loss or payouts
+    (that depends on Sprint 4's RecsapMatrix/RiskAssessment work).
+    """
+    bulletin = db.query(TropicalCycloneBulletin).filter(TropicalCycloneBulletin.tcb_id == tcb_id).first()
+    if bulletin is None:
+        raise HTTPException(status_code=404, detail="Bulletin not found.")
+
+    summaries = ExposureCalculatorService.compute_for_typhoon(bulletin.typhoon_id, db)
+
+    return {
+        "status": "success",
+        "typhoon_id": bulletin.typhoon_id,
+        "boundaries_computed": len(summaries),
+        "summaries": [
+            {
+                "summary_id": s.summary_id,
+                "boundary_id": s.boundary_id,
+                "province": s.province,
+                "municipality": s.municipality,
+                "max_signal_level": s.max_signal_level,
+                "start_time": s.start_time,
+                "end_time": s.end_time,
+                "total_exposure_hours": float(s.total_exposure_hours),
+                "is_eligible_6hr": s.is_eligible_6hr,
+            }
+            for s in summaries
+        ],
+    }
+
 
 @router.get("/{tcb_id}/signals")
 def get_bulletin_signals(tcb_id: int, db: Session = Depends(get_db)):
