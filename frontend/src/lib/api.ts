@@ -25,6 +25,13 @@ export interface ParseBulletinsResult {
   bulletins: Array<{ tcb_id: number; title: string; bulletin_count: number }>;
 }
 
+export interface TcbSignal {
+  signal_id: number;
+  signal_level: number;
+  island_group: number;
+  area_name: string;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, init);
   if (!response.ok) {
@@ -49,4 +56,8 @@ export function getBulletins(): Promise<Bulletin[]> {
 
 export function parseBulletins(): Promise<ParseBulletinsResult> {
   return request<ParseBulletinsResult>('/api/bulletins/parse', { method: 'POST' });
+}
+
+export function getBulletinSignals(tcbId: number): Promise<TcbSignal[]> {
+  return request<TcbSignal[]>(`/api/bulletins/${tcbId}/signals`);
 }
