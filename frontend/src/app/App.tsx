@@ -71,7 +71,8 @@ export default function App() {
           {activeModule === "assessment"  && (
             <AssessmentModule
               darkMode={darkMode}
-              coverageRatePerHa={coverageRatePerHa}
+              selectedBulletin={selectedBulletin}
+              onSelectBulletin={setSelectedBulletin}
             />
           )}
           {activeModule === "calibration" && (

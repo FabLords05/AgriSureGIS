@@ -80,10 +80,9 @@ class AssessmentService:
                 if rule is None:
                     continue
 
-                area = float(insurance.farm.area_size)
                 amount_cover = float(insurance.amount_cover)
                 payout = assessment.calculate_final_payout(
-                    amount_cover, area, prior.crop_stage_no, summary.max_signal_level, exposure_hours
+                    amount_cover, prior.crop_stage_no, summary.max_signal_level, exposure_hours
                 )
                 estimated_damage = round(amount_cover * float(rule.estimated_yield_loss) / 100, 2)
 

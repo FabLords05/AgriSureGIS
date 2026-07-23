@@ -2,6 +2,7 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000
 
 export interface Bulletin {
   tcb_id: number;
+  typhoon_id: number;
   title: string;
   bulletin_count: number;
   category: string | null;
@@ -35,12 +36,31 @@ export interface Assessment {
   assessment_id: number;
   policy_no: string | null;
   farm_id: number | null;
+  amount_cover: number | null;
   crop_stage: string | null;
   period_of_exposure: number | null;
   wind_velocity: number | null;
+  indemnity_factor: number | null;
   estimated_damage: number;
   final_indemnity_payment: number;
   assessment_date: string;
+}
+
+export interface CalculateAssessmentsResult {
+  status: string;
+  typhoon_id: number;
+  bulletin_id: number;
+  assessments_computed: number;
+  assessments: Array<{
+    assessment_id: number;
+    insurance_records_id: number;
+    crop_stage: string | null;
+    period_of_exposure: number | null;
+    wind_velocity: number | null;
+    indemnity_factor: number | null;
+    estimated_damage: number;
+    final_indemnity_payment: number;
+  }>;
 }
 
 export interface UploadGpxResult {
@@ -121,4 +141,16 @@ export function getAssessments(typhoonId?: number, policyNo?: string): Promise<{
   if (policyNo !== undefined) params.set('policy_no', policyNo);
   const query = params.toString();
   return request<{ status: string; data: Assessment[] }>(`/api/assessments/${query ? `?${query}` : ''}`);
+}
+
+export function calculateAssessments(typhoonId: number, bulletinId: number): Promise<CalculateAssessmentsResult> {
+  return request<CalculateAssessmentsResult>('/api/assessments/calculate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ typhoon_id: typhoonId, bulletin_id: bulletinId }),
+  });
+}
+
+export function getAssessmentsExportUrl(typhoonId: number): string {
+  return `${API_BASE_URL}/api/assessments/export?typhoon_id=${typhoonId}`;
 }

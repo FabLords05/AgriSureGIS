@@ -437,3 +437,62 @@ While reconciling, corrected a latent bug the Sprint 3 rewrite had carried over 
 ### Status / Next Steps
 * Not verified with a build/dev server — same handoff situation as both merged entries; Fabio needs to run `npm run build`/`npm run dev` to confirm the reconciled component compiles and renders both the real farm/typhoon layers and the Region X boundary outline together correctly.
 
+---
+
+## [2026-07-23] - Sprint 4 Close-Out: Wire Real Payout/Export Data into AssessmentModule
+
+**Branch:** `cristian/backend/wire-real-data-sprint4`, stacked on top of the still-unmerged `cristian/backend/wire-real-data-sprint3` (committed locally, not pushed, no PR open yet).
+
+An audit found Sprint 4 (parametric payout engine + real PCIC Table 11 data + CSV export) had the exact same pattern as Sprint 3's original gap: a correct, real-data backend, completely unwired from the frontend. Worse than Sprint 3's gap — `AssessmentModule.tsx`'s "calculation" was a fully scripted fake progress bar with an invented SAR/GEE failure narrative ("Sentinel-1 tile coverage gap detected") that has nothing to do with the real backend (no SAR/GEE dependency exists anywhere in this calculation), plus a hardcoded "Signal 2 only" scope that contradicts the real eligibility rule (signal ≥ 2, not signal = 2), a 4-stage growth taxonomy that doesn't match the real 3-stage `crop_stage_no`, and a per-farm coverage-rate override feature with no real backend equivalent (`InsuranceRecord.amount_cover` is fixed at CSV-import time). This entry removes the fabricated simulation and wires the module to the real engine.
+
+### 1. File: `backend/app/api/bulletins.py`
+* `list_bulletins()`: added `typhoon_id` to each row (the query already resolved `Typhoon` by this ID to get `typhoon_name` — it just never returned the ID itself). Needed so the frontend can call `POST /api/assessments/calculate` (which requires a `typhoon_id`) directly from a selected bulletin.
+
+### 2. File: `backend/app/api/assessments.py`
+* `list_assessments()`: added `amount_cover` (via `a.insurance_record.amount_cover`, a real Sum Insured value) and `indemnity_factor` (previously only returned by `/calculate`'s response, not the persistent `GET /`, so it disappeared on page reload).
+* `export_assessments_csv()`: added an optional `typhoon_id` query filter (same `AreaExposureSummary` join pattern `list_assessments()` already uses), so the export can be scoped to one typhoon instead of always returning every computed assessment ever. Backward compatible — omitting the param keeps the old unscoped behavior.
+
+### 3. File: `frontend/src/lib/api.ts`
+* Added `typhoon_id` to `Bulletin`; added `amount_cover`/`indemnity_factor` to `Assessment`.
+* Added `CalculateAssessmentsResult` type and `calculateAssessments(typhoonId, bulletinId)` → `POST /api/assessments/calculate` (the file's first JSON-body POST — existing POSTs all use `FormData`, so `Content-Type: application/json` is set explicitly at the call site).
+* Added `getAssessmentsExportUrl(typhoonId)` — returns a plain URL string rather than a typed fetch-blob helper, since no `api.ts` function anywhere sets auth headers; the CSV modal opens this URL directly (`window.open`) and lets the browser handle the download.
+
+### 4. File: `frontend/src/app/App.tsx`
+* `AssessmentModule` now receives the same lifted `selectedBulletin`/`onSelectBulletin` props as `MonitoringModule`/`SpatialAnalysisModule` (one shared typhoon-event selection app-wide). Its `coverageRatePerHa` prop was removed — `CalibrationModule` keeps owning that value for whatever else uses it, but `AssessmentModule` no longer has a use for it (see below).
+
+### 5. File: `frontend/src/app/components/AssessmentModule.tsx` (near-total rewrite)
+* Replaced all `mockFarmers`/`mockBulletins` usage with `getBulletins()` (grouped client-side by `typhoon_name` for the folder UI — same interaction shape as before, real data underneath), and `getAssessments(typhoonId)` + `getFarms()` joined by `farm_id` for the results table (same join pattern as `SpatialAnalysisModule`).
+* Selecting a bulletin now calls the real `calculateAssessments()`. Replaced the fake `setInterval` progress/failure simulation with real `isCalculating`/`calcError` state — `calcError` surfaces the actual thrown error (e.g. a real 404), not fabricated SAR/GEE text. Removed `lastSuccessfulTCB` rollback-to-previous-bulletin logic entirely (it only existed to serve the fake failure path). Added an explicit **honest zero-result state** ("0 assessments computed — no policies met eligibility criteria...") since that's a normal, expected real outcome, not an error.
+* Removed: per-farm coverage-rate override editing (pencil icon/inline input/override map — no real backend concept), the 4-stage growth-stage taxonomy and `windVelocityMin`/`windVelocityMax` range display (real data is a single signal number), the hardcoded "Signal 2 Only" default filter and footer summary panel (the real eligibility rule is already enforced server-side at calculate time), the per-typhoon-folder signal badge (no real per-bulletin signal on the list endpoint, not worth an N+1 fetch just for a badge), and the "Damage Factors" reference table (4-stage taxonomy/percentages don't correspond to the real `tbl_recsap_matrix`/`tbl_indemnity_factor_matrix` values, which are a 3-key lookup, not a simple stage×signal table — no cheap real replacement without a new backend endpoint).
+* CSV export: simplified from a two-modal preview→confirm flow to one modal (preview table + a "Download CSV" button linking to the new `typhoon_id`-scoped export URL) — the original two-step flow was preserved in spirit, just consolidated, since the download is now a real server-generated file (nothing left to "confirm" client-side beyond reviewing the same rows about to download).
+* "Indemnity by Municipality" bar chart kept, re-sourced from real filtered/joined assessment rows grouped by `Farm.municipality` (clean real-data path existed for this one).
+
+### Status / Next Steps
+* Not run against a live database or the frontend dev server — same handoff situation as the Sprint 3 entry: Fabio needs to run the backend test suite, exercise the three modified endpoints via Swagger UI, and click through the frontend himself.
+* An uncommitted, unrelated change was already present in the working tree when this branch was created: `.claude/DEVELOPMENT_PLAN.md`'s Sprint 4 formula was edited from `I = (AC / 1000) * IF * Area` to `I = (AC / 1000) * IF` (dropping `* Area`). This was not made by this work and contradicted the actual formula used everywhere in the real code (`indemnity_calc.py`, `PROJECT_CONTEXT.md`) at the time — flagged to the user, who chose to keep and include it in this branch rather than revert it. **Resolved by the entry below**, which confirmed this was correct per PCIC and fixed the rest of the codebase to match.
+* Branch is **not pushed** and has **no PR open**, and depends on `cristian/backend/wire-real-data-sprint3` merging first (stacked branch) — needs review before merging into `develop`.
+
+---
+
+## [2026-07-23] - Formula Correction: Drop `* Area` from the Indemnity Payout Calculation
+
+**Branch:** `cristian/backend/wire-real-data-sprint4` (same branch as the entry above; committed locally, not pushed, no PR open yet).
+
+Fabio confirmed the correct PCIC formula is `I = (AC / 1000) * IF` — farm area is **not** a factor. This corrects a bug: the payout engine had been computing `I = (AC / 1000) * IF * Area` this entire session (matching what `.claude/PROJECT_CONTEXT.md`/`MASTER_DEVELOPMENT_CONTEXT.md` documented at the time, which was itself wrong), silently over/under-paying every farm proportional to its area. Every prior changelog entry describing the old formula is left as historical record, not rewritten.
+
+### 1. File: `backend/app/core/indemnity_calc.py`
+* `ParametricAssessment.calculate_final_payout()`: dropped the `area_hectares` parameter and the `* area_hectares` term — now `payout = (amount_of_cover / 1000) * float(rule.indemnity_factor)`. Updated the docstring and the interactive `__main__` CLI testing block (no longer prompts for area).
+
+### 2. File: `backend/app/services/assessment_service.py`
+* `calculate_for_bulletin()`: removed the now-unused `area = float(insurance.farm.area_size)` local and stopped passing it to `calculate_final_payout()`. `estimated_damage`'s calculation (`amount_cover * yield_loss% / 100`) was never area-dependent and is unchanged.
+
+### 3. File: `backend/tests/test_assessment_service.py`
+* Recomputed the eligible-policy test's expected payout: `(50000/1000) * 330.00 = 16500.0` (was `41250.0`, which included the now-removed `* 2.5` area factor).
+
+### 4. Files: `.claude/PROJECT_CONTEXT.md`, `.claude/MASTER_DEVELOPMENT_CONTEXT.md`
+* Both updated from `I = (AC / 1000) * IF * Area` to `I = (AC / 1000) * IF`, matching `.claude/DEVELOPMENT_PLAN.md`'s already-corrected version and the fixed code.
+
+### Status / Next Steps
+* Not run against a live database — same handoff situation as every other entry in this file; Fabio needs to run the test suite himself to confirm.
+* This changes real computed payout amounts. If any assessments were ever computed against a live database using the old formula (unlikely given the repeated "never run against a live database" notes above, but worth confirming), those `RiskAssessment.final_indemnity_payment` values would need recomputing.
+

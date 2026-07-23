@@ -111,8 +111,8 @@ class AssessmentServiceTests(unittest.TestCase):
         self.assertEqual(result.crop_stage, "Flowering")
         self.assertEqual(result.period_of_exposure, 12)
         self.assertEqual(result.wind_velocity, 3)
-        # I = (AC / 1000) * IF * Area = (50000 / 1000) * 330.00 * 2.5 = 41250.0
-        self.assertEqual(result.final_indemnity_payment, 41250.0)
+        # I = (AC / 1000) * IF = (50000 / 1000) * 330.00 = 16500.0
+        self.assertEqual(result.final_indemnity_payment, 16500.0)
         self.assertEqual(result.estimated_damage, 12500.0)  # 50000 * 25 / 100
         mock_db.commit.assert_called_once()
 

@@ -26,6 +26,7 @@ def list_bulletins(db: Session = Depends(get_db)):
         center_point = to_shape(b.center_geom) if b.center_geom is not None else None
         results.append({
             "tcb_id": b.tcb_id,
+            "typhoon_id": b.typhoon_id,
             "title": b.title,
             "bulletin_count": b.bulletin_count,
             "category": b.category,

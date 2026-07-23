@@ -92,17 +92,21 @@ class ParametricAssessment:
     def calculate_final_payout(
         self,
         amount_of_cover: float,
-        area_hectares: float,
         crop_stage_no: int,
         wind_signal_tcws: int,
         exposure_hours: int,
     ) -> float:
-        """Final Indemnity Payout Calculation: I = (AC / 1000) * IF * Area."""
+        """Final Indemnity Payout Calculation: I = (AC / 1000) * IF.
+
+        Per PCIC (the source of this formula), farm area is NOT a factor here --
+        confirmed with Fabio 2026-07-23, correcting the earlier (AC/1000)*IF*Area
+        version this engine originally shipped with.
+        """
         rule = self.get_matrix_rule(crop_stage_no, wind_signal_tcws, exposure_hours)
         if rule is None:
             return 0.0
 
-        payout = (amount_of_cover / 1000) * float(rule.indemnity_factor) * area_hectares
+        payout = (amount_of_cover / 1000) * float(rule.indemnity_factor)
         return round(payout, 2)
 
 
@@ -119,13 +123,12 @@ if __name__ == "__main__":
 
     try:
         ac = float(input("1. Amount of Cover per hectare (e.g., 25000): "))
-        area = float(input("2. Total Area in hectares (e.g., 2.87): "))
-        tcws = int(input("3. Peak TCWS Level (e.g., 2, 3, 4, 5): "))
-        hours = int(input("4. Period of Exposure in hours (e.g., 6, 12, 24): "))
-        crop_stage_no = int(input("5. Crop Stage No. (per tbl_recsap_matrix, e.g., 2 for Flowering): "))
+        tcws = int(input("2. Peak TCWS Level (e.g., 2, 3, 4, 5): "))
+        hours = int(input("3. Period of Exposure in hours (e.g., 6, 12, 24): "))
+        crop_stage_no = int(input("4. Crop Stage No. (per tbl_recsap_matrix, e.g., 2 for Flowering): "))
 
         rule = assessment.get_matrix_rule(crop_stage_no, tcws, hours)
-        payout = assessment.calculate_final_payout(ac, area, crop_stage_no, tcws, hours)
+        payout = assessment.calculate_final_payout(ac, crop_stage_no, tcws, hours)
 
         print("\n" + "-" * 50)
         print("               ASSESSMENT RESULTS")
