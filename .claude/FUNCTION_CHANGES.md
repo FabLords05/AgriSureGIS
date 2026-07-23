@@ -290,3 +290,65 @@ Resolves the "Table 11 placeholder data" blocker noted in the two entries above.
 
 Outstanding items from the entry above (live-DB/test-suite verification, stale `docs/ERD.drawio.png`) are unchanged by the merge and still need follow-up.
 
+---
+
+## [2026-07-21] - Frontend-Backend Wiring (Sprint 3)
+
+Connected the static React frontend to the backend endpoints that already exist and match its data needs.
+
+### 1. File: `frontend/src/lib/api.ts` (new)
+* **Changes to Functions:**
+  * Added **`uploadCsv()`** → routes to `POST /api/upload/csv`.
+  * Added **`getBulletins()`** → routes to `GET /api/bulletins/`.
+  * Added **`parseBulletins()`** → routes to `POST /api/bulletins/parse`.
+
+### 2. File: `frontend/src/app/components/SpatialModule.tsx`
+* **Changes to Functions/Behavior:**
+  * Added **`handleCsvFileSelected()`**: wires the CSV dropzone's file input to `uploadCsv()`, with a success/error status banner.
+
+### 3. File: `frontend/src/app/components/MonitoringModule.tsx`
+* **Changes to Functions/Behavior:**
+  * Added **`loadBulletins()`**: fetches the bulletin list from `getBulletins()` on mount, replacing the mock array.
+  * Added **`handleParseLatest()`**: wires the "Parse Latest Bulletin" button to `parseBulletins()`, then reloads the list.
+
+### 4. File: `frontend/tsconfig.json`
+* **Changes to Configuration:**
+  * Added `"ignoreDeprecations": "6.0"` to silence a TypeScript warning on `baseUrl` (still required for the `@/*` path alias).
+
+### Status / Next Steps
+* Not pushed yet — awaiting Fabio's push per the git workflow rules in `.claude/CLAUDE.md`.
+
+---
+
+## [2026-07-22] - High-Fidelity UI Adoption
+
+Replaced the frontend's MUI-based screens with the team's high-fidelity Figma "Make" prototype design (formerly the untracked `High Fidelity Interactive Desktop/` folder, renamed to `ui-prototype/` — gitignored, not part of this commit). Re-applied the existing backend wiring from the 2026-07-21 entry into the new component structure. No backend files touched.
+
+### 1. New files: `frontend/src/app/components/Header.tsx`, `LoginScreen.tsx`, `CalibrationModule.tsx`, `AOISARPanel.tsx`, `mockData.ts`, `SpatialAnalysisModule.tsx`
+* Ported from the high-fidelity prototype as-is (Header nav/dark-mode/notifications, demo-credential Login/Registration, Calibration settings, SAR/GEE analysis panel, shared mock farmer/bulletin data). All fully client-side mock UI — no matching backend endpoints exist for GPX upload, `/api/assessments/calculate`, or GEE/SAR analysis, so these stay static per prior scope decisions.
+
+### 2. New file: `frontend/src/app/components/GISLeafletMap.tsx`
+* Real `react-leaflet` map (OpenStreetMap tiles) built to the same prop interface as the prototype's canvas-mockup `GISMap.tsx`, so it drops into `SpatialAnalysisModule.tsx` without further rework. Farms are plotted using real coordinates for the municipalities the prototype's data already names (Naga City, Pili, Libmanan, Sipocot, Goa, Lagonoy — Camarines Sur), spread into a small grid per municipality since the prototype's own farm coordinates were fake canvas pixels, not geographic.
+
+### 3. File: `frontend/src/app/components/SpatialAnalysisModule.tsx` (new — replaces `SpatialModule.tsx`, which is left in place unused)
+* CSV dropzone's `processFiles()` now calls `uploadCsv()` for `.csv` files (real `POST /api/upload/csv`) with a status banner; `.gpx` files still fake-process client-side (no backend endpoint).
+
+### 4. File: `frontend/src/app/components/MonitoringModule.tsx` (overwritten — same filename as prototype)
+* Bulletin table now sources from `getBulletins()` (`GET /api/bulletins/`) instead of mock data. Added **`handleSelectBulletin()`** and **`handleViewTCB()`**, both lazily calling the new **`getBulletinSignals()`** (`GET /api/bulletins/{tcb_id}/signals`) to derive real per-bulletin signal level and affected-area lists — the list endpoint alone doesn't carry these. **`handleParseLatest()`** wires the "Parse Latest Bulletin" action to `POST /api/bulletins/parse`, then reloads the list. Table columns/detail views were adjusted to only show fields the backend actually returns (`category`, `max_sustained_winds`, `gustiness`, `issued_at`) — dropped the prototype's fabricated `status`/`fileSize`/`version`/`windVelocityRange` fields, which have no backend equivalent. Growth-stage/signal/timeline charts remain mock (no assessment-history endpoint exists).
+
+### 5. File: `frontend/src/app/components/AssessmentModule.tsx` (overwritten — same filename as prototype)
+* Ported as-is from the prototype; remains fully mock per the 2026-07-21 decision, since `GET /api/assessments` has no field overlap with this UI.
+
+### 6. File: `frontend/src/lib/api.ts`
+* Added **`getBulletinSignals(tcbId)`** → routes to `GET /api/bulletins/{tcb_id}/signals`, plus the `TcbSignal` type.
+
+### 7. File: `frontend/src/app/App.tsx`
+* Replaced the MUI `ThemeProvider`/`DashboardLayout` shell with the prototype's `LoginScreen` → `Header` → module-switch structure (`monitoring` / `spatial` / `assessment` / `calibration`), plus `darkMode` and `coverageRatePerHa` state shared across modules. Old `DashboardLayout.tsx`, `Login.tsx`, `SettingsModule.tsx`, and the old `SpatialModule.tsx` are no longer imported anywhere — left in place unused, not deleted, per Fabio's call.
+
+### 8. File: `frontend/src/styles/theme.css`
+* Replaced the color tokens with the prototype's palette (`--primary: #166534` green / `--accent: #ca8a04` gold, plus dark-mode variants) — a full visual theme change, confirmed with Fabio beforehand. Removed the old `--green-*`/`--blue-*`/`--gold-*` tokens the now-unused MUI components relied on; harmless since those components no longer render.
+
+### Status / Next Steps
+* `npm run build` passes clean; verified both dev servers respond, but UI was not visually screenshotted (no browser-automation tool available in this environment) — Fabio should click through it locally before merging.
+* Not pushed yet — awaiting Fabio's push per the git workflow rules in `.claude/CLAUDE.md`.
+

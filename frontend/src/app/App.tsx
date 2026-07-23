@@ -1,96 +1,76 @@
-import { useState, useEffect } from 'react';
-import { ThemeProvider, createTheme } from '@mui/material/styles';
-import CssBaseline from '@mui/material/CssBaseline';
-import { Login } from './components/Login';
-import { DashboardLayout } from './components/DashboardLayout';
-import { MonitoringModule } from './components/MonitoringModule';
-import { SpatialModule } from './components/SpatialModule';
-import { AssessmentModule } from './components/AssessmentModule';
-import { SettingsModule } from './components/SettingsModule';
+import { useState } from "react";
+import { Toaster } from "sonner";
+import { LoginScreen } from "./components/LoginScreen";
+import { Header, ModuleId } from "./components/Header";
+import { MonitoringModule } from "./components/MonitoringModule";
+import { SpatialAnalysisModule } from "./components/SpatialAnalysisModule";
+import { AssessmentModule } from "./components/AssessmentModule";
+import { CalibrationModule } from "./components/CalibrationModule";
+import { mockNotifications, AppNotification } from "./components/mockData";
+
+interface CurrentUser {
+  name: string;
+  role: string;
+  email: string;
+}
 
 export default function App() {
-  const [isLoggedIn, setIsLoggedIn] = useState(false);
-  const [username, setUsername] = useState('');
-  const [role, setRole] = useState('');
-  const [currentModule, setCurrentModule] = useState('home');
-  const [isDark, setIsDark] = useState(false);
+  const [currentUser, setCurrentUser]     = useState<CurrentUser | null>(null);
+  const [activeModule, setActiveModule]   = useState<ModuleId>("monitoring");
+  const [darkMode, setDarkMode]           = useState(false);
+  const [coverageRatePerHa, setCoverageRatePerHa] = useState(25000);
+  const [notifications, setNotifications] = useState<AppNotification[]>(mockNotifications);
 
-  useEffect(() => {
-    const root = document.documentElement;
-    if (isDark) {
-      root.classList.add('dark');
-    } else {
-      root.classList.remove('dark');
-    }
-  }, [isDark]);
-
-  const handleLogin = (user: string, userRole: string) => {
-    setUsername(user);
-    setRole(userRole);
-    setIsLoggedIn(true);
+  const handleLogin = (user: CurrentUser) => {
+    setCurrentUser(user);
   };
 
-  const handleLogout = () => {
-    setIsLoggedIn(false);
-    setUsername('');
-    setRole('');
-    setCurrentModule('home');
+  const handleClearNotification = (id: string) => {
+    setNotifications(ns => ns.filter(n => n.id !== id));
   };
 
-  const handleThemeToggle = () => {
-    setIsDark(!isDark);
-  };
-
-  const theme = createTheme({
-    palette: {
-      mode: isDark ? 'dark' : 'light',
-      primary: {
-        main: isDark ? '#52b788' : '#2d6a4f',
-      },
-      secondary: {
-        main: isDark ? '#42a5f5' : '#1e88e5',
-      },
-    },
-  });
-
-  const renderModule = () => {
-    switch (currentModule) {
-      case 'home':
-        return <MonitoringModule />;
-      case 'spatial':
-        return <SpatialModule />;
-      case 'assessment':
-        return <AssessmentModule />;
-      case 'settings':
-        return <SettingsModule />;
-      default:
-        return <MonitoringModule />;
-    }
-  };
-
-  if (!isLoggedIn) {
+  if (!currentUser) {
     return (
-      <ThemeProvider theme={theme}>
-        <CssBaseline />
-        <Login onLogin={handleLogin} />
-      </ThemeProvider>
+      <div className={darkMode ? "dark" : ""}>
+        <LoginScreen onLogin={handleLogin} />
+        <Toaster position="bottom-right" richColors />
+      </div>
     );
   }
 
   return (
-    <ThemeProvider theme={theme}>
-      <CssBaseline />
-      <DashboardLayout
-        currentModule={currentModule}
-        onModuleChange={setCurrentModule}
-        onLogout={handleLogout}
-        isDark={isDark}
-        onThemeToggle={handleThemeToggle}
-        username={username}
-        role={role}
-      >
-        {renderModule()}
-      </DashboardLayout>
-    </ThemeProvider>
+    <div className={darkMode ? "dark" : ""}>
+      <div className="flex flex-col bg-background text-foreground" style={{ height: "100vh", overflow: "hidden" }}>
+        <Header
+          activeModule={activeModule}
+          onModuleChange={setActiveModule}
+          darkMode={darkMode}
+          onToggleDark={() => setDarkMode(v => !v)}
+          notifications={notifications}
+          onClearNotification={handleClearNotification}
+          currentUser={currentUser}
+          onLogout={() => setCurrentUser(null)}
+        />
+
+        <main className="flex-1 overflow-hidden">
+          {activeModule === "monitoring"  && <MonitoringModule darkMode={darkMode} />}
+          {activeModule === "spatial"     && <SpatialAnalysisModule darkMode={darkMode} />}
+          {activeModule === "assessment"  && (
+            <AssessmentModule
+              darkMode={darkMode}
+              coverageRatePerHa={coverageRatePerHa}
+            />
+          )}
+          {activeModule === "calibration" && (
+            <CalibrationModule
+              coverageRatePerHa={coverageRatePerHa}
+              onCoverageRateChange={setCoverageRatePerHa}
+            />
+          )}
+        </main>
+
+        <Toaster position="bottom-right" richColors />
+      </div>
+    </div>
   );
 }

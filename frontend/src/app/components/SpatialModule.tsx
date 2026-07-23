@@ -3,6 +3,7 @@ import { Card, CardContent, Button, Chip, Table, TableBody, TableCell, TableCont
 import { Upload, MapPin, Download, FileText, Play } from 'lucide-react';
 import { MapContainer, TileLayer, Polygon, Popup, Polyline } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
+import { uploadCsv } from '@/lib/api';
 
 interface FarmRecord {
   id: string;
@@ -53,6 +54,33 @@ export function SpatialModule() {
   ]);
 
   const [selectedFarm, setSelectedFarm] = useState<FarmRecord | null>(null);
+  const [csvUploadStatus, setCsvUploadStatus] = useState<
+    { type: 'success' | 'error'; message: string } | null
+  >(null);
+  const [isUploadingCsv, setIsUploadingCsv] = useState(false);
+
+  const handleCsvFileSelected = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    setIsUploadingCsv(true);
+    setCsvUploadStatus(null);
+    try {
+      const result = await uploadCsv(file);
+      setCsvUploadStatus({
+        type: 'success',
+        message: `${result.message} (${result.rows_inserted} inserted, ${result.rows_skipped} skipped)`,
+      });
+    } catch (error) {
+      setCsvUploadStatus({
+        type: 'error',
+        message: error instanceof Error ? error.message : 'CSV upload failed.',
+      });
+    } finally {
+      setIsUploadingCsv(false);
+    }
+  };
 
   const typhoonPath: [number, number][] = [
     [15.4, 120.5],
@@ -205,21 +233,34 @@ export function SpatialModule() {
               <p className="text-sm text-muted-foreground mb-4">or click to browse</p>
               <Button
                 variant="outlined"
+                disabled={isUploadingCsv}
                 sx={{ borderColor: 'var(--primary)', color: 'var(--primary)' }}
               >
-                Select CSV File
+                {isUploadingCsv ? 'Uploading...' : 'Select CSV File'}
               </Button>
               <input
                 ref={fileInputCSV}
                 type="file"
                 accept=".csv"
                 className="hidden"
+                onChange={handleCsvFileSelected}
               />
             </div>
             <div className="mt-4 text-sm text-muted-foreground">
               <p>Supported format: PCIC CSV format</p>
               <p>Maximum file size: 50 MB</p>
             </div>
+            {csvUploadStatus && (
+              <div
+                className="mt-4 text-sm p-3 rounded"
+                style={{
+                  backgroundColor: csvUploadStatus.type === 'success' ? 'var(--green-50)' : 'var(--destructive)',
+                  color: csvUploadStatus.type === 'success' ? 'var(--green-500)' : 'white',
+                }}
+              >
+                {csvUploadStatus.message}
+              </div>
+            )}
           </CardContent>
         </Card>
 
