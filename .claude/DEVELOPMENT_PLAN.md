@@ -25,6 +25,6 @@
 ## Sprint 4: Parametric Payouts & Export Module
 * **Objectives:** Indemnity calculations and CSV report export.
 * **Tasks:**
-  - Build the parametric payout engine applying `I = (AC / 1000) * IF * Area`.
+  - Build the parametric payout engine applying `I = (AC / 1000) * IF`.
   - Generate the final payout report in the legacy PCIC CSV format.
   - System testing and manual validation audits.\n

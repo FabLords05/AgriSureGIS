@@ -76,9 +76,11 @@ def list_assessments(
                 "assessment_id": a.assessment_id,
                 "policy_no": a.insurance_record.policy_no if a.insurance_record else None,
                 "farm_id": a.insurance_record.farm_id if a.insurance_record else None,
+                "amount_cover": float(a.insurance_record.amount_cover) if a.insurance_record else None,
                 "crop_stage": a.crop_stage,
                 "period_of_exposure": a.period_of_exposure,
                 "wind_velocity": a.wind_velocity,
+                "indemnity_factor": float(a.indemnity_factor) if a.indemnity_factor is not None else None,
                 "estimated_damage": float(a.estimated_damage),
                 "final_indemnity_payment": float(a.final_indemnity_payment),
                 "assessment_date": a.assessment_date,
@@ -89,19 +91,24 @@ def list_assessments(
 
 
 @router.get("/export")
-def export_assessments_csv(db: Session = Depends(get_db)):
+def export_assessments_csv(
+    typhoon_id: int | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
     """
     Downloads a PCIC-formatted CSV: original pabs_results.csv row layout with the
     Sprint 4 computed columns appended. Only includes assessments this engine
     computed (matrix_id is not null) -- excludes the legacy rows created at CSV
-    import time, which have no matrix_id.
+    import time, which have no matrix_id. Optionally scoped to a single typhoon.
     """
-    assessments = (
-        db.query(RiskAssessment)
-        .filter(RiskAssessment.matrix_id.isnot(None))
-        .order_by(RiskAssessment.assessment_date.desc())
-        .all()
-    )
+    query = db.query(RiskAssessment).filter(RiskAssessment.matrix_id.isnot(None))
+
+    if typhoon_id is not None:
+        query = query.join(
+            AreaExposureSummary, RiskAssessment.summary_id == AreaExposureSummary.summary_id
+        ).filter(AreaExposureSummary.typhoon_id == typhoon_id)
+
+    assessments = query.order_by(RiskAssessment.assessment_date.desc()).all()
 
     rows = []
     for a in assessments:

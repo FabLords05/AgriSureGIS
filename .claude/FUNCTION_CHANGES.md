@@ -396,3 +396,38 @@ Rechecked Sprint 3 after the Sprint 3/4 backend work, real recsap matrix data, a
 * `frontend/src/app/components/mockData.ts`'s `mockFarmers` is still used elsewhere (`MonitoringModule.tsx`'s dashboard stats, `AssessmentModule.tsx`) — untouched, out of scope for this entry.
 * Branch is **not pushed** and has **no PR open** — needs review before merging into `develop`.
 
+---
+
+## [2026-07-23] - Sprint 4 Close-Out: Wire Real Payout/Export Data into AssessmentModule
+
+**Branch:** `cristian/backend/wire-real-data-sprint4`, stacked on top of the still-unmerged `cristian/backend/wire-real-data-sprint3` (committed locally, not pushed, no PR open yet).
+
+An audit found Sprint 4 (parametric payout engine + real PCIC Table 11 data + CSV export) had the exact same pattern as Sprint 3's original gap: a correct, real-data backend, completely unwired from the frontend. Worse than Sprint 3's gap — `AssessmentModule.tsx`'s "calculation" was a fully scripted fake progress bar with an invented SAR/GEE failure narrative ("Sentinel-1 tile coverage gap detected") that has nothing to do with the real backend (no SAR/GEE dependency exists anywhere in this calculation), plus a hardcoded "Signal 2 only" scope that contradicts the real eligibility rule (signal ≥ 2, not signal = 2), a 4-stage growth taxonomy that doesn't match the real 3-stage `crop_stage_no`, and a per-farm coverage-rate override feature with no real backend equivalent (`InsuranceRecord.amount_cover` is fixed at CSV-import time). This entry removes the fabricated simulation and wires the module to the real engine.
+
+### 1. File: `backend/app/api/bulletins.py`
+* `list_bulletins()`: added `typhoon_id` to each row (the query already resolved `Typhoon` by this ID to get `typhoon_name` — it just never returned the ID itself). Needed so the frontend can call `POST /api/assessments/calculate` (which requires a `typhoon_id`) directly from a selected bulletin.
+
+### 2. File: `backend/app/api/assessments.py`
+* `list_assessments()`: added `amount_cover` (via `a.insurance_record.amount_cover`, a real Sum Insured value) and `indemnity_factor` (previously only returned by `/calculate`'s response, not the persistent `GET /`, so it disappeared on page reload).
+* `export_assessments_csv()`: added an optional `typhoon_id` query filter (same `AreaExposureSummary` join pattern `list_assessments()` already uses), so the export can be scoped to one typhoon instead of always returning every computed assessment ever. Backward compatible — omitting the param keeps the old unscoped behavior.
+
+### 3. File: `frontend/src/lib/api.ts`
+* Added `typhoon_id` to `Bulletin`; added `amount_cover`/`indemnity_factor` to `Assessment`.
+* Added `CalculateAssessmentsResult` type and `calculateAssessments(typhoonId, bulletinId)` → `POST /api/assessments/calculate` (the file's first JSON-body POST — existing POSTs all use `FormData`, so `Content-Type: application/json` is set explicitly at the call site).
+* Added `getAssessmentsExportUrl(typhoonId)` — returns a plain URL string rather than a typed fetch-blob helper, since no `api.ts` function anywhere sets auth headers; the CSV modal opens this URL directly (`window.open`) and lets the browser handle the download.
+
+### 4. File: `frontend/src/app/App.tsx`
+* `AssessmentModule` now receives the same lifted `selectedBulletin`/`onSelectBulletin` props as `MonitoringModule`/`SpatialAnalysisModule` (one shared typhoon-event selection app-wide). Its `coverageRatePerHa` prop was removed — `CalibrationModule` keeps owning that value for whatever else uses it, but `AssessmentModule` no longer has a use for it (see below).
+
+### 5. File: `frontend/src/app/components/AssessmentModule.tsx` (near-total rewrite)
+* Replaced all `mockFarmers`/`mockBulletins` usage with `getBulletins()` (grouped client-side by `typhoon_name` for the folder UI — same interaction shape as before, real data underneath), and `getAssessments(typhoonId)` + `getFarms()` joined by `farm_id` for the results table (same join pattern as `SpatialAnalysisModule`).
+* Selecting a bulletin now calls the real `calculateAssessments()`. Replaced the fake `setInterval` progress/failure simulation with real `isCalculating`/`calcError` state — `calcError` surfaces the actual thrown error (e.g. a real 404), not fabricated SAR/GEE text. Removed `lastSuccessfulTCB` rollback-to-previous-bulletin logic entirely (it only existed to serve the fake failure path). Added an explicit **honest zero-result state** ("0 assessments computed — no policies met eligibility criteria...") since that's a normal, expected real outcome, not an error.
+* Removed: per-farm coverage-rate override editing (pencil icon/inline input/override map — no real backend concept), the 4-stage growth-stage taxonomy and `windVelocityMin`/`windVelocityMax` range display (real data is a single signal number), the hardcoded "Signal 2 Only" default filter and footer summary panel (the real eligibility rule is already enforced server-side at calculate time), the per-typhoon-folder signal badge (no real per-bulletin signal on the list endpoint, not worth an N+1 fetch just for a badge), and the "Damage Factors" reference table (4-stage taxonomy/percentages don't correspond to the real `tbl_recsap_matrix`/`tbl_indemnity_factor_matrix` values, which are a 3-key lookup, not a simple stage×signal table — no cheap real replacement without a new backend endpoint).
+* CSV export: simplified from a two-modal preview→confirm flow to one modal (preview table + a "Download CSV" button linking to the new `typhoon_id`-scoped export URL) — the original two-step flow was preserved in spirit, just consolidated, since the download is now a real server-generated file (nothing left to "confirm" client-side beyond reviewing the same rows about to download).
+* "Indemnity by Municipality" bar chart kept, re-sourced from real filtered/joined assessment rows grouped by `Farm.municipality` (clean real-data path existed for this one).
+
+### Status / Next Steps
+* Not run against a live database or the frontend dev server — same handoff situation as the Sprint 3 entry: Fabio needs to run the backend test suite, exercise the three modified endpoints via Swagger UI, and click through the frontend himself.
+* An uncommitted, unrelated change was already present in the working tree when this branch was created: `.claude/DEVELOPMENT_PLAN.md`'s Sprint 4 formula was edited from `I = (AC / 1000) * IF * Area` to `I = (AC / 1000) * IF` (dropping `* Area`). This was not made by this work and contradicts the actual formula used everywhere in the real code (`indemnity_calc.py`, `PROJECT_CONTEXT.md`) — flagged to the user, who chose to keep and include it in this branch rather than revert it. Carried forward as-is; worth double-checking with Fabio.
+* Branch is **not pushed** and has **no PR open**, and depends on `cristian/backend/wire-real-data-sprint3` merging first (stacked branch) — needs review before merging into `develop`.
+
