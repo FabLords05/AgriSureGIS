@@ -21,19 +21,31 @@ def run_setup():
 
     # --- 1. SEED BOUNDARIES ---
     print("Ingesting Admin Boundaries...")
+    # Real PSGC codes for Region X (Northern Mindanao), sourced from the PSA/NAMRIA-derived
+    # 2023 PSGC dataset (via github.com/faeldon/philippines-json-maps). Covers every barangay
+    # in Bukidnon (22 municipalities) and Misamis Oriental (25 municipalities) — the two
+    # provinces pabs_results.csv currently has farms in.
+    psgc_lookup = pd.read_csv("app/data/psgc_region10_boundaries.csv")
+    psgc_lookup = psgc_lookup.set_index(['province', 'municipality', 'barangay'])['psgc_code']
+
     boundaries = df[['Province', 'Municipality', 'Barangay']].drop_duplicates()
-    for idx, (_, row) in enumerate(boundaries.iterrows()):
+    for _, row in boundaries.iterrows():
         # Check if boundary already exists
         cur.execute("""
-            SELECT boundary_id FROM tbl_admin_boundaries 
+            SELECT boundary_id FROM tbl_admin_boundaries
             WHERE province = %s AND municipality = %s AND barangay = %s
         """, (row['Province'], row['Municipality'], row['Barangay']))
         res = cur.fetchone()
         if not res:
-            # Generate a mock unique PSGC code for the boundaries found in the CSV
-            psgc_code = f"PH10{idx:06d}"
+            key = (row['Province'], row['Municipality'], row['Barangay'])
+            if key not in psgc_lookup.index:
+                raise ValueError(
+                    f"No PSGC code on file for {key}. Add it to "
+                    "app/data/psgc_region10_boundaries.csv before seeding."
+                )
+            psgc_code = str(psgc_lookup.loc[key])
             cur.execute("""
-                INSERT INTO tbl_admin_boundaries (psgc_code, province, municipality, barangay) 
+                INSERT INTO tbl_admin_boundaries (psgc_code, province, municipality, barangay)
                 VALUES (%s, %s, %s, %s)
             """, (psgc_code, row['Province'], row['Municipality'], row['Barangay']))
     conn.commit()

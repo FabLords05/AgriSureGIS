@@ -1,5 +1,7 @@
-import { useMemo } from "react";
-import { MapContainer, TileLayer, Polygon, Polyline, Circle, Popup } from "react-leaflet";
+import { useEffect, useMemo, useState } from "react";
+import { MapContainer, TileLayer, Polygon, Polyline, Circle, Popup, GeoJSON } from "react-leaflet";
+import type { Layer } from "leaflet";
+import type { Feature, FeatureCollection } from "geojson";
 import "leaflet/dist/leaflet.css";
 import { FarmerRecord } from "./mockData";
 
@@ -80,7 +82,33 @@ function farmPolygon(center: [number, number], areaHectare: number): [number, nu
   ];
 }
 
+// Region X (Northern Mindanao) municipality outlines, for spatial context only —
+// PSGC codes sourced from the PSA/NAMRIA-derived 2023 dataset. Not used in any
+// exposure calculation (ExposureCalculatorService still matches on province/
+// municipality/barangay text, per tbl_admin_boundaries having no geom column).
+const REGION_X_BOUNDARIES_URL = "/data/region10-boundaries.geojson";
+
+function styleBoundary() {
+  return { color: "#166534", weight: 1, opacity: 0.5, fillOpacity: 0, dashArray: "4, 4" };
+}
+
+function labelBoundary(feature: Feature, layer: Layer) {
+  const { province, municipality } = feature.properties ?? {};
+  if (municipality) {
+    layer.bindTooltip(`${municipality}, ${province}`, { sticky: true });
+  }
+}
+
 export function GISLeafletMap({ farmers, selectedFarmId, onSelectFarm, darkMode, filterMunicipality }: GISLeafletMapProps) {
+  const [regionXBoundaries, setRegionXBoundaries] = useState<FeatureCollection | null>(null);
+
+  useEffect(() => {
+    fetch(REGION_X_BOUNDARIES_URL)
+      .then(res => res.json())
+      .then(setRegionXBoundaries)
+      .catch(() => setRegionXBoundaries(null));
+  }, []);
+
   const visibleFarmers = filterMunicipality
     ? farmers.filter(f => f.municipality === filterMunicipality)
     : farmers;
@@ -103,14 +131,18 @@ export function GISLeafletMap({ farmers, selectedFarmId, onSelectFarm, darkMode,
   return (
     <div className="relative w-full h-full overflow-hidden rounded-lg border border-border bg-card">
       <MapContainer
-        center={[13.68, 123.2]}
-        zoom={10}
+        center={[8.38, 124.84]}
+        zoom={9}
         style={{ height: "100%", width: "100%" }}
       >
         <TileLayer
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
+
+        {regionXBoundaries && (
+          <GeoJSON data={regionXBoundaries} style={styleBoundary} onEachFeature={labelBoundary} />
+        )}
 
         <Polyline
           positions={TYPHOON_TRACK}

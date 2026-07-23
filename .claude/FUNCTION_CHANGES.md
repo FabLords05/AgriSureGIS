@@ -352,3 +352,33 @@ Replaced the frontend's MUI-based screens with the team's high-fidelity Figma "M
 * `npm run build` passes clean; verified both dev servers respond, but UI was not visually screenshotted (no browser-automation tool available in this environment) — Fabio should click through it locally before merging.
 * Not pushed yet — awaiting Fabio's push per the git workflow rules in `.claude/CLAUDE.md`.
 
+---
+
+## [2026-07-23] - Real PSGC Codes + Region X Boundary Map Layer
+
+Replaces the mock `tbl_admin_boundaries` PSGC codes with real ones, and adds a municipality-outline context layer to the Leaflet map. Scoped as "map layer only" per Fabio's decision — does **not** touch `tbl_admin_boundaries`'s schema or `ExposureCalculatorService`/`AssessmentService`'s existing text-matching logic (still no `geom` column, matching the gap already flagged in the 2026-07-21 Sprint 3 entry and `docs/ERD.drawio.png`'s stale divergence from the actual schema).
+
+Source: `github.com/faeldon/philippines-json-maps` (2023 PSGC-current, derived from PSA/NAMRIA data via `altcoder/philippines-psgc-shapefiles`). The official HDX COD-AB page (`data.humdata.org/dataset/cod-ab-phl`) is the canonical source but returns HTTP 403 to automated fetches (Cloudflare bot protection) — this GitHub mirror was used instead since it's directly fetchable and traces back to the same PSA/NAMRIA lineage. Verified against `backend/pabs_results.csv`: only Bukidnon/Talakag and Misamis Oriental/Claveria are actually seeded today.
+
+### 1. File: `backend/app/data/psgc_region10_boundaries.csv` (new)
+* Real PSGC codes for every barangay in all 22 Bukidnon municipalities and all 25 Misamis Oriental municipalities (888 barangays total), per Fabio's follow-up request to cover both provinces in full rather than just Talakag/Claveria. Verified spot-checks: San Isidro (Talakag) = `1001320027`, Poblacion (Claveria) = `1004306020`.
+
+### 2. File: `backend/seed_database.py`
+* **Changes to Functions (`run_setup()`):**
+  * Replaced the mock `psgc_code = f"PH10{idx:06d}"` generation with a real lookup against `app/data/psgc_region10_boundaries.csv` (loaded via pandas, indexed on `(province, municipality, barangay)`).
+  * If a CSV row's boundary isn't found in the reference file, `run_setup()` now raises `ValueError` naming the missing boundary, instead of silently minting a fake code — surfaces data gaps rather than hiding them.
+
+### 3. File: `frontend/public/data/region10-boundaries.geojson` (new)
+* Merged, low-res municipality polygons for all 5 Region X provinces (Bukidnon, Camiguin, Lanao del Norte, Misamis Occidental, Misamis Oriental — 91 municipalities, ~55KB), each feature carrying `psgc_province`, `psgc_municipality`, `province`, `municipality`. Served as a static asset (Vite `public/`) — no backend endpoint, since this data doesn't change at runtime.
+
+### 4. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* **Changes to Functions/Behavior:**
+  * Added a `GeoJSON` react-leaflet layer (`regionXBoundaries` state, fetched from `/data/region10-boundaries.geojson` on mount) rendering Region X municipality outlines — dashed green, no fill, `bindTooltip` on hover showing `municipality, province`. Presentation-only; not read by any calculation.
+  * Changed `MapContainer`'s default `center`/`zoom` from `[13.68, 123.2]`/`10` (Camarines Sur) to `[8.38, 124.84]`/`9` (Region X, centered between Talakag and Claveria) so the new layer is actually visible on load.
+
+### Status / Next Steps
+* **Not fixed, flagged only:** the map's mock farmer data (`mockData.ts`, ~20 rows) and the typhoon-track/signal-ring mock overlays (`GISLeafletMap.tsx`'s `MUNICIPALITY_CENTERS`/`TYPHOON_TRACK`/`SIGNAL_WIND_RINGS`) are still all Camarines Sur/Bicol coordinates (per the 2026-07-22 "High-Fidelity UI Adoption" entry). After this change, those will render far outside the new Region X default viewport. Fabio decided to leave this as-is for now rather than expand scope — replacing the mock farmer data with real Region X placeholders is a separate follow-up task.
+* Two Region X cities — Cagayan de Oro and Iligan (independent/highly-urbanized, administratively separate from any province) — aren't in the source repo's province-level files and weren't chased down further: not in `pabs_results.csv`, and PCIC insures rice farms rather than urban cores. Flagging in case boundary coverage there is wanted later.
+* Not run against a live database or `npm run build` — Fabio needs to re-run `seed_database.py` (per `CLAUDE.md`'s venv-handoff rule; will only succeed on a fresh/re-seeded `tbl_admin_boundaries`, since existing rows with mock `PH10######` codes won't be overwritten by the `SELECT ... WHERE province/municipality/barangay` existence check) and view the frontend locally.
+* Not pushed yet — awaiting Fabio's push per the git workflow rules in `.claude/CLAUDE.md`.
+
