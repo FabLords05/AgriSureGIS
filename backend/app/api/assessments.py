@@ -75,6 +75,7 @@ def list_assessments(
             {
                 "assessment_id": a.assessment_id,
                 "policy_no": a.insurance_record.policy_no if a.insurance_record else None,
+                "farm_id": a.insurance_record.farm_id if a.insurance_record else None,
                 "crop_stage": a.crop_stage,
                 "period_of_exposure": a.period_of_exposure,
                 "wind_velocity": a.wind_velocity,

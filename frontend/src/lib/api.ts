@@ -9,6 +9,44 @@ export interface Bulletin {
   max_sustained_winds: string | null;
   gustiness: string | null;
   issued_at: string | null;
+  center_lat: number | null;
+  center_lng: number | null;
+}
+
+export interface GeoJsonMultiPolygon {
+  type: "MultiPolygon";
+  coordinates: number[][][][];
+}
+
+export interface Farm {
+  farm_id: number;
+  farmer_id: number | null;
+  farmer_name: string | null;
+  province: string | null;
+  municipality: string | null;
+  barangay: string | null;
+  area_size: number | null;
+  csv_farm_reference: string | null;
+  georef_id: string | null;
+  location_geom: GeoJsonMultiPolygon | null;
+}
+
+export interface Assessment {
+  assessment_id: number;
+  policy_no: string | null;
+  farm_id: number | null;
+  crop_stage: string | null;
+  period_of_exposure: number | null;
+  wind_velocity: number | null;
+  estimated_damage: number;
+  final_indemnity_payment: number;
+  assessment_date: string;
+}
+
+export interface UploadGpxResult {
+  status: string;
+  message: string;
+  farm_id: number;
 }
 
 export interface UploadCsvResult {
@@ -60,4 +98,27 @@ export function parseBulletins(): Promise<ParseBulletinsResult> {
 
 export function getBulletinSignals(tcbId: number): Promise<TcbSignal[]> {
   return request<TcbSignal[]>(`/api/bulletins/${tcbId}/signals`);
+}
+
+export function uploadGpx(file: File, farmerId: number, farmId: number): Promise<UploadGpxResult> {
+  const formData = new FormData();
+  formData.append('file', file);
+  formData.append('farmer_id', String(farmerId));
+  formData.append('farm_id', String(farmId));
+  return request<UploadGpxResult>('/api/upload/gpx', {
+    method: 'POST',
+    body: formData,
+  });
+}
+
+export function getFarms(): Promise<{ status: string; data: Farm[] }> {
+  return request<{ status: string; data: Farm[] }>('/api/farms/');
+}
+
+export function getAssessments(typhoonId?: number, policyNo?: string): Promise<{ status: string; data: Assessment[] }> {
+  const params = new URLSearchParams();
+  if (typhoonId !== undefined) params.set('typhoon_id', String(typhoonId));
+  if (policyNo !== undefined) params.set('policy_no', policyNo);
+  const query = params.toString();
+  return request<{ status: string; data: Assessment[] }>(`/api/assessments/${query ? `?${query}` : ''}`);
 }
