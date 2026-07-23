@@ -428,6 +428,30 @@ An audit found Sprint 4 (parametric payout engine + real PCIC Table 11 data + CS
 
 ### Status / Next Steps
 * Not run against a live database or the frontend dev server — same handoff situation as the Sprint 3 entry: Fabio needs to run the backend test suite, exercise the three modified endpoints via Swagger UI, and click through the frontend himself.
-* An uncommitted, unrelated change was already present in the working tree when this branch was created: `.claude/DEVELOPMENT_PLAN.md`'s Sprint 4 formula was edited from `I = (AC / 1000) * IF * Area` to `I = (AC / 1000) * IF` (dropping `* Area`). This was not made by this work and contradicts the actual formula used everywhere in the real code (`indemnity_calc.py`, `PROJECT_CONTEXT.md`) — flagged to the user, who chose to keep and include it in this branch rather than revert it. Carried forward as-is; worth double-checking with Fabio.
+* An uncommitted, unrelated change was already present in the working tree when this branch was created: `.claude/DEVELOPMENT_PLAN.md`'s Sprint 4 formula was edited from `I = (AC / 1000) * IF * Area` to `I = (AC / 1000) * IF` (dropping `* Area`). This was not made by this work and contradicted the actual formula used everywhere in the real code (`indemnity_calc.py`, `PROJECT_CONTEXT.md`) at the time — flagged to the user, who chose to keep and include it in this branch rather than revert it. **Resolved by the entry below**, which confirmed this was correct per PCIC and fixed the rest of the codebase to match.
 * Branch is **not pushed** and has **no PR open**, and depends on `cristian/backend/wire-real-data-sprint3` merging first (stacked branch) — needs review before merging into `develop`.
+
+---
+
+## [2026-07-23] - Formula Correction: Drop `* Area` from the Indemnity Payout Calculation
+
+**Branch:** `cristian/backend/wire-real-data-sprint4` (same branch as the entry above; committed locally, not pushed, no PR open yet).
+
+Fabio confirmed the correct PCIC formula is `I = (AC / 1000) * IF` — farm area is **not** a factor. This corrects a bug: the payout engine had been computing `I = (AC / 1000) * IF * Area` this entire session (matching what `.claude/PROJECT_CONTEXT.md`/`MASTER_DEVELOPMENT_CONTEXT.md` documented at the time, which was itself wrong), silently over/under-paying every farm proportional to its area. Every prior changelog entry describing the old formula is left as historical record, not rewritten.
+
+### 1. File: `backend/app/core/indemnity_calc.py`
+* `ParametricAssessment.calculate_final_payout()`: dropped the `area_hectares` parameter and the `* area_hectares` term — now `payout = (amount_of_cover / 1000) * float(rule.indemnity_factor)`. Updated the docstring and the interactive `__main__` CLI testing block (no longer prompts for area).
+
+### 2. File: `backend/app/services/assessment_service.py`
+* `calculate_for_bulletin()`: removed the now-unused `area = float(insurance.farm.area_size)` local and stopped passing it to `calculate_final_payout()`. `estimated_damage`'s calculation (`amount_cover * yield_loss% / 100`) was never area-dependent and is unchanged.
+
+### 3. File: `backend/tests/test_assessment_service.py`
+* Recomputed the eligible-policy test's expected payout: `(50000/1000) * 330.00 = 16500.0` (was `41250.0`, which included the now-removed `* 2.5` area factor).
+
+### 4. Files: `.claude/PROJECT_CONTEXT.md`, `.claude/MASTER_DEVELOPMENT_CONTEXT.md`
+* Both updated from `I = (AC / 1000) * IF * Area` to `I = (AC / 1000) * IF`, matching `.claude/DEVELOPMENT_PLAN.md`'s already-corrected version and the fixed code.
+
+### Status / Next Steps
+* Not run against a live database — same handoff situation as every other entry in this file; Fabio needs to run the test suite himself to confirm.
+* This changes real computed payout amounts. If any assessments were ever computed against a live database using the old formula (unlikely given the repeated "never run against a live database" notes above, but worth confirming), those `RiskAssessment.final_indemnity_payment` values would need recomputing.
 
