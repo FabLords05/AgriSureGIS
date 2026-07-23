@@ -332,16 +332,17 @@ function SARQuickViewModal({ farmer, onClose }: { farmer: FarmerRecord; onClose:
 
 interface MonitoringModuleProps {
   darkMode: boolean;
+  selectedBulletin: Bulletin | null;
+  onSelectBulletin: (bulletin: Bulletin | null) => void;
 }
 
-export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
+export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin }: MonitoringModuleProps) {
   const [bulletins, setBulletins] = useState<Bulletin[]>([]);
   const [isLoadingBulletins, setIsLoadingBulletins] = useState(false);
   const [isParsing, setIsParsing] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [lastCheck, setLastCheck] = useState<string | null>(null);
 
-  const [selectedBulletin, setSelectedBulletin] = useState<Bulletin | null>(null);
   const [selectedSignals, setSelectedSignals] = useState<TcbSignal[]>([]);
   const [isLoadingSelectedSignals, setIsLoadingSelectedSignals] = useState(false);
 
@@ -388,8 +389,9 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
   };
 
   const handleSelectBulletin = async (b: Bulletin) => {
-    setSelectedBulletin(prev => (prev?.tcb_id === b.tcb_id ? null : b));
-    if (selectedBulletin?.tcb_id === b.tcb_id) return;
+    const isDeselecting = selectedBulletin?.tcb_id === b.tcb_id;
+    onSelectBulletin(isDeselecting ? null : b);
+    if (isDeselecting) return;
     setSelectedSignals([]);
     setIsLoadingSelectedSignals(true);
     try {
@@ -564,7 +566,7 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
                     Areas: {isLoadingSelectedSignals ? "Loading…" : (uniqueAreas(selectedSignals).join(" • ") || "No signal data recorded")}
                   </p>
                 </div>
-                <button onClick={() => setSelectedBulletin(null)} className="text-muted-foreground text-[10px] hover:text-foreground mt-0.5">✕</button>
+                <button onClick={() => onSelectBulletin(null)} className="text-muted-foreground text-[10px] hover:text-foreground mt-0.5">✕</button>
               </div>
               {/* Farmer list with SAR quick-view, cross-referenced by the bulletin's highest recorded signal level */}
               {selectedMaxSignal > 0 && (

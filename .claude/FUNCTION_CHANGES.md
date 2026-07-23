@@ -382,3 +382,58 @@ Source: `github.com/faeldon/philippines-json-maps` (2023 PSGC-current, derived f
 * Not run against a live database or `npm run build` — Fabio needs to re-run `seed_database.py` (per `CLAUDE.md`'s venv-handoff rule; will only succeed on a fresh/re-seeded `tbl_admin_boundaries`, since existing rows with mock `PH10######` codes won't be overwritten by the `SELECT ... WHERE province/municipality/barangay` existence check) and view the frontend locally.
 * Not pushed yet — awaiting Fabio's push per the git workflow rules in `.claude/CLAUDE.md`.
 
+---
+
+## [2026-07-23] - Sprint 3 Close-Out: Wire Real Farm/Bulletin Data into the Spatial UI
+
+**Branch:** `cristian/backend/wire-real-data-sprint3` (cut from `develop`; committed locally, not pushed, no PR open yet).
+
+Rechecked Sprint 3 after the Sprint 3/4 backend work, real recsap matrix data, and the high-fidelity frontend UI had all merged into `develop`, and found none of Sprint 3's backend deliverables (GPX parser, exposure calculator) were actually reachable from the UI: the GPX dropzone faked uploads with a `setTimeout`, `GISLeafletMap.tsx` rendered 100% hardcoded/mock data, and there was no `GET /api/farms/` endpoint at all — so the frontend had no way to fetch real farm data even if it tried. This entry closes that gap end-to-end.
+
+### 1. File: `backend/app/api/farms.py` (new)
+* Added **`list_farms()`** (`GET /api/farms/`): lists all farms with farmer name, province/municipality/barangay, area size, and `location_geom` serialized to GeoJSON via `geoalchemy2.shape.to_shape()` + `shapely.geometry.mapping()` (`None` if no GPX has been uploaded yet). Response envelope: `{"status", "data": [...]}`, matching `assessments.py`'s convention.
+
+### 2. File: `backend/app/api/bulletins.py`
+* `list_bulletins()`: added `center_lat`/`center_lng` (derived from `TropicalCycloneBulletin.center_geom` via `to_shape()`) to each row, so the frontend can place a real typhoon marker instead of a hardcoded one. Bare-array envelope left unchanged.
+
+### 3. File: `backend/app/api/assessments.py`
+* `list_assessments()`: added `farm_id` (via `a.insurance_record.farm_id`) to each row — previously assessments were only keyed by `policy_no`, with no way to trace a computed assessment back to a specific farm. This is the join key the frontend now uses to attach real wind-signal/exposure/payout data onto the real farm table.
+
+### 4. File: `backend/app/main.py`
+* Registered `farms_router` under the `/api` prefix.
+
+### 5. File: `frontend/src/lib/api.ts`
+* Added **`uploadGpx(file, farmerId, farmId)`** → `POST /api/upload/gpx`, **`getFarms()`** → `GET /api/farms/`, **`getAssessments(typhoonId?, policyNo?)`** → `GET /api/assessments/`. Added `Farm`, `GeoJsonMultiPolygon`, `Assessment`, `UploadGpxResult` types; extended `Bulletin` with `center_lat`/`center_lng`.
+
+### 6. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* **Replaced the `mockFarmers`-driven table with real data** (`getFarms()` + `getAssessments()`, joined client-side by `farm_id`) — this went beyond the originally-scoped "minimal dropdown" approach per an explicit decision to do the bigger rework instead. Columns not backed by any real field (`plantingDate`, mock `growthStage` taxonomy) were dropped rather than faked; wind signal / exposure / payout columns show "Not yet assessed" / "—" when no matching `RiskAssessment` exists for that farm — **expect most/all rows to show this initially**, since the payout engine has never been run against a live database. This is expected, not a bug.
+* GPX upload targeting: since the table is now real, **selecting a table row is the upload target** (no separate dropdown needed) — `processFiles()`'s `.gpx` branch now calls `uploadGpx()` for real against the selected row's `farmer_id`/`farm_id`, replacing the previous fake `setTimeout`-only placeholder. Re-fetches `getFarms()` afterward so the map picks up the new geometry immediately.
+* Municipality filter options are now derived from real farm data instead of a hardcoded Camarines Sur town list.
+
+### 7. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* **Deviates from the plan's "additive layer, keep mock untouched" wording** — since the table driving selection is now fully real (per item 6), keeping the old `FarmerRecord`-based mock layer as a second, disconnected, unselectable layer would have been confusing (clicking a real table row wouldn't highlight anything in it, and its farms don't correspond to any table row anymore). Instead, the component's farm layer is now fully real-data-driven: farms with `location_geom` render as real `<GeoJSON>` boundary polygons; farms without one yet render as small `<CircleMarker>` dots at an approximate municipality-center placement (reusing the old grid-spread logic, just for placement, not as a fake boundary shape) so they stay visible/selectable as GPX upload targets. Confirmed via grep this component has no other callers, so the prop-signature change is safe.
+* Removed `TYPHOON_TRACK`/`TYPHOON_EYE`/`SIGNAL_WIND_RINGS` (hardcoded, explicitly commented "Simulated") entirely. Replaced with a real `<Marker>` at the selected bulletin's `center_lat`/`center_lng` (custom inline-SVG `L.divIcon`, sidestepping the well-known Vite/Webpack "missing default Leaflet marker icon" asset-resolution issue rather than fixing that separately) plus a real affected-municipality list via the already-working `getBulletinSignals()`, both in the marker's popup. No polygon/radius overlay — that geometry doesn't exist (see the new schema proposal, item 9).
+
+### 8. Files: `frontend/src/app/App.tsx`, `frontend/src/app/components/MonitoringModule.tsx`
+* Lifted `selectedBulletin` state from `MonitoringModule` up to `App.tsx` (passed down as `selectedBulletin`/`onSelectBulletin` props to both `MonitoringModule` and `SpatialAnalysisModule`), so one typhoon-event selection is shared app-wide instead of `SpatialAnalysisModule` needing its own independent, duplicate bulletin picker. `MonitoringModule.handleSelectBulletin()` now calls the passed-down setter instead of owning local state; its own signal-list fetching logic is otherwise unchanged.
+
+### 9. File: `docs/PROPOSAL_boundary_geometry.md` (new)
+* Drafted (not implemented) a proposal for Fabio: add `tbl_admin_boundaries.geom` (municipal boundary polygon) and `tbl_tcb_signals.boundary_id` (FK, replacing today's fragile `area_name` text-matching). This is the real blocker for ever rendering a true "typhoon path crosses this municipality" polygon overlay — reconfirmed against `docs/ERD.drawio.png`, which already shows both fields in the intended design. No schema change made; awaiting Fabio's review per the DB Admin approval rule in `CLAUDE.md`.
+
+### Status / Next Steps
+* Not run against a live database or the frontend dev server — I can no longer run venv/pytest/npm commands myself (per `CLAUDE.md`'s handoff rules); Fabio needs to run the backend test suite, exercise the three endpoints via Swagger UI, and click through the frontend (`npm run dev`) himself to confirm end-to-end.
+* `location_geom`'s GeoJSON shape is passed to react-leaflet's `<GeoJSON data={...}>` with an `as any` cast (its prop type expects the `geojson` package's `GeoJsonObject`, which our hand-rolled `GeoJsonMultiPolygon` interface structurally matches but isn't declared as) — flagging in case `npm run build`'s type-check is stricter than expected; not verified since I can't run the build myself.
+* `frontend/src/app/components/mockData.ts`'s `mockFarmers` is still used elsewhere (`MonitoringModule.tsx`'s dashboard stats, `AssessmentModule.tsx`) — untouched, out of scope for this entry.
+* Branch is **not pushed** and has **no PR open** — needs review before merging into `develop`.
+
+---
+
+## [2026-07-23] - Merge Conflict Resolution: Region X Boundary Layer + Sprint 3/4 Real-Data Rewrite
+
+Merging `cristian/backend/wire-real-data-sprint3` into `develop` produced a genuine structural conflict in `frontend/src/app/components/GISLeafletMap.tsx` — `develop`'s "Real PSGC Codes + Region X Boundary Map Layer" entry (above) added a municipality-outline `GeoJSON` layer on top of the *old* mock-farmer-driven component, while the Sprint 3 entry completely rewrote the same component for real farm/typhoon data. Resolved by hand rather than picking a side: kept the Sprint 3 rewrite's structure (real `GeoJSON` farm boundaries, real typhoon marker, `CircleMarker` fallback placement) and merged in the Region X boundary layer feature (`regionXBoundaries` state/fetch, `styleBoundary()`/`labelBoundary()`, the `<GeoJSON>` outline layer) on top of it.
+
+While reconciling, corrected a latent bug the Sprint 3 rewrite had carried over unnoticed: `MUNICIPALITY_CENTERS` (used to place farms without a GPX boundary yet) still listed the old mock UI's Camarines Sur towns (Naga City, Pili, etc.), which don't match any real seeded data. Replaced with the two municipalities actually seeded per `pabs_results.csv` (Talakag, Bukidnon and Claveria, Misamis Oriental), and changed `DEFAULT_CENTER`/zoom to Region X (matching the boundary-layer commit's map view) instead of the leftover Camarines Sur default.
+
+### Status / Next Steps
+* Not verified with a build/dev server — same handoff situation as both merged entries; Fabio needs to run `npm run build`/`npm run dev` to confirm the reconciled component compiles and renders both the real farm/typhoon layers and the Region X boundary outline together correctly.
+

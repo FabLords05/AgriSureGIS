@@ -1,47 +1,81 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 import {
   UploadCloud, FileText, Map as MapIcon, ChevronUp, ChevronDown,
   Filter, ArrowUpDown, Download, AlertTriangle, CheckCircle2, Table2, Satellite
 } from "lucide-react";
 import { GISLeafletMap } from "./GISLeafletMap";
 import { AOISARPanel } from "./AOISARPanel";
-import { mockFarmers, FarmerRecord, GrowthStage } from "./mockData";
-import { uploadCsv } from "@/lib/api";
+import { uploadCsv, uploadGpx, getFarms, getAssessments, Farm, Assessment, Bulletin } from "@/lib/api";
 
-type SortField = keyof FarmerRecord;
+interface FarmRow extends Farm {
+  assessment: Assessment | null;
+}
+
+type SortField = "farm_id" | "farmer_name" | "municipality" | "barangay" | "area_size";
 type SortDir   = "asc" | "desc";
 
 interface UploadedFile { name: string; size: string; type: "csv" | "gpx"; status: "ready" | "processing" | "done" | "error" }
 
 interface SpatialAnalysisModuleProps {
   darkMode: boolean;
+  selectedBulletin: Bulletin | null;
 }
 
-const MUNICIPALITIES = ["All", "Naga City", "Pili", "Libmanan", "Sipocot", "Goa", "Lagonoy"];
-const GROWTH_STAGES: (GrowthStage | "All")[] = ["All", "Seedling", "Vegetative", "Reproductive", "Ripening"];
-
-export function SpatialAnalysisModule({ darkMode }: SpatialAnalysisModuleProps) {
-  const [farmers, setFarmers] = useState<FarmerRecord[]>(mockFarmers);
-  const [selectedFarmId, setSelectedFarmId] = useState<string | null>(null);
+export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAnalysisModuleProps) {
+  const [farms, setFarms] = useState<Farm[]>([]);
+  const [assessments, setAssessments] = useState<Assessment[]>([]);
+  const [isLoadingFarms, setIsLoadingFarms] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [selectedFarmId, setSelectedFarmId] = useState<number | null>(null);
   const [showSARPanel, setShowSARPanel]      = useState(false);
   const [filterMuni, setFilterMuni] = useState("All");
-  const [filterStage, setFilterStage] = useState<GrowthStage | "All">("All");
-  const [filterPlanted, setFilterPlanted] = useState<"All" | "Yes" | "No">("All");
-  const [sortField, setSortField] = useState<SortField>("rowId");
+  const [sortField, setSortField] = useState<SortField>("farm_id");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
   const [isDragging, setIsDragging] = useState(false);
   const [topPanelH, setTopPanelH] = useState(55);
   const [showWarning, setShowWarning] = useState<string | null>(null);
-  const [csvUploadStatus, setCsvUploadStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [uploadStatus, setUploadStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const filteredFarmers = farmers
+  const refreshFarms = () => {
+    setIsLoadingFarms(true);
+    setLoadError(null);
+    getFarms()
+      .then(res => setFarms(res.data))
+      .catch(error => setLoadError(error instanceof Error ? error.message : "Failed to load farms."))
+      .finally(() => setIsLoadingFarms(false));
+  };
+
+  useEffect(() => {
+    refreshFarms();
+    getAssessments().then(res => setAssessments(res.data)).catch(() => setAssessments([]));
+  }, []);
+
+  // Most recent assessment per farm_id (list_assessments() is ordered by assessment_date desc).
+  const assessmentByFarmId = useMemo(() => {
+    const map = new Map<number, Assessment>();
+    for (const a of assessments) {
+      if (a.farm_id != null && !map.has(a.farm_id)) map.set(a.farm_id, a);
+    }
+    return map;
+  }, [assessments]);
+
+  const farmRows: FarmRow[] = useMemo(
+    () => farms.map(f => ({ ...f, assessment: assessmentByFarmId.get(f.farm_id) ?? null })),
+    [farms, assessmentByFarmId]
+  );
+
+  const municipalities = useMemo(() => {
+    const set = new Set(farmRows.map(f => f.municipality).filter((m): m is string => !!m));
+    return ["All", ...Array.from(set).sort()];
+  }, [farmRows]);
+
+  const filteredFarms = farmRows
     .filter(f => filterMuni === "All" || f.municipality === filterMuni)
-    .filter(f => filterStage === "All" || f.growthStage === filterStage)
-    .filter(f => filterPlanted === "All" || (filterPlanted === "Yes" ? f.planted : !f.planted))
     .sort((a, b) => {
-      const va = a[sortField]; const vb = b[sortField];
+      const va = a[sortField] ?? "";
+      const vb = b[sortField] ?? "";
       const cmp = typeof va === "number" && typeof vb === "number"
         ? va - vb
         : String(va).localeCompare(String(vb));
@@ -78,33 +112,53 @@ export function SpatialAnalysisModule({ darkMode }: SpatialAnalysisModuleProps) 
         uploadCsv(file)
           .then(result => {
             setUploadedFiles(prev => prev.map(f => f.name === newFile.name ? { ...f, status: "done" } : f));
-            setCsvUploadStatus({
+            setUploadStatus({
               type: "success",
               message: `${result.message} (${result.rows_inserted} inserted, ${result.rows_skipped} skipped)`,
             });
+            refreshFarms();
           })
           .catch(error => {
             setUploadedFiles(prev => prev.map(f => f.name === newFile.name ? { ...f, status: "error" } : f));
-            setCsvUploadStatus({
+            setUploadStatus({
               type: "error",
               message: error instanceof Error ? error.message : "CSV upload failed.",
             });
           });
       } else {
-        // GPX ingestion has no backend endpoint yet — kept as a visual-only placeholder.
-        setTimeout(() => {
-          setUploadedFiles(prev => prev.map(f => f.name === newFile.name ? { ...f, status: "done" } : f));
-        }, 1500);
+        const targetFarm = farms.find(f => f.farm_id === selectedFarmId);
+        if (!targetFarm || targetFarm.farmer_id == null) {
+          setUploadedFiles(prev => prev.map(f => f.name === newFile.name ? { ...f, status: "error" } : f));
+          setShowWarning("Select a farm row in the table before uploading a GPX boundary file.");
+          return;
+        }
+        uploadGpx(file, targetFarm.farmer_id, targetFarm.farm_id)
+          .then(() => {
+            setUploadedFiles(prev => prev.map(f => f.name === newFile.name ? { ...f, status: "done" } : f));
+            setUploadStatus({
+              type: "success",
+              message: `GPX boundary uploaded for Farm #${targetFarm.farm_id}.`,
+            });
+            refreshFarms();
+          })
+          .catch(error => {
+            setUploadedFiles(prev => prev.map(f => f.name === newFile.name ? { ...f, status: "error" } : f));
+            setUploadStatus({
+              type: "error",
+              message: error instanceof Error ? error.message : "GPX upload failed.",
+            });
+          });
       }
     });
   };
 
   const handleExportPeriodOfExposure = () => {
-    const headers = ["ROW_ID","FARMER_ID","INSURED_NAME","MUNICIPALITY","BARANGAY","FARM_ID","AREA_HA","PLANTED","PLANTING_DATE","GROWTH_STAGE","SIGNAL_NO","PERIOD_OF_EXPOSURE_HRS","WIND_VEL_MIN","WIND_VEL_MAX"];
-    const rows = filteredFarmers.map(f => [
-      f.rowId, f.farmerId, f.insuredName, f.municipality, f.barangay, f.farmId,
-      f.areaHectare, f.planted ? "Yes":"No", f.plantingDate, f.growthStage,
-      f.signalNo, f.periodOfExposure, f.windVelocityMin, f.windVelocityMax,
+    const headers = ["FARM_ID","FARMER","MUNICIPALITY","BARANGAY","AREA_HA","HAS_GPX_BOUNDARY","CROP_STAGE","WIND_SIGNAL","PERIOD_OF_EXPOSURE_HRS","FINAL_INDEMNITY_PAYMENT"];
+    const rows = filteredFarms.map(f => [
+      f.farm_id, f.farmer_name ?? "", f.municipality ?? "", f.barangay ?? "",
+      f.area_size ?? "", f.location_geom ? "Yes" : "No",
+      f.assessment?.crop_stage ?? "", f.assessment?.wind_velocity ?? "",
+      f.assessment?.period_of_exposure ?? "", f.assessment?.final_indemnity_payment ?? "",
     ]);
     const csv = [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
     const uri = "data:text/csv;charset=utf-8," + encodeURIComponent(csv);
@@ -121,13 +175,8 @@ export function SpatialAnalysisModule({ darkMode }: SpatialAnalysisModuleProps) 
       ? sortDir === "asc" ? <ChevronUp size={11} /> : <ChevronDown size={11} />
       : <ArrowUpDown size={10} className="opacity-30" />;
 
-  const stageColors: Record<string, string> = {
-    Seedling:"bg-green-100 text-green-700", Vegetative:"bg-emerald-100 text-emerald-700",
-    Reproductive:"bg-yellow-100 text-yellow-700", Ripening:"bg-amber-100 text-amber-700",
-  };
-
   const signalColors: Record<number, string> = {
-    1:"text-emerald-600 font-bold", 2:"text-amber-600 font-bold", 3:"text-red-600 font-bold",
+    2:"text-amber-600 font-bold", 3:"text-orange-600 font-bold", 4:"text-red-600 font-bold", 5:"text-red-800 font-bold",
   };
 
   return (
@@ -157,7 +206,9 @@ export function SpatialAnalysisModule({ darkMode }: SpatialAnalysisModuleProps) 
         <div className="flex items-center gap-3 px-4 py-2 bg-card border-b border-border shrink-0">
           <div className="flex items-center gap-2">
             <MapIcon size={14} className="text-[#166534]" />
-            <span className="text-xs font-semibold">Camarines Sur — Typhoon Pepito Impact Map</span>
+            <span className="text-xs font-semibold">
+              {selectedBulletin ? `${selectedBulletin.typhoon_name} Impact Map` : "Spatial Impact Map"}
+            </span>
           </div>
           <div className="flex items-center gap-2 ml-auto">
             <Filter size={11} className="text-muted-foreground" />
@@ -167,7 +218,7 @@ export function SpatialAnalysisModule({ darkMode }: SpatialAnalysisModuleProps) 
               onChange={e => setFilterMuni(e.target.value)}
               className="text-[11px] border border-border rounded px-2 py-1 bg-background"
             >
-              {MUNICIPALITIES.map(m => <option key={m}>{m}</option>)}
+              {municipalities.map(m => <option key={m}>{m}</option>)}
             </select>
             <button
               onClick={handleExportPeriodOfExposure}
@@ -187,11 +238,11 @@ export function SpatialAnalysisModule({ darkMode }: SpatialAnalysisModuleProps) 
         {/* Map canvas + SAR panel overlay */}
         <div className="flex-1 overflow-hidden p-2 relative">
           <GISLeafletMap
-            farmers={farmers}
+            farms={filterMuni === "All" ? farmRows : farmRows.filter(f => f.municipality === filterMuni)}
             selectedFarmId={selectedFarmId}
             onSelectFarm={setSelectedFarmId}
+            selectedBulletin={selectedBulletin}
             darkMode={darkMode}
-            filterMunicipality={filterMuni === "All" ? undefined : filterMuni}
           />
           {/* SAR AOI Panel — slides in over the map */}
           {showSARPanel && (
@@ -242,7 +293,9 @@ export function SpatialAnalysisModule({ darkMode }: SpatialAnalysisModuleProps) 
           >
             <UploadCloud size={20} className={`mx-auto mb-1.5 ${isDragging ? "text-[#166534]" : "text-muted-foreground"}`} />
             <p className="text-[10px] font-medium">Drop files here or click to browse</p>
-            <p className="text-[9px] text-muted-foreground mt-0.5">Accepts .CSV farmer records, .GPX farm polygons</p>
+            <p className="text-[9px] text-muted-foreground mt-0.5">
+              .CSV farmer records &middot; .GPX farm polygon (select a farm row first)
+            </p>
             <input
               ref={fileInputRef}
               type="file" accept=".csv,.gpx" multiple hidden
@@ -250,25 +303,21 @@ export function SpatialAnalysisModule({ darkMode }: SpatialAnalysisModuleProps) 
             />
           </div>
 
-          {csvUploadStatus && (
+          {uploadStatus && (
             <div
               className="mx-2 mb-2 text-[10px] p-2 rounded-lg"
               style={{
-                backgroundColor: csvUploadStatus.type === "success" ? "var(--sidebar-accent)" : "var(--destructive)",
-                color: csvUploadStatus.type === "success" ? "var(--sidebar-accent-foreground)" : "white",
+                backgroundColor: uploadStatus.type === "success" ? "var(--sidebar-accent)" : "var(--destructive)",
+                color: uploadStatus.type === "success" ? "var(--sidebar-accent-foreground)" : "white",
               }}
             >
-              {csvUploadStatus.message}
+              {uploadStatus.message}
             </div>
           )}
 
           {/* Uploaded / imported file indicators */}
           <div className="px-2 space-y-1.5 flex-1 overflow-auto">
-            {[
-              { name:"bicol_farmers_2024.csv",    size:"48 KB",  type:"csv" as const, status:"done" as const },
-              { name:"camarines_sur_gpx.gpx",     size:"2.1 MB", type:"gpx" as const, status:"done" as const },
-              ...uploadedFiles,
-            ].map((f, i) => (
+            {uploadedFiles.map((f, i) => (
               <div key={i} className="flex items-center gap-2 bg-card border border-border rounded-lg px-2.5 py-2">
                 <FileText size={12} className={f.type === "csv" ? "text-blue-500" : "text-amber-500"} />
                 <div className="flex-1 min-w-0">
@@ -285,29 +334,19 @@ export function SpatialAnalysisModule({ darkMode }: SpatialAnalysisModuleProps) 
           </div>
         </div>
 
-        {/* Right: Farmer Records Table */}
+        {/* Right: Farm Records Table */}
         <div className="flex-1 flex flex-col overflow-hidden">
           <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-card shrink-0 flex-wrap gap-y-1">
             <div className="flex items-center gap-1.5">
               <Table2 size={13} className="text-[#166534]" />
-              <span className="text-[11px] font-semibold">Farmer Records</span>
-              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">{filteredFarmers.length} records</span>
+              <span className="text-[11px] font-semibold">Farm Records</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">
+                {isLoadingFarms ? "Loading…" : `${filteredFarms.length} records`}
+              </span>
+              {loadError && <span className="text-[10px] text-red-500">{loadError}</span>}
             </div>
-            <div className="flex items-center gap-1.5 ml-auto flex-wrap gap-y-1">
-              <select
-                value={filterStage}
-                onChange={e => setFilterStage(e.target.value as GrowthStage | "All")}
-                className="text-[10px] border border-border rounded px-1.5 py-0.5 bg-background"
-              >
-                {GROWTH_STAGES.map(s => <option key={s}>{s}</option>)}
-              </select>
-              <select
-                value={filterPlanted}
-                onChange={e => setFilterPlanted(e.target.value as "All" | "Yes" | "No")}
-                className="text-[10px] border border-border rounded px-1.5 py-0.5 bg-background"
-              >
-                {["All","Yes","No"].map(v => <option key={v}>Planted: {v}</option>)}
-              </select>
+            <div className="ml-auto text-[9px] text-muted-foreground">
+              Click a row to select it as the GPX upload target &amp; highlight it on the map
             </div>
           </div>
 
@@ -316,18 +355,11 @@ export function SpatialAnalysisModule({ darkMode }: SpatialAnalysisModuleProps) 
               <thead className="sticky top-0 z-10">
                 <tr className="bg-[#166534] text-white">
                   {[
-                    { label:"#",           field:"rowId"          as SortField },
-                    { label:"Farmer ID",   field:"farmerId"       as SortField },
-                    { label:"Insured Name",field:"insuredName"    as SortField },
-                    { label:"Municipality",field:"municipality"   as SortField },
-                    { label:"Barangay",    field:"barangay"       as SortField },
-                    { label:"Farm ID",     field:"farmId"         as SortField },
-                    { label:"Area (ha)",   field:"areaHectare"    as SortField },
-                    { label:"Planted",     field:"planted"        as SortField },
-                    { label:"Plant Date",  field:"plantingDate"   as SortField },
-                    { label:"Stage",       field:"growthStage"    as SortField },
-                    { label:"Signal",      field:"signalNo"       as SortField },
-                    { label:"Exp (h)",     field:"periodOfExposure" as SortField },
+                    { label:"Farm ID",     field:"farm_id"     as SortField },
+                    { label:"Farmer",      field:"farmer_name" as SortField },
+                    { label:"Municipality",field:"municipality" as SortField },
+                    { label:"Barangay",    field:"barangay"    as SortField },
+                    { label:"Area (ha)",   field:"area_size"   as SortField },
                   ].map(col => (
                     <th
                       key={col.field}
@@ -339,34 +371,39 @@ export function SpatialAnalysisModule({ darkMode }: SpatialAnalysisModuleProps) 
                       </span>
                     </th>
                   ))}
+                  <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">GPX Boundary</th>
+                  <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Crop Stage</th>
+                  <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Signal</th>
+                  <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Exp (h)</th>
+                  <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Est. Payment</th>
                 </tr>
               </thead>
               <tbody>
-                {filteredFarmers.map(f => (
+                {filteredFarms.map(f => (
                   <tr
-                    key={f.farmId}
-                    onClick={() => setSelectedFarmId(f.farmId === selectedFarmId ? null : f.farmId)}
-                    className={`border-t border-border cursor-pointer transition-colors hover:bg-muted/50 ${f.farmId === selectedFarmId ? "bg-[#166534]/10 border-l-2 border-l-[#166534]" : ""}`}
+                    key={f.farm_id}
+                    onClick={() => setSelectedFarmId(f.farm_id === selectedFarmId ? null : f.farm_id)}
+                    className={`border-t border-border cursor-pointer transition-colors hover:bg-muted/50 ${f.farm_id === selectedFarmId ? "bg-[#166534]/10 border-l-2 border-l-[#166534]" : ""}`}
                   >
-                    <td className="px-2.5 py-2 text-muted-foreground">{f.rowId}</td>
-                    <td className="px-2.5 py-2 font-mono">{f.farmerId.slice(-5)}</td>
-                    <td className="px-2.5 py-2 font-medium whitespace-nowrap">{f.insuredName}</td>
-                    <td className="px-2.5 py-2">{f.municipality}</td>
-                    <td className="px-2.5 py-2 text-muted-foreground">{f.barangay}</td>
-                    <td className="px-2.5 py-2 font-mono text-[#166534]">{f.farmId}</td>
-                    <td className="px-2.5 py-2 text-right">{f.areaHectare.toFixed(2)}</td>
+                    <td className="px-2.5 py-2 font-mono text-[#166534]">#{f.farm_id}</td>
+                    <td className="px-2.5 py-2 font-medium whitespace-nowrap">{f.farmer_name ?? "—"}</td>
+                    <td className="px-2.5 py-2">{f.municipality ?? "—"}</td>
+                    <td className="px-2.5 py-2 text-muted-foreground">{f.barangay ?? "—"}</td>
+                    <td className="px-2.5 py-2 text-right">{f.area_size != null ? f.area_size.toFixed(2) : "—"}</td>
                     <td className="px-2.5 py-2">
-                      {f.planted
+                      {f.location_geom
                         ? <span className="text-emerald-600 flex items-center gap-0.5"><CheckCircle2 size={10} />Yes</span>
                         : <span className="text-muted-foreground">No</span>
                       }
                     </td>
-                    <td className="px-2.5 py-2 whitespace-nowrap text-muted-foreground">{f.plantingDate}</td>
-                    <td className="px-2.5 py-2">
-                      <span className={`px-1.5 py-0.5 rounded text-[10px] ${stageColors[f.growthStage]}`}>{f.growthStage}</span>
+                    <td className="px-2.5 py-2">{f.assessment?.crop_stage ?? "Not yet assessed"}</td>
+                    <td className={`px-2.5 py-2 ${f.assessment?.wind_velocity ? signalColors[f.assessment.wind_velocity] ?? "" : "text-muted-foreground"}`}>
+                      {f.assessment?.wind_velocity ? `No. ${f.assessment.wind_velocity}` : "—"}
                     </td>
-                    <td className={`px-2.5 py-2 ${signalColors[f.signalNo]}`}>No. {f.signalNo}</td>
-                    <td className="px-2.5 py-2 text-right">{f.periodOfExposure > 0 ? f.periodOfExposure : "—"}</td>
+                    <td className="px-2.5 py-2 text-right">{f.assessment?.period_of_exposure ?? "—"}</td>
+                    <td className="px-2.5 py-2 text-right font-medium">
+                      {f.assessment ? `₱${f.assessment.final_indemnity_payment.toLocaleString()}` : "—"}
+                    </td>
                   </tr>
                 ))}
               </tbody>

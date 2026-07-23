@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from geoalchemy2.shape import to_shape
 from sqlalchemy.orm import Session
 import os
 import shutil
@@ -22,6 +23,7 @@ def list_bulletins(db: Session = Depends(get_db)):
     results = []
     for b in bulletins:
         typhoon = db.query(Typhoon).filter(Typhoon.typhoon_id == b.typhoon_id).first()
+        center_point = to_shape(b.center_geom) if b.center_geom is not None else None
         results.append({
             "tcb_id": b.tcb_id,
             "title": b.title,
@@ -30,7 +32,9 @@ def list_bulletins(db: Session = Depends(get_db)):
             "typhoon_name": typhoon.name if typhoon else "Unknown",
             "max_sustained_winds": b.max_sustained_winds,
             "gustiness": b.gustiness,
-            "issued_at": b.issued_at
+            "issued_at": b.issued_at,
+            "center_lat": center_point.y if center_point else None,
+            "center_lng": center_point.x if center_point else None,
         })
     return results
 

@@ -7,6 +7,7 @@ import { SpatialAnalysisModule } from "./components/SpatialAnalysisModule";
 import { AssessmentModule } from "./components/AssessmentModule";
 import { CalibrationModule } from "./components/CalibrationModule";
 import { mockNotifications, AppNotification } from "./components/mockData";
+import { Bulletin } from "@/lib/api";
 
 interface CurrentUser {
   name: string;
@@ -20,6 +21,7 @@ export default function App() {
   const [darkMode, setDarkMode]           = useState(false);
   const [coverageRatePerHa, setCoverageRatePerHa] = useState(25000);
   const [notifications, setNotifications] = useState<AppNotification[]>(mockNotifications);
+  const [selectedBulletin, setSelectedBulletin] = useState<Bulletin | null>(null);
 
   const handleLogin = (user: CurrentUser) => {
     setCurrentUser(user);
@@ -53,8 +55,19 @@ export default function App() {
         />
 
         <main className="flex-1 overflow-hidden">
-          {activeModule === "monitoring"  && <MonitoringModule darkMode={darkMode} />}
-          {activeModule === "spatial"     && <SpatialAnalysisModule darkMode={darkMode} />}
+          {activeModule === "monitoring"  && (
+            <MonitoringModule
+              darkMode={darkMode}
+              selectedBulletin={selectedBulletin}
+              onSelectBulletin={setSelectedBulletin}
+            />
+          )}
+          {activeModule === "spatial"     && (
+            <SpatialAnalysisModule
+              darkMode={darkMode}
+              selectedBulletin={selectedBulletin}
+            />
+          )}
           {activeModule === "assessment"  && (
             <AssessmentModule
               darkMode={darkMode}
