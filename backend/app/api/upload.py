@@ -1,12 +1,15 @@
+import functools
 import io
 import logging
 import re
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -17,6 +20,27 @@ from app.services.gpx_parser import GpxParserService
 router = APIRouter(prefix="/api/upload", tags=["upload"])
 
 logger = logging.getLogger(__name__)
+
+_PSGC_LOOKUP_PATH = Path(__file__).resolve().parent.parent / "data" / "psgc_region10_boundaries.csv"
+
+
+def _boundary_key(province: str, municipality: str, barangay: str) -> tuple[str, str, str]:
+    """Real PABS exports are inconsistent about case (e.g. the legacy CSV format
+    uses Title Case municipality/barangay names, the newer export uses ALL CAPS) --
+    normalize before comparing/keying on these so a boundary/PSGC code isn't missed
+    over casing alone."""
+    return (province.strip().upper(), municipality.strip().upper(), barangay.strip().upper())
+
+
+@functools.lru_cache(maxsize=1)
+def _load_psgc_lookup() -> dict[tuple[str, str, str], str]:
+    """Same reference file backend/seed_database.py already uses. Loaded once per
+    process (it's small and static) rather than re-read per row."""
+    lookup_df = pd.read_csv(_PSGC_LOOKUP_PATH)
+    return {
+        _boundary_key(row["province"], row["municipality"], row["barangay"]): str(row["psgc_code"])
+        for _, row in lookup_df.iterrows()
+    }
 
 
 def _normalize_value(value: Any) -> Any:
@@ -148,6 +172,131 @@ def prepare_row_payload(row: Any) -> dict[str, Any]:
     }
 
 
+def _ingest_row(payload: dict[str, Any], db: Session) -> str:
+    """Processes one already-parsed CSV row. Returns 'inserted' or 'skipped'
+    (policy already exists). Raises on any unrecoverable per-row problem (e.g. no
+    PSGC code on file) -- the caller is responsible for the per-row SAVEPOINT."""
+    boundary = (
+        db.query(models.AdminBoundary)
+        .filter(
+            func.upper(models.AdminBoundary.province) == payload["boundary"]["province"].upper(),
+            func.upper(models.AdminBoundary.municipality) == payload["boundary"]["municipality"].upper(),
+            func.upper(models.AdminBoundary.barangay) == payload["boundary"]["barangay"].upper(),
+        )
+        .first()
+    )
+    if boundary is None:
+        boundary_key = _boundary_key(
+            payload["boundary"]["province"],
+            payload["boundary"]["municipality"],
+            payload["boundary"]["barangay"],
+        )
+        psgc_code = _load_psgc_lookup().get(boundary_key)
+        if psgc_code is None:
+            raise ValueError(
+                f"No PSGC code on file for {boundary_key}. Add it to "
+                "app/data/psgc_region10_boundaries.csv before ingesting this row."
+            )
+        boundary = models.AdminBoundary(psgc_code=psgc_code, **payload["boundary"])
+        db.add(boundary)
+        db.flush()
+
+    # Farmer identity: prefer farmers_id (100% populated in real PABS exports)
+    # over rsbsa_no (blank on ~29% of real rows). Never match on a blank/None
+    # key in either case -- that would silently collapse distinct farmers who
+    # both happen to have no RSBSA number onto the same profile.
+    farmer_payload = payload["farmer"]
+    farmer = None
+    if farmer_payload["farmers_id"]:
+        farmer = (
+            db.query(models.FarmerProfile)
+            .filter(models.FarmerProfile.farmers_id == farmer_payload["farmers_id"])
+            .first()
+        )
+    if farmer is None and farmer_payload["rsbsa_no"]:
+        farmer = (
+            db.query(models.FarmerProfile)
+            .filter(models.FarmerProfile.rsbsa_no == farmer_payload["rsbsa_no"])
+            .first()
+        )
+        if farmer is not None and farmer.farmers_id is None and farmer_payload["farmers_id"]:
+            farmer.farmers_id = farmer_payload["farmers_id"]
+    if farmer is None:
+        farmer = models.FarmerProfile(**farmer_payload)
+        db.add(farmer)
+        db.flush()
+
+    # Farm identity: same never-match-on-blank rule as farmer identity above.
+    farm_payload = payload["farm"]
+    farm = None
+    if farm_payload["csv_farm_reference"]:
+        farm = (
+            db.query(models.Farm)
+            .filter(models.Farm.csv_farm_reference == farm_payload["csv_farm_reference"])
+            .first()
+        )
+    if farm is None:
+        farm = models.Farm(
+            farmer_id=farmer.farmer_id,
+            boundary_id=boundary.boundary_id,
+            csv_farm_reference=farm_payload["csv_farm_reference"],
+            georef_id=farm_payload["georef_id"],
+            area_size=farm_payload["area_size"] or 0,
+            location_geom=None,
+        )
+        db.add(farm)
+        db.flush()
+
+    insurance = (
+        db.query(models.InsuranceRecord)
+        .filter(models.InsuranceRecord.policy_no == payload["insurance"]["policy_no"])
+        .first()
+    )
+    if insurance is not None:
+        return "skipped"
+
+    insurance = models.InsuranceRecord(
+        farmer_id=farmer.farmer_id,
+        farm_id=farm.farm_id,
+        policy_no=payload["insurance"]["policy_no"],
+        program_type=payload["insurance"]["program_type"],
+        product_name=payload["insurance"]["product_name"],
+        effectivity_date=payload["insurance"]["effectivity_date"],
+        expiry_date=payload["insurance"]["expiry_date"],
+        amount_cover=payload["insurance"]["amount_cover"] or 0,
+    )
+    db.add(insurance)
+    db.flush()
+
+    # Crop-stage seed row -- not a real computed assessment (no matrix_id/
+    # wind_velocity/summary_id set). It exists only so
+    # AssessmentService.calculate_for_bulletin() has a crop_stage_no to read
+    # for this policy once a real typhoon is assessed; export_assessments_csv()
+    # already filters these out via `matrix_id IS NOT NULL`. final_indemnity_payment
+    # is seeded from estimated_damage (not a real payout yet) -- the same
+    # placeholder convention backend/seed_database.py already uses.
+    seed = payload["crop_stage_seed"]
+    estimated_damage = seed["estimated_damage"] or Decimal("0.00")
+    risk_exposure_amount = seed["risk_exposure_amount"]
+    if risk_exposure_amount is not None and abs(risk_exposure_amount - estimated_damage) > Decimal("0.01"):
+        logger.warning(
+            "Policy %s: RiskExposureAmount (%s) differs from EstimatedDamage (%s)",
+            payload["insurance"]["policy_no"],
+            risk_exposure_amount,
+            estimated_damage,
+        )
+    db.add(
+        models.RiskAssessment(
+            insurance_records_id=insurance.insurance_records_id,
+            crop_stage_no=seed["crop_stage_no"],
+            crop_stage=seed["crop_stage"],
+            estimated_damage=estimated_damage,
+            final_indemnity_payment=estimated_damage,
+        )
+    )
+    return "inserted"
+
+
 @router.post("/csv", status_code=status.HTTP_200_OK)
 def upload_csv(
     file: UploadFile = File(...),
@@ -187,138 +336,62 @@ def upload_csv(
             "rows_processed": 0,
             "rows_inserted": 0,
             "rows_skipped": 0,
+            "rows_failed": 0,
+            "failures": [],
         }
 
     processed_rows = 0
     inserted_rows = 0
     skipped_rows = 0
+    failed_rows = 0
+    failures: list[dict[str, Any]] = []
 
     try:
-        for _, row in dataframe.iterrows():
+        for row_number, (_, row) in enumerate(dataframe.iterrows(), start=1):
             processed_rows += 1
-            payload = prepare_row_payload(row)
-
-            boundary = (
-                db.query(models.AdminBoundary)
-                .filter(
-                    models.AdminBoundary.province == payload["boundary"]["province"],
-                    models.AdminBoundary.municipality == payload["boundary"]["municipality"],
-                    models.AdminBoundary.barangay == payload["boundary"]["barangay"],
+            payload = None
+            # Per-row SAVEPOINT: an unresolvable row (unmappable boundary, etc.) is
+            # rolled back and recorded without discarding every other
+            # already-processed row in this same upload -- a 23,917-row real
+            # export isn't going to be perfectly clean, and one bad row shouldn't
+            # cost every good one.
+            savepoint = db.begin_nested()
+            try:
+                payload = prepare_row_payload(row)
+                outcome = _ingest_row(payload, db)
+                if outcome == "inserted":
+                    inserted_rows += 1
+                else:
+                    skipped_rows += 1
+                savepoint.commit()
+            except Exception as exc:
+                savepoint.rollback()
+                failed_rows += 1
+                failures.append(
+                    {
+                        "row": row_number,
+                        "policy_no": payload["insurance"]["policy_no"] if payload else None,
+                        "error": str(exc),
+                    }
                 )
-                .first()
-            )
-            if boundary is None:
-                boundary = models.AdminBoundary(**payload["boundary"])
-                db.add(boundary)
-                db.flush()
-
-            # Farmer identity: prefer farmers_id (100% populated in real PABS exports)
-            # over rsbsa_no (blank on ~29% of real rows). Never match on a blank/None
-            # key in either case -- that would silently collapse distinct farmers who
-            # both happen to have no RSBSA number onto the same profile.
-            farmer_payload = payload["farmer"]
-            farmer = None
-            if farmer_payload["farmers_id"]:
-                farmer = (
-                    db.query(models.FarmerProfile)
-                    .filter(models.FarmerProfile.farmers_id == farmer_payload["farmers_id"])
-                    .first()
-                )
-            if farmer is None and farmer_payload["rsbsa_no"]:
-                farmer = (
-                    db.query(models.FarmerProfile)
-                    .filter(models.FarmerProfile.rsbsa_no == farmer_payload["rsbsa_no"])
-                    .first()
-                )
-                if farmer is not None and farmer.farmers_id is None and farmer_payload["farmers_id"]:
-                    farmer.farmers_id = farmer_payload["farmers_id"]
-            if farmer is None:
-                farmer = models.FarmerProfile(**farmer_payload)
-                db.add(farmer)
-                db.flush()
-
-            # Farm identity: same never-match-on-blank rule as farmer identity above.
-            farm_payload = payload["farm"]
-            farm = None
-            if farm_payload["csv_farm_reference"]:
-                farm = (
-                    db.query(models.Farm)
-                    .filter(models.Farm.csv_farm_reference == farm_payload["csv_farm_reference"])
-                    .first()
-                )
-            if farm is None:
-                farm = models.Farm(
-                    farmer_id=farmer.farmer_id,
-                    boundary_id=boundary.boundary_id,
-                    csv_farm_reference=farm_payload["csv_farm_reference"],
-                    georef_id=farm_payload["georef_id"],
-                    area_size=farm_payload["area_size"] or 0,
-                    location_geom=None,
-                )
-                db.add(farm)
-                db.flush()
-
-            insurance = (
-                db.query(models.InsuranceRecord)
-                .filter(models.InsuranceRecord.policy_no == payload["insurance"]["policy_no"])
-                .first()
-            )
-            if insurance is None:
-                insurance = models.InsuranceRecord(
-                    farmer_id=farmer.farmer_id,
-                    farm_id=farm.farm_id,
-                    policy_no=payload["insurance"]["policy_no"],
-                    program_type=payload["insurance"]["program_type"],
-                    product_name=payload["insurance"]["product_name"],
-                    effectivity_date=payload["insurance"]["effectivity_date"],
-                    expiry_date=payload["insurance"]["expiry_date"],
-                    amount_cover=payload["insurance"]["amount_cover"] or 0,
-                )
-                db.add(insurance)
-                db.flush()
-                inserted_rows += 1
-            else:
-                skipped_rows += 1
-                continue
-
-            # Crop-stage seed row -- not a real computed assessment (no matrix_id/
-            # wind_velocity/summary_id set). It exists only so
-            # AssessmentService.calculate_for_bulletin() has a crop_stage_no to read
-            # for this policy once a real typhoon is assessed; export_assessments_csv()
-            # already filters these out via `matrix_id IS NOT NULL`. final_indemnity_payment
-            # is seeded from estimated_damage (not a real payout yet) -- the same
-            # placeholder convention backend/seed_database.py already uses.
-            seed = payload["crop_stage_seed"]
-            estimated_damage = seed["estimated_damage"] or Decimal("0.00")
-            risk_exposure_amount = seed["risk_exposure_amount"]
-            if risk_exposure_amount is not None and abs(risk_exposure_amount - estimated_damage) > Decimal("0.01"):
-                logger.warning(
-                    "Policy %s: RiskExposureAmount (%s) differs from EstimatedDamage (%s)",
-                    payload["insurance"]["policy_no"],
-                    risk_exposure_amount,
-                    estimated_damage,
-                )
-            db.add(
-                models.RiskAssessment(
-                    insurance_records_id=insurance.insurance_records_id,
-                    crop_stage_no=seed["crop_stage_no"],
-                    crop_stage=seed["crop_stage"],
-                    estimated_damage=estimated_damage,
-                    final_indemnity_payment=estimated_damage,
-                )
-            )
 
         db.commit()
     except Exception as exc:
         db.rollback()
         raise HTTPException(status_code=500, detail=f"CSV ingestion failed: {exc}") from exc
 
+    message = "CSV data ingested successfully."
+    if failed_rows:
+        message = f"CSV data ingested with {failed_rows} row(s) skipped due to errors."
+
     return {
         "status": "success",
-        "message": "CSV data ingested successfully.",
+        "message": message,
         "rows_processed": processed_rows,
         "rows_inserted": inserted_rows,
         "rows_skipped": skipped_rows,
+        "rows_failed": failed_rows,
+        "failures": failures[:50],
     }
 
 

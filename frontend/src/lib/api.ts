@@ -71,12 +71,20 @@ export interface UploadGpxResult {
   farmer_name?: string | null;
 }
 
+export interface UploadCsvRowFailure {
+  row: number;
+  policy_no: string | null;
+  error: string;
+}
+
 export interface UploadCsvResult {
   status: string;
   message: string;
   rows_processed: number;
   rows_inserted: number;
   rows_skipped: number;
+  rows_failed: number;
+  failures: UploadCsvRowFailure[];
 }
 
 export interface ParseBulletinsResult {

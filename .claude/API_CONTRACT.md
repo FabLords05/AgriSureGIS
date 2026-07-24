@@ -17,6 +17,7 @@
 * **POST `/api/upload/csv`**
   - **Description:** Bulk upload farmer and policy records.
   - **Payload:** Multipart Form (CSV file).
+  - **Row handling:** Each row is processed in its own SAVEPOINT — a row that fails (e.g. no PSGC code on file for its province/municipality/barangay) is rolled back and recorded individually; it does not abort the rest of the batch. Response includes `rows_failed` (count) and `failures` (up to 50 entries: `{row, policy_no, error}`), alongside the existing `rows_processed`/`rows_inserted`/`rows_skipped`.
 * **POST `/api/upload/gpx`**
   - **Description:** Upload GPX track files to build farm boundary geometries.
   - **Payload:** Multipart Form (GPX file, optional `farmer_id`, `farm_id`).

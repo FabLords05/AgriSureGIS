@@ -112,9 +112,10 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
         uploadCsv(file)
           .then(result => {
             setUploadedFiles(prev => prev.map(f => f.name === newFile.name ? { ...f, status: "done" } : f));
+            const failedSuffix = result.rows_failed > 0 ? `, ${result.rows_failed} failed` : "";
             setUploadStatus({
               type: "success",
-              message: `${result.message} (${result.rows_inserted} inserted, ${result.rows_skipped} skipped)`,
+              message: `${result.message} (${result.rows_inserted} inserted, ${result.rows_skipped} skipped${failedSuffix})`,
             });
             refreshFarms();
           })

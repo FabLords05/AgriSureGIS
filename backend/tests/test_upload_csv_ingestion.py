@@ -2,10 +2,17 @@ import io
 import unittest
 from decimal import Decimal
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from app.api import upload as upload_module
 from app.models import models
+
+# Test fixtures use "Bukidnon/Malaybalay/Casisang" as a stand-in boundary --
+# _load_psgc_lookup() reads a real on-disk reference file (whose exact contents
+# and naming quirks, e.g. "City of Malaybalay" vs "Malaybalay", shouldn't leak
+# into these tests), so it's patched per-test instead. Keyed uppercase to match
+# what _boundary_key() (upload.py's case-normalizing helper) actually produces.
+_FAKE_PSGC_LOOKUP = {("BUKIDNON", "MALAYBALAY", "CASISANG"): "1001312012"}
 
 _PK_FIELDS = {
     models.AdminBoundary: "boundary_id",
@@ -35,23 +42,42 @@ class _FakeTable:
     def add(self, instance):
         self.rows.append(instance)
 
-    def first(self, filters: dict):
+    def first(self, filters: list):
         for row in self.rows:
-            if all(getattr(row, key, None) == value for key, value in filters.items()):
+            matched = True
+            for key, value, transform in filters:
+                actual = getattr(row, key, None)
+                if actual is not None:
+                    actual = transform(actual)
+                if actual != value:
+                    matched = False
+                    break
+            if matched:
                 return row
         return None
+
+
+def _extract_filter(criterion):
+    # criterion is a SQLAlchemy BinaryExpression for "Model.column == value" or
+    # "func.upper(Model.column) == value". .left is either the Column itself (has
+    # .name) or a Function wrapping it (whose .clauses holds the wrapped column);
+    # .right is the bound literal (has .value). upload_csv() only ever wraps
+    # columns in func.upper(), so that's the only transform simulated here.
+    left = criterion.left
+    value = criterion.right.value
+    if getattr(left, "name", None) == "upper" and hasattr(left, "clauses"):
+        inner = list(left.clauses)[0]
+        return inner.name, value, str.upper
+    return left.name, value, (lambda v: v)
 
 
 class _FakeQuery:
     def __init__(self, table: _FakeTable):
         self._table = table
-        self._filters: dict = {}
+        self._filters: list = []
 
     def filter(self, *criteria):
-        for criterion in criteria:
-            # criterion is a SQLAlchemy BinaryExpression for "Model.column == value";
-            # .left is the Column (has .name) and .right is the bound literal (has .value).
-            self._filters[criterion.left.name] = criterion.right.value
+        self._filters.extend(_extract_filter(c) for c in criteria)
         return self
 
     def first(self):
@@ -114,6 +140,11 @@ def _csv(*rows: str) -> str:
 
 
 class UploadCsvIngestionTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch("app.api.upload._load_psgc_lookup", return_value=_FAKE_PSGC_LOOKUP)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_blank_rsbsa_no_does_not_collapse_distinct_farmers(self):
         csv_text = _csv(
             _row("POL-1", "Cruz", "Ana", farmers_id="111", farmid="5001"),
@@ -197,6 +228,45 @@ class UploadCsvIngestionTests(unittest.TestCase):
         with self.assertLogs("app.api.upload", level="WARNING") as captured:
             upload_module.upload_csv(file=_fake_upload_file(csv_text), db=mock_db)
         self.assertTrue(any("differs from EstimatedDamage" in message for message in captured.output))
+
+    def test_missing_psgc_code_is_reported_as_a_row_failure_not_a_raised_exception(self):
+        # Regression test for a real failure hit against a live DB: a province not
+        # covered by the PSGC lookup file used to reach the DB with no psgc_code at
+        # all, surfacing as a cryptic psycopg2 NotNullViolation instead of an
+        # actionable, per-row-isolated message.
+        csv_text = _HEADER + "\n" + (
+            "Agusan del Norte,Unknown Town,Unknown Barangay,POL-1,RSBSA,,Cruz,Ana,,"
+            "1.0,10000,1,111,,5001,Booting,500,\n"
+        )
+        mock_db = _build_mock_db()
+
+        result = upload_module.upload_csv(file=_fake_upload_file(csv_text), db=mock_db)
+
+        self.assertEqual(result["rows_failed"], 1)
+        self.assertEqual(result["rows_inserted"], 0)
+        self.assertIn("No PSGC code on file for", result["failures"][0]["error"])
+        self.assertEqual(result["failures"][0]["policy_no"], "POL-1")
+
+    def test_one_bad_row_does_not_abort_the_rest_of_the_batch(self):
+        csv_text = _csv(
+            _row("POL-1", "Cruz", "Ana", farmers_id="111", farmid="5001"),
+        ) + (
+            "Agusan del Norte,Unknown Town,Unknown Barangay,POL-BAD,RSBSA,,Reyes,Ben,,"
+            "1.0,10000,1,222,,5002,Booting,500,\n"
+        )
+        mock_db = _build_mock_db()
+
+        result = upload_module.upload_csv(file=_fake_upload_file(csv_text), db=mock_db)
+
+        self.assertEqual(result["rows_processed"], 2)
+        self.assertEqual(result["rows_inserted"], 1)
+        self.assertEqual(result["rows_failed"], 1)
+        self.assertEqual(result["failures"][0]["row"], 2)
+        # The good row's data must still be there -- one bad row shouldn't roll
+        # back everything else already processed in the same upload.
+        self.assertEqual(len(mock_db.tables[models.FarmerProfile].rows), 1)
+        self.assertEqual(mock_db.tables[models.FarmerProfile].rows[0].farmers_id, "111")
+        self.assertEqual(len(mock_db.tables[models.InsuranceRecord].rows), 1)
 
     def test_latin1_encoded_csv_with_accented_surname_is_ingested(self):
         csv_text = _csv(_row("POL-1", "SEÑERES", "Ana", farmers_id="111", farmid="5001"))

@@ -568,5 +568,63 @@ Follow-up to the entry directly above, found by Fabio's first `pytest` run again
 
 ### Status / Next Steps
 * This was a test-harness-only bug. All 36 other tests (the updated `test_csv_upload.py`, `test_gpx_farmer_matcher.py`, `test_upload_gpx_api.py`, and the rest of the existing suite) passed on the first run, meaning the actual production code from the entry above (`upload.py`, `gpx_farmer_matcher.py`, `models.py`) was already correct.
-* Awaiting Fabio's re-run of `pytest tests/ -v` to confirm all 7 now pass.
+* Fabio re-ran `pytest tests/ -v`: all 43 tests passed.
+
+---
+
+## [2026-07-24] - CSV Ingestion: PSGC Boundary Lookup and Case-Insensitive Matching
+
+Found by Fabio actually exercising `/api/upload/csv` end-to-end in the browser against the real `docs/Rice Risk Exposure Region X 04-15-2026.csv` — the first genuine live-DB test of this endpoint. Two real, pre-existing bugs surfaced (neither introduced by the entry above; the boundary-creation code was untouched by it):
+
+1. **`AdminBoundary` creation never set `psgc_code`.** `tbl_admin_boundaries.psgc_code` is `NOT NULL UNIQUE`, but `upload_csv()` only ever passed `province`/`municipality`/`barangay` when creating a new boundary row. Every row whose exact boundary didn't already exist in the DB hit `psycopg2.errors.NotNullViolation` (Fabio's actual error: `null value in column "psgc_code"... Failing row contains (3, null, Agusan del Norte, REMEDIOS T. ROMUALDEZ, POBLACION II)`).
+2. **The PSGC reference file only covered 2 of the CSV's 8 provinces.** `backend/app/data/psgc_region10_boundaries.csv` (888 rows) covered Bukidnon and Misamis Oriental only; the real CSV spans Agusan del Norte, Agusan del Sur, Bukidnon, Camiguin, Dinagat Islands, Misamis Oriental, Surigao del Norte, and Surigao del Sur.
+3. **Case mismatch, independent of the above:** the reference file and `pabs_results.csv` both use Title Case province/municipality/barangay names, but the new CSV export uses ALL CAPS for municipality/barangay (e.g. `Bukidnon,BAUNGON,LIBORAN`). Exact-string matching (both the `AdminBoundary` get-or-create query and the new PSGC lookup) would have silently failed for nearly every row, including Bukidnon/Misamis Oriental rows that were supposedly already "covered."
+
+### 1. File: `backend/app/data/psgc_region10_boundaries.csv`
+* Appended 1,369 barangay-level rows (78 municipalities/cities) covering the 6 previously-missing provinces, sourced from `https://psgc.gitlab.io/api/` (a PSA/NAMRIA-derived PSGC API — the same class of source as the original Bukidnon/Misamis Oriental data, per the `[2026-07-23]` "Real PSGC Codes" entry). Cross-checked against the existing file before trusting it: two known entries (`Balintad` under both Baungon, Bukidnon and Manticao, Misamis Oriental) matched exactly, including the full 10-digit PSGC code. File now covers all 8 provinces the real CSV spans (2,257 total rows).
+* One finding worth recording: `REMEDIOS T. ROMUALDEZ` (flagged in Fabio's error above, and initially suspected as a shifted/malformed CSV column) is confirmed to be a **real, official Agusan del Norte municipality** — not a data error. It resolves correctly once case-insensitive matching (below) is in place.
+* Cities required special handling: barangays under a **city** (e.g. City of Butuan, City of Bislig) reference a `cityCode` field in the source API rather than `municipalityCode` — missed on the first extraction pass (caught 0 Butuan-area rows), fixed to check both fields.
+
+### 2. File: `backend/app/api/upload.py`
+* **Changes to Functions:**
+  * Added **`_boundary_key(province, municipality, barangay)`**: normalizes (strip + uppercase) a boundary tuple for comparison, shared by both the PSGC lookup dict and the DB query below.
+  * `_load_psgc_lookup()`: dict keys now built via `_boundary_key()` instead of raw CSV text, so lookups are case-insensitive.
+  * `upload_csv()`: the `AdminBoundary` get-or-create query now compares `func.upper(AdminBoundary.column) == payload_value.upper()` instead of exact equality, for the same reason. Boundary rows are still **stored** with whatever casing the source CSV used (no data rewritten) — only the comparison is case-insensitive.
+  * Boundary creation now looks up `psgc_code` via `_load_psgc_lookup()` before constructing `AdminBoundary(...)`, raising a clear `ValueError` (`"No PSGC code on file for (...). Add it to app/data/psgc_region10_boundaries.csv..."`, matching `seed_database.py`'s existing message style) instead of letting a missing code reach the database as a cryptic constraint violation.
+
+### 3. File: `backend/tests/test_upload_csv_ingestion.py`
+* Added `test_missing_psgc_code_raises_clear_error_not_db_constraint_violation` — regression test for the exact failure Fabio hit.
+* The fake-DB `_FakeQuery`/`_FakeTable` harness needed a real fix, not just a cosmetic one: it introspected filter criteria as plain `Model.column == value` expressions, but `func.upper(Model.column) == value` has a different shape (`.left` is the `Function`, not the `Column`). Without handling this, the harness would have silently stopped matching on province/municipality/barangay at all (every row would appear to create a brand-new boundary instead of reusing one) rather than failing loudly — fixed to detect the `func.upper(...)` wrapper, pull the real column name from its wrapped argument, and apply the same uppercase transform to the stored value before comparing.
+* `_FAKE_PSGC_LOOKUP`'s key updated to the uppercase-normalized form `_boundary_key()` now produces (was previously keyed by the raw Title-Case text, which no longer matches).
+
+### Status / Next Steps
+* Not yet re-verified against a live database — Fabio needs to re-attempt the CSV drop in the browser to confirm the real file now ingests (or fails only on genuinely bad rows, e.g. a `Surigao del Norte,DDINAGAT` typo spotted in passing — looks like a real source-data typo, not something to silently "correct").
+* **Resolved by the entry below:** whether the whole 23,917-row import should abort on the first bad row, or isolate failures per-row. Fabio chose per-row isolation.
+
+---
+
+## [2026-07-24] - CSV Ingestion: Per-Row Failure Isolation
+
+Follow-up to the entry above. `upload_csv()` previously wrapped the *entire* row loop in one try/except with a single `db.commit()` at the end — any row's exception (e.g. the PSGC lookup failure two entries up, or a genuine data-quality row like the `DDINAGAT` typo) rolled back the whole batch, discarding every other already-processed row. Given a 23,917-row real export is not going to be perfectly clean, Fabio confirmed per-row isolation is wanted over all-or-nothing.
+
+### 1. File: `backend/app/api/upload.py`
+* **Changes to Functions:**
+  * Extracted **`_ingest_row(payload, db)`**: the per-row boundary/farmer/farm/insurance/crop-stage-seed logic, unchanged in behavior, pulled out of `upload_csv()`'s loop body into its own function. Returns `"inserted"` or `"skipped"`; raises on any unrecoverable problem (missing PSGC code, etc.) for the caller to handle.
+  * `upload_csv()`: each row now runs inside its own SQLAlchemy SAVEPOINT (`db.begin_nested()`). On success, the savepoint is committed (still pending in the outer transaction, not yet durable) and the loop continues; on failure, only that row's savepoint is rolled back — every previously-processed row in the same upload is unaffected — the row is counted in a new `rows_failed`, and `{row, policy_no, error}` is appended to a new `failures` list (capped at 50 entries in the response to avoid a pathological response size if the PSGC data or CSV itself turns out to be more broken than expected; `rows_failed` itself is always the true total). The outer try/except is kept for genuinely unexpected failures (e.g. the final `db.commit()` itself failing) — that still aborts and rolls back everything, since at that point something is wrong beyond a single row's data.
+  * Response `message` now says `"CSV data ingested with N row(s) skipped due to errors."` when `rows_failed > 0`, instead of always claiming full success.
+
+### 2. Files: `frontend/src/lib/api.ts`, `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* `api.ts`: added `UploadCsvRowFailure` type and `rows_failed`/`failures` to `UploadCsvResult`.
+* `SpatialAnalysisModule.tsx`: CSV upload success banner now appends `", N failed"` when `rows_failed > 0` (previously only showed inserted/skipped counts). No new UI surface for browsing individual failures yet — `result.failures` is available on the response for a future "view details" affordance if wanted, but the *count* was the priority for the GIS specialist to at least know something needs attention.
+
+### 3. File: `backend/tests/test_upload_csv_ingestion.py`
+* Renamed/updated `test_missing_psgc_code_raises_clear_error_not_db_constraint_violation` → `test_missing_psgc_code_is_reported_as_a_row_failure_not_a_raised_exception`: with per-row isolation, this case no longer raises out of `upload_csv()` at all — it's now a normal 200 response with the failure captured in `result["failures"]`.
+* Added `test_one_bad_row_does_not_abort_the_rest_of_the_batch`: two rows, one with an unmappable boundary — asserts the good row's `FarmerProfile`/`InsuranceRecord` are still present and counted, and the bad row is isolated in `failures` rather than wiping out the batch.
+
+### 4. File: `.claude/API_CONTRACT.md`
+* Documented the per-row SAVEPOINT behavior and the new `rows_failed`/`failures` response fields for `POST /api/upload/csv`.
+
+### Status / Next Steps
+* Awaiting Fabio's re-run of `pytest tests/ -v`, then a re-attempt of the real CSV drop in the browser — expecting the bulk of the 23,917 rows to now ingest successfully, with any remaining genuine data-quality rows (e.g. `DDINAGAT`) reported in `failures` rather than blocking everything else.
+* No mechanism yet to *fix* a reported bad row and re-run just that one — re-uploading the same CSV after a fix is safe (already-inserted policies are skipped via the existing `policy_no` uniqueness check), just not surgical. Not building that now — flagging in case it's wanted later.
 
