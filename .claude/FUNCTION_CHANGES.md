@@ -627,4 +627,27 @@ Follow-up to the entry above. `upload_csv()` previously wrapped the *entire* row
 ### Status / Next Steps
 * Awaiting Fabio's re-run of `pytest tests/ -v`, then a re-attempt of the real CSV drop in the browser — expecting the bulk of the 23,917 rows to now ingest successfully, with any remaining genuine data-quality rows (e.g. `DDINAGAT`) reported in `failures` rather than blocking everything else.
 * No mechanism yet to *fix* a reported bad row and re-run just that one — re-uploading the same CSV after a fix is safe (already-inserted policies are skipped via the existing `policy_no` uniqueness check), just not surgical. Not building that now — flagging in case it's wanted later.
+* **Superseded in part by the entry below:** Fabio tried the real 23,917-row CSV and the request never returned within several minutes — this entry's per-row SAVEPOINTs, on top of the pre-existing per-row SELECT queries, meant far more DB round trips per row than before, with no caching of repeated lookups within the same upload.
+
+---
+
+## [2026-07-24] - CSV Ingestion: Cache Repeated Boundary/Farmer/Farm Lookups Within One Upload
+
+Fabio reported the real CSV upload appeared to hang (waited several minutes, backend terminal showed no activity). Root cause: the real file's 23,917 rows span far fewer distinct boundaries/farmers than rows — the same barangay repeats across roughly 10-20 rows on average, and the same farmer across ~1.2 rows — but every row was independently re-querying the database for its boundary/farmer/farm via `SELECT`, on top of the new per-row SAVEPOINT overhead from the entry above. Nothing had actually deadlocked; it was just doing many times more DB round trips than necessary. Since the whole upload is one outer transaction that only commits at the very end, nothing was lost by the wait — safe to just retry after this fix.
+
+### 1. File: `backend/app/api/upload.py`
+* **Changes to Functions:**
+  * Added **`_IngestCaches`** (dataclass): four in-process dicts (`boundaries`, `farmers_by_farmers_id`, `farmers_by_rsbsa_no`, `farms_by_reference`) scoped to a single `upload_csv()` call. Populated by the caller **only after** a row's SAVEPOINT successfully commits — a rolled-back row's newly-created objects must never be cached for a later row to reuse, since the DB-level insert they'd point to no longer exists.
+  * Added **`_RowIngestResult`** (dataclass): what `_ingest_row()` now returns (outcome, the resolved boundary/farmer/farm objects and their cache keys) so `upload_csv()`'s loop can update the caches after each successful commit.
+  * Extracted **`_ingest_row(payload, db, caches)`**: same per-row logic as the entry above, now checking `caches` before issuing any `SELECT` for boundary/farmer/farm, only hitting the database on a cache miss.
+* This is purely an internal optimization — no change to `upload_csv()`'s request/response contract, ingestion order, or the get-or-create/blank-matching rules from earlier entries.
+
+### 2. File: `backend/tests/test_upload_csv_ingestion.py`
+* `_build_mock_db()` now tracks `query_call_counts` per model, so tests can assert on query *volume*, not just correctness.
+* Added `test_repeated_boundary_across_many_rows_is_only_queried_once` and `test_same_rsbsa_no_across_rows_is_only_queried_once` — direct regression tests for this exact problem, asserting the database is queried once per distinct boundary/farmer rather than once per row.
+
+### Status / Next Steps
+* Awaiting Fabio's re-run of `pytest tests/ -v`, then a fresh attempt at the real CSV upload — expecting a large reduction in total query volume (roughly 23,917 boundary queries down to on the order of a few hundred to a couple thousand distinct boundaries, similarly for farmers), which should bring the whole upload down from "several minutes and still not done" to a much shorter, bounded time.
+* Did not add a database index on `upper(province), upper(municipality), upper(barangay)` — with caching, each distinct boundary is only queried once per upload regardless of row count, so the per-query cost matters far less now. Flagging as a possible follow-up if boundary queries are still slow (e.g. once the table has many thousands of rows).
+* Per-row SAVEPOINT count is unchanged (still one per row) — this entry only addresses the SELECT-query volume, which was the larger of the two costs. Not revisiting the SAVEPOINT-per-row design itself, since per-row failure isolation was an explicit, deliberate choice in the entry above.
 

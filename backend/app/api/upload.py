@@ -2,6 +2,7 @@ import functools
 import io
 import logging
 import re
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -172,34 +173,60 @@ def prepare_row_payload(row: Any) -> dict[str, Any]:
     }
 
 
-def _ingest_row(payload: dict[str, Any], db: Session) -> str:
-    """Processes one already-parsed CSV row. Returns 'inserted' or 'skipped'
-    (policy already exists). Raises on any unrecoverable per-row problem (e.g. no
-    PSGC code on file) -- the caller is responsible for the per-row SAVEPOINT."""
-    boundary = (
-        db.query(models.AdminBoundary)
-        .filter(
-            func.upper(models.AdminBoundary.province) == payload["boundary"]["province"].upper(),
-            func.upper(models.AdminBoundary.municipality) == payload["boundary"]["municipality"].upper(),
-            func.upper(models.AdminBoundary.barangay) == payload["boundary"]["barangay"].upper(),
-        )
-        .first()
+@dataclass
+class _IngestCaches:
+    """Per-upload, in-process caches so a repeated boundary/farmer/farm across many
+    rows of the same CSV (e.g. the same barangay appears in ~10-20 rows on average)
+    is only ever queried once. Populated by the caller ONLY after a row's SAVEPOINT
+    successfully commits -- a rolled-back row's newly-created objects must never
+    leak into a later row's lookups."""
+
+    boundaries: dict[tuple[str, str, str], models.AdminBoundary] = field(default_factory=dict)
+    farmers_by_farmers_id: dict[str, models.FarmerProfile] = field(default_factory=dict)
+    farmers_by_rsbsa_no: dict[str, models.FarmerProfile] = field(default_factory=dict)
+    farms_by_reference: dict[str, models.Farm] = field(default_factory=dict)
+
+
+@dataclass
+class _RowIngestResult:
+    outcome: str  # "inserted" or "skipped"
+    boundary_key: tuple[str, str, str]
+    boundary: models.AdminBoundary
+    farmers_id: str | None
+    rsbsa_no: str | None
+    farmer: models.FarmerProfile
+    farm_reference: str | None
+    farm: models.Farm
+
+
+def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> _RowIngestResult:
+    """Processes one already-parsed CSV row. Raises on any unrecoverable per-row
+    problem (e.g. no PSGC code on file) -- the caller is responsible for the
+    per-row SAVEPOINT and for committing this row's results into `caches`."""
+    boundary_key = _boundary_key(
+        payload["boundary"]["province"], payload["boundary"]["municipality"], payload["boundary"]["barangay"]
     )
+    boundary = caches.boundaries.get(boundary_key)
     if boundary is None:
-        boundary_key = _boundary_key(
-            payload["boundary"]["province"],
-            payload["boundary"]["municipality"],
-            payload["boundary"]["barangay"],
-        )
-        psgc_code = _load_psgc_lookup().get(boundary_key)
-        if psgc_code is None:
-            raise ValueError(
-                f"No PSGC code on file for {boundary_key}. Add it to "
-                "app/data/psgc_region10_boundaries.csv before ingesting this row."
+        boundary = (
+            db.query(models.AdminBoundary)
+            .filter(
+                func.upper(models.AdminBoundary.province) == boundary_key[0],
+                func.upper(models.AdminBoundary.municipality) == boundary_key[1],
+                func.upper(models.AdminBoundary.barangay) == boundary_key[2],
             )
-        boundary = models.AdminBoundary(psgc_code=psgc_code, **payload["boundary"])
-        db.add(boundary)
-        db.flush()
+            .first()
+        )
+        if boundary is None:
+            psgc_code = _load_psgc_lookup().get(boundary_key)
+            if psgc_code is None:
+                raise ValueError(
+                    f"No PSGC code on file for {boundary_key}. Add it to "
+                    "app/data/psgc_region10_boundaries.csv before ingesting this row."
+                )
+            boundary = models.AdminBoundary(psgc_code=psgc_code, **payload["boundary"])
+            db.add(boundary)
+            db.flush()
 
     # Farmer identity: prefer farmers_id (100% populated in real PABS exports)
     # over rsbsa_no (blank on ~29% of real rows). Never match on a blank/None
@@ -208,17 +235,21 @@ def _ingest_row(payload: dict[str, Any], db: Session) -> str:
     farmer_payload = payload["farmer"]
     farmer = None
     if farmer_payload["farmers_id"]:
-        farmer = (
-            db.query(models.FarmerProfile)
-            .filter(models.FarmerProfile.farmers_id == farmer_payload["farmers_id"])
-            .first()
-        )
+        farmer = caches.farmers_by_farmers_id.get(farmer_payload["farmers_id"])
+        if farmer is None:
+            farmer = (
+                db.query(models.FarmerProfile)
+                .filter(models.FarmerProfile.farmers_id == farmer_payload["farmers_id"])
+                .first()
+            )
     if farmer is None and farmer_payload["rsbsa_no"]:
-        farmer = (
-            db.query(models.FarmerProfile)
-            .filter(models.FarmerProfile.rsbsa_no == farmer_payload["rsbsa_no"])
-            .first()
-        )
+        farmer = caches.farmers_by_rsbsa_no.get(farmer_payload["rsbsa_no"])
+        if farmer is None:
+            farmer = (
+                db.query(models.FarmerProfile)
+                .filter(models.FarmerProfile.rsbsa_no == farmer_payload["rsbsa_no"])
+                .first()
+            )
         if farmer is not None and farmer.farmers_id is None and farmer_payload["farmers_id"]:
             farmer.farmers_id = farmer_payload["farmers_id"]
     if farmer is None:
@@ -230,11 +261,13 @@ def _ingest_row(payload: dict[str, Any], db: Session) -> str:
     farm_payload = payload["farm"]
     farm = None
     if farm_payload["csv_farm_reference"]:
-        farm = (
-            db.query(models.Farm)
-            .filter(models.Farm.csv_farm_reference == farm_payload["csv_farm_reference"])
-            .first()
-        )
+        farm = caches.farms_by_reference.get(farm_payload["csv_farm_reference"])
+        if farm is None:
+            farm = (
+                db.query(models.Farm)
+                .filter(models.Farm.csv_farm_reference == farm_payload["csv_farm_reference"])
+                .first()
+            )
     if farm is None:
         farm = models.Farm(
             farmer_id=farmer.farmer_id,
@@ -247,13 +280,25 @@ def _ingest_row(payload: dict[str, Any], db: Session) -> str:
         db.add(farm)
         db.flush()
 
+    def _result(outcome: str) -> _RowIngestResult:
+        return _RowIngestResult(
+            outcome=outcome,
+            boundary_key=boundary_key,
+            boundary=boundary,
+            farmers_id=farmer_payload["farmers_id"],
+            rsbsa_no=farmer_payload["rsbsa_no"],
+            farmer=farmer,
+            farm_reference=farm_payload["csv_farm_reference"],
+            farm=farm,
+        )
+
     insurance = (
         db.query(models.InsuranceRecord)
         .filter(models.InsuranceRecord.policy_no == payload["insurance"]["policy_no"])
         .first()
     )
     if insurance is not None:
-        return "skipped"
+        return _result("skipped")
 
     insurance = models.InsuranceRecord(
         farmer_id=farmer.farmer_id,
@@ -294,7 +339,7 @@ def _ingest_row(payload: dict[str, Any], db: Session) -> str:
             final_indemnity_payment=estimated_damage,
         )
     )
-    return "inserted"
+    return _result("inserted")
 
 
 @router.post("/csv", status_code=status.HTTP_200_OK)
@@ -345,6 +390,7 @@ def upload_csv(
     skipped_rows = 0
     failed_rows = 0
     failures: list[dict[str, Any]] = []
+    caches = _IngestCaches()
 
     try:
         for row_number, (_, row) in enumerate(dataframe.iterrows(), start=1):
@@ -358,12 +404,19 @@ def upload_csv(
             savepoint = db.begin_nested()
             try:
                 payload = prepare_row_payload(row)
-                outcome = _ingest_row(payload, db)
-                if outcome == "inserted":
+                result = _ingest_row(payload, db, caches)
+                if result.outcome == "inserted":
                     inserted_rows += 1
                 else:
                     skipped_rows += 1
                 savepoint.commit()
+                caches.boundaries[result.boundary_key] = result.boundary
+                if result.farmers_id:
+                    caches.farmers_by_farmers_id[result.farmers_id] = result.farmer
+                if result.rsbsa_no:
+                    caches.farmers_by_rsbsa_no[result.rsbsa_no] = result.farmer
+                if result.farm_reference:
+                    caches.farms_by_reference[result.farm_reference] = result.farm
             except Exception as exc:
                 savepoint.rollback()
                 failed_rows += 1

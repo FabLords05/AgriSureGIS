@@ -88,9 +88,15 @@ def _build_mock_db():
     tables = {model: _FakeTable() for model in _PK_FIELDS}
     counters = {model: 0 for model in _PK_FIELDS}
     added_instances: list = []
+    query_call_counts: dict = {}
 
     mock_db = MagicMock()
-    mock_db.query.side_effect = lambda model: _FakeQuery(tables[model])
+
+    def query_side_effect(model):
+        query_call_counts[model] = query_call_counts.get(model, 0) + 1
+        return _FakeQuery(tables[model])
+
+    mock_db.query.side_effect = query_side_effect
 
     def add_side_effect(instance):
         model = type(instance)
@@ -105,6 +111,7 @@ def _build_mock_db():
     mock_db.add.side_effect = add_side_effect
     mock_db.tables = tables
     mock_db.added_instances = added_instances
+    mock_db.query_call_counts = query_call_counts
     return mock_db
 
 
@@ -173,6 +180,35 @@ class UploadCsvIngestionTests(unittest.TestCase):
         farms = mock_db.tables[models.Farm].rows
         self.assertEqual(len(farms), 2)
         self.assertTrue(all(f.farmer_id == farmers[0].farmer_id for f in farms))
+
+    def test_repeated_boundary_across_many_rows_is_only_queried_once(self):
+        # Regression test for a real performance problem: a real 23,917-row CSV
+        # spans far fewer distinct boundaries (the same barangay repeats across
+        # ~10-20 rows on average), and the original per-row implementation
+        # re-queried the database for the same boundary on every single row.
+        csv_text = _csv(
+            _row("POL-1", "Cruz", "Ana", farmers_id="111", farmid="5001"),
+            _row("POL-2", "Reyes", "Ben", farmers_id="222", farmid="5002"),
+            _row("POL-3", "Santos", "Cid", farmers_id="333", farmid="5003"),
+        )
+        mock_db = _build_mock_db()
+
+        upload_module.upload_csv(file=_fake_upload_file(csv_text), db=mock_db)
+
+        self.assertEqual(mock_db.query_call_counts.get(models.AdminBoundary, 0), 1)
+
+    def test_same_rsbsa_no_across_rows_is_only_queried_once(self):
+        csv_text = _csv(
+            _row("POL-1", "Cruz", "Ana", rsbsa_no="RSBSA-1"),
+            _row("POL-2", "Cruz", "Ana", rsbsa_no="RSBSA-1", area="0.5", amount_cover="5000"),
+        )
+        mock_db = _build_mock_db()
+
+        upload_module.upload_csv(file=_fake_upload_file(csv_text), db=mock_db)
+
+        farmers = mock_db.tables[models.FarmerProfile].rows
+        self.assertEqual(len(farmers), 1)
+        self.assertEqual(mock_db.query_call_counts.get(models.FarmerProfile, 0), 1)
 
     def test_blank_farmid_does_not_collapse_distinct_farms(self):
         csv_text = _csv(
