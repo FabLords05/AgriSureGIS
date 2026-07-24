@@ -68,10 +68,13 @@ def _build_mock_db():
 
     def add_side_effect(instance):
         model = type(instance)
-        tables[model].add(instance)
-        counters[model] += 1
-        setattr(instance, _PK_FIELDS[model], counters[model])
         added_instances.append(instance)
+        # Models outside _PK_FIELDS (e.g. RiskAssessment) are only ever inserted,
+        # never queried back by upload_csv() -- nothing to track a fake PK for.
+        if model in tables:
+            tables[model].add(instance)
+            counters[model] += 1
+            setattr(instance, _PK_FIELDS[model], counters[model])
 
     mock_db.add.side_effect = add_side_effect
     mock_db.tables = tables
