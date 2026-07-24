@@ -554,6 +554,19 @@ Prompted by two new real files dropped in `docs/`: `Rice Risk Exposure Region X 
 
 ### Status / Next Steps
 * **The live database does not have the `farmers_id` column yet.** Any upload that hits the `farmers_id`-matching branch will raise `UndefinedColumn` until Fabio applies `docs/PROPOSAL_farmers_id_column.md`'s DDL. Everything else in this entry (encoding fix, header normalization, blank-collapse fix via `rsbsa_no` alone, `product_name`/`InsuranceRecord.farmer_id` fixes, the crop-stage-seed rework, and GPX matching via `farm_reference`/name) has no DDL dependency and works against the current live schema.
-* Not run against a live database or the frontend dev server — per `CLAUDE.md`'s handoff rules, Fabio needs to: apply the schema change, run the backend test suite, exercise `/api/upload/csv` and `/api/upload/gpx` via Swagger UI against the real files in `docs/`, and click through the frontend GPX drop flow.
+* Backend test suite run by Fabio (`pytest tests/ -v`): 36/43 passed on the first pass; the 7 failures were all in `test_upload_csv_ingestion.py` and all traced to the same root cause (a gap in that test file's own mock harness, not production code — see the follow-up entry directly below). Not yet re-run since the fix; not run against a live database or the frontend dev server.
 * Branch is **not pushed** and has **no PR open** — needs review before merging into `develop`.
+
+---
+
+## [2026-07-24] - Test Fix: `RiskAssessment` Inserts in the CSV Ingestion Fake-DB Harness
+
+Follow-up to the entry directly above, found by Fabio's first `pytest` run against it.
+
+### 1. File: `backend/tests/test_upload_csv_ingestion.py`
+* **Changes to Tests:** `_build_mock_db()`'s `add_side_effect()` only tracked the four get-or-create models (`AdminBoundary`/`FarmerProfile`/`Farm`/`InsuranceRecord`) in its fake PK-tracking table. `upload_csv()` also calls `db.add()` on a `RiskAssessment` instance (the crop-stage seed row, item 0 in the entry above) — a model the harness never queries back, so it was never added to that table, and `tables[RiskAssessment]` raised `KeyError: <class 'app.models.models.RiskAssessment'>` on every test, caught by `upload_csv()`'s broad `except Exception` and re-surfaced as a 500. Fixed by only running the PK-assignment bookkeeping for models actually present in the tracking table, while still recording every added instance (including `RiskAssessment`) in the flat `added_instances` list the tests assert against.
+
+### Status / Next Steps
+* This was a test-harness-only bug. All 36 other tests (the updated `test_csv_upload.py`, `test_gpx_farmer_matcher.py`, `test_upload_gpx_api.py`, and the rest of the existing suite) passed on the first run, meaning the actual production code from the entry above (`upload.py`, `gpx_farmer_matcher.py`, `models.py`) was already correct.
+* Awaiting Fabio's re-run of `pytest tests/ -v` to confirm all 7 now pass.
 
