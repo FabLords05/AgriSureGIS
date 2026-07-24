@@ -19,7 +19,8 @@
   - **Payload:** Multipart Form (CSV file).
 * **POST `/api/upload/gpx`**
   - **Description:** Upload GPX track files to build farm boundary geometries.
-  - **Payload:** Multipart Form (GPX file, `farmer_id`, `farm_id`).
+  - **Payload:** Multipart Form (GPX file, optional `farmer_id`, `farm_id`).
+  - **Matching:** If `farmer_id`/`farm_id` are both omitted, the farmer/farm is auto-detected from the uploaded filename (pattern `TAB_<LASTNAME> , <FIRSTNAME> <MI>._<ID1>_<ID2>_<DATE>.gpx`) via `GpxFarmerMatcherService` — ID-based match first, normalized-name fallback. Returns 404/400 with no DB change if no match (or an ambiguous name match) is found; the caller falls back to supplying both IDs manually. Providing exactly one of the two IDs is a 400.
 
 ## 3. PAGASA Bulletin Monitoring
 * **GET `/api/bulletins/`** - List all parsed tropical cyclone bulletins.

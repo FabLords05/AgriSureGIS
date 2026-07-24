@@ -31,6 +31,10 @@ CREATE TABLE tbl_system_users (
 
 CREATE TABLE tbl_farmers_profile (
     farmer_id SERIAL PRIMARY KEY,
+    -- PABS-native per-farmer ID (see docs/PROPOSAL_farmers_id_column.md). 100% populated
+    -- in real PABS exports vs. rsbsa_no's ~71%, so it's the preferred farmer-matching key
+    -- for CSV ingestion and GPX filename-based matching; rsbsa_no is the legacy fallback.
+    farmers_id VARCHAR(20) UNIQUE,
     rsbsa_no VARCHAR(50) UNIQUE,
     last_name VARCHAR(100) NOT NULL,
     first_name VARCHAR(100) NOT NULL,

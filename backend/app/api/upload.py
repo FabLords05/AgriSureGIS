@@ -1,3 +1,6 @@
+import io
+import logging
+import re
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -8,9 +11,12 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.models import models
+from app.services.gpx_farmer_matcher import GpxFarmerMatcherService
 from app.services.gpx_parser import GpxParserService
 
 router = APIRouter(prefix="/api/upload", tags=["upload"])
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_value(value: Any) -> Any:
@@ -30,6 +36,17 @@ def _normalize_value(value: Any) -> Any:
         return value
 
     return value
+
+
+def _stringify_id(value: Any) -> str | None:
+    """Coerces a pandas-inferred numeric ID column (FARMID/FarmersID are pure-digit
+    columns pandas may read as int64/float64) to text, since these map to VARCHAR
+    columns and are never used arithmetically."""
+    if value is None:
+        return None
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
 
 
 def _parse_decimal(value: Any) -> Decimal | None:
@@ -64,41 +81,62 @@ def _parse_date(value: Any) -> date | None:
         return None
 
 
+def _normalize_header(key: str) -> str:
+    """Collapses a CSV header down to bare alphanumerics so e.g. 'Farm ID' (legacy
+    pabs_results.csv layout) and 'FARMID' (the newer PABS export layout) both
+    resolve to the same lookup key, along with any other casing/spacing drift."""
+    return re.sub(r"[^a-z0-9]", "", key.lower())
+
+
 def prepare_row_payload(row: Any) -> dict[str, Any]:
-    data = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+    raw = row.to_dict() if hasattr(row, "to_dict") else dict(row)
+    normalized = {_normalize_header(k): v for k, v in raw.items()}
+
+    def get(*header_names: str) -> Any:
+        for name in header_names:
+            key = _normalize_header(name)
+            if key in normalized:
+                return normalized[key]
+        return None
 
     boundary = {
-        "province": _normalize_value(data.get("Province")) or "",
-        "municipality": _normalize_value(data.get("Municipality")) or "",
-        "barangay": _normalize_value(data.get("Barangay")) or "",
+        "province": _normalize_value(get("Province")) or "",
+        "municipality": _normalize_value(get("Municipality")) or "",
+        "barangay": _normalize_value(get("Barangay")) or "",
     }
 
     farmer = {
-        "rsbsa_no": _normalize_value(data.get("RSBSA No.")) or "",
-        "last_name": _normalize_value(data.get("Surname")) or "",
-        "first_name": _normalize_value(data.get("Firstname")) or "",
-        "middle_name": _normalize_value(data.get("Middlename")),
+        "farmers_id": _stringify_id(_normalize_value(get("FarmersID"))),
+        "rsbsa_no": _normalize_value(get("RSBSA No.")),
+        "last_name": _normalize_value(get("Surname")) or "",
+        "first_name": _normalize_value(get("Firstname")) or "",
+        "middle_name": _normalize_value(get("Middlename")),
     }
 
     farm = {
-        "csv_farm_reference": _normalize_value(data.get("Farm ID")),
-        "georef_id": _normalize_value(data.get("Georef ID")),
-        "area_size": _parse_decimal(data.get("AreaInsured")),
+        "csv_farm_reference": _stringify_id(_normalize_value(get("FARMID", "Farm ID"))),
+        "georef_id": _normalize_value(get("Georef ID")),
+        "area_size": _parse_decimal(get("AreaInsured")),
     }
 
     insurance = {
-        "policy_no": _normalize_value(data.get("Policy No.")) or "",
-        "program_type": _normalize_value(data.get("Program Type")),
-        "effectivity_date": _parse_date(data.get("Effectivity Date")),
-        "expiry_date": _parse_date(data.get("Expiry Date")),
-        "amount_cover": _parse_decimal(data.get("AmountofCover")),
+        "policy_no": _normalize_value(get("Policy No.")) or "",
+        "program_type": _normalize_value(get("Program Type")),
+        "product_name": _normalize_value(get("Product Name")),
+        "effectivity_date": _parse_date(get("Effectivity Date")),
+        "expiry_date": _parse_date(get("Expiry Date")),
+        "amount_cover": _parse_decimal(get("AmountofCover")),
     }
 
-    assessment = {
-        "crop_stage_no": _normalize_value(data.get("Stage No.")),
-        "crop_stage": _normalize_value(data.get("Stage")),
-        "estimated_damage": _parse_decimal(data.get("EstimatedDamage")),
-        "adjuster_calculation": _normalize_value(data.get("Adjuster's Stage of Crop Calculation")),
+    # Not a real computed assessment -- just carries the CSV's own crop-stage/damage
+    # figures forward so AssessmentService.calculate_for_bulletin() has a crop stage
+    # to read for this policy once a real typhoon is assessed. risk_exposure_amount
+    # is kept only to cross-check against estimated_damage, never persisted.
+    crop_stage_seed = {
+        "crop_stage_no": _normalize_value(get("Stage No.")),
+        "crop_stage": _normalize_value(get("Stage")),
+        "estimated_damage": _parse_decimal(get("EstimatedDamage")),
+        "risk_exposure_amount": _parse_decimal(get("RiskExposureAmount")),
     }
 
     return {
@@ -106,7 +144,7 @@ def prepare_row_payload(row: Any) -> dict[str, Any]:
         "farmer": farmer,
         "farm": farm,
         "insurance": insurance,
-        "assessment": assessment,
+        "crop_stage_seed": crop_stage_seed,
     }
 
 
@@ -121,12 +159,26 @@ def upload_csv(
     if not file.content_type or "csv" not in file.content_type:
         raise HTTPException(status_code=400, detail="The uploaded file must be a CSV.")
 
-    try:
-        if file.file.seekable():
-            file.file.seek(0)
-        dataframe = pd.read_csv(file.file)
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Unable to parse CSV file: {exc}") from exc
+    if file.file.seekable():
+        file.file.seek(0)
+    raw_bytes = file.file.read()
+
+    # Real PABS exports have shown up as ISO-8859-1/cp1252 (e.g. names like "SEÑERES"),
+    # not UTF-8. Try UTF-8 first (with BOM tolerance) since that's still the common
+    # case, then fall back to cp1252, which covers the same byte range as
+    # ISO-8859-1 and never raises UnicodeDecodeError on real Windows-exported text.
+    dataframe = None
+    last_error: Exception | None = None
+    for encoding in ("utf-8-sig", "cp1252"):
+        try:
+            dataframe = pd.read_csv(io.BytesIO(raw_bytes), encoding=encoding)
+            break
+        except UnicodeDecodeError as exc:
+            last_error = exc
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Unable to parse CSV file: {exc}") from exc
+    if dataframe is None:
+        raise HTTPException(status_code=400, detail=f"Unable to decode CSV file: {last_error}")
 
     if dataframe.empty:
         return {
@@ -160,29 +212,47 @@ def upload_csv(
                 db.add(boundary)
                 db.flush()
 
-            farmer = (
-                db.query(models.FarmerProfile)
-                .filter(models.FarmerProfile.rsbsa_no == payload["farmer"]["rsbsa_no"])
-                .first()
-            )
+            # Farmer identity: prefer farmers_id (100% populated in real PABS exports)
+            # over rsbsa_no (blank on ~29% of real rows). Never match on a blank/None
+            # key in either case -- that would silently collapse distinct farmers who
+            # both happen to have no RSBSA number onto the same profile.
+            farmer_payload = payload["farmer"]
+            farmer = None
+            if farmer_payload["farmers_id"]:
+                farmer = (
+                    db.query(models.FarmerProfile)
+                    .filter(models.FarmerProfile.farmers_id == farmer_payload["farmers_id"])
+                    .first()
+                )
+            if farmer is None and farmer_payload["rsbsa_no"]:
+                farmer = (
+                    db.query(models.FarmerProfile)
+                    .filter(models.FarmerProfile.rsbsa_no == farmer_payload["rsbsa_no"])
+                    .first()
+                )
+                if farmer is not None and farmer.farmers_id is None and farmer_payload["farmers_id"]:
+                    farmer.farmers_id = farmer_payload["farmers_id"]
             if farmer is None:
-                farmer = models.FarmerProfile(**payload["farmer"])
+                farmer = models.FarmerProfile(**farmer_payload)
                 db.add(farmer)
                 db.flush()
 
-            existing_farm = (
-                db.query(models.Farm)
-                .filter(models.Farm.csv_farm_reference == payload["farm"]["csv_farm_reference"])
-                .first()
-            )
-            farm = existing_farm
+            # Farm identity: same never-match-on-blank rule as farmer identity above.
+            farm_payload = payload["farm"]
+            farm = None
+            if farm_payload["csv_farm_reference"]:
+                farm = (
+                    db.query(models.Farm)
+                    .filter(models.Farm.csv_farm_reference == farm_payload["csv_farm_reference"])
+                    .first()
+                )
             if farm is None:
                 farm = models.Farm(
                     farmer_id=farmer.farmer_id,
                     boundary_id=boundary.boundary_id,
-                    csv_farm_reference=payload["farm"]["csv_farm_reference"],
-                    georef_id=payload["farm"]["georef_id"],
-                    area_size=payload["farm"]["area_size"] or 0,
+                    csv_farm_reference=farm_payload["csv_farm_reference"],
+                    georef_id=farm_payload["georef_id"],
+                    area_size=farm_payload["area_size"] or 0,
                     location_geom=None,
                 )
                 db.add(farm)
@@ -195,9 +265,11 @@ def upload_csv(
             )
             if insurance is None:
                 insurance = models.InsuranceRecord(
+                    farmer_id=farmer.farmer_id,
                     farm_id=farm.farm_id,
                     policy_no=payload["insurance"]["policy_no"],
                     program_type=payload["insurance"]["program_type"],
+                    product_name=payload["insurance"]["product_name"],
                     effectivity_date=payload["insurance"]["effectivity_date"],
                     expiry_date=payload["insurance"]["expiry_date"],
                     amount_cover=payload["insurance"]["amount_cover"] or 0,
@@ -209,14 +281,32 @@ def upload_csv(
                 skipped_rows += 1
                 continue
 
-            assessment = models.RiskAssessment(
-                insurance_records_id=insurance.insurance_records_id,
-                crop_stage_no=payload["assessment"]["crop_stage_no"],
-                crop_stage=payload["assessment"]["crop_stage"],
-                estimated_damage=payload["assessment"]["estimated_damage"],
-                adjuster_calculation=payload["assessment"]["adjuster_calculation"],
+            # Crop-stage seed row -- not a real computed assessment (no matrix_id/
+            # wind_velocity/summary_id set). It exists only so
+            # AssessmentService.calculate_for_bulletin() has a crop_stage_no to read
+            # for this policy once a real typhoon is assessed; export_assessments_csv()
+            # already filters these out via `matrix_id IS NOT NULL`. final_indemnity_payment
+            # is seeded from estimated_damage (not a real payout yet) -- the same
+            # placeholder convention backend/seed_database.py already uses.
+            seed = payload["crop_stage_seed"]
+            estimated_damage = seed["estimated_damage"] or Decimal("0.00")
+            risk_exposure_amount = seed["risk_exposure_amount"]
+            if risk_exposure_amount is not None and abs(risk_exposure_amount - estimated_damage) > Decimal("0.01"):
+                logger.warning(
+                    "Policy %s: RiskExposureAmount (%s) differs from EstimatedDamage (%s)",
+                    payload["insurance"]["policy_no"],
+                    risk_exposure_amount,
+                    estimated_damage,
+                )
+            db.add(
+                models.RiskAssessment(
+                    insurance_records_id=insurance.insurance_records_id,
+                    crop_stage_no=seed["crop_stage_no"],
+                    crop_stage=seed["crop_stage"],
+                    estimated_damage=estimated_damage,
+                    final_indemnity_payment=estimated_damage,
+                )
             )
-            db.add(assessment)
 
         db.commit()
     except Exception as exc:
@@ -235,22 +325,49 @@ def upload_csv(
 @router.post("/gpx", status_code=status.HTTP_200_OK)
 def upload_gpx(
     file: UploadFile = File(...),
-    farmer_id: int = Form(...),
-    farm_id: int = Form(...),
+    farmer_id: int | None = Form(default=None),
+    farm_id: int | None = Form(default=None),
     db: Session = Depends(get_db),
 ):
     if not file.filename or not file.filename.lower().endswith(".gpx"):
         raise HTTPException(status_code=400, detail="Please upload a GPX file.")
 
-    farm = (
-        db.query(models.Farm)
-        .filter(models.Farm.farm_id == farm_id, models.Farm.farmer_id == farmer_id)
-        .first()
-    )
-    if farm is None:
+    matched_by = "manual"
+    if farmer_id is not None and farm_id is not None:
+        farm = (
+            db.query(models.Farm)
+            .filter(models.Farm.farm_id == farm_id, models.Farm.farmer_id == farmer_id)
+            .first()
+        )
+        if farm is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Farm not found for the given farmer_id and farm_id.",
+            )
+    elif farmer_id is None and farm_id is None:
+        match = GpxFarmerMatcherService.match(file.filename, db)
+        if match.farm is None:
+            if match.candidates:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f'Multiple farmer records match "{file.filename}" by name; '
+                        "select the correct farm row manually."
+                    ),
+                )
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f'No matching farmer/farm found for "{file.filename}". '
+                    "Select the correct farm row manually."
+                ),
+            )
+        farm = match.farm
+        matched_by = match.matched_by
+    else:
         raise HTTPException(
-            status_code=404,
-            detail="Farm not found for the given farmer_id and farm_id.",
+            status_code=400,
+            detail="Provide both farmer_id and farm_id for manual mode, or omit both to auto-detect from the filename.",
         )
 
     if file.file.seekable():
@@ -277,4 +394,6 @@ def upload_gpx(
         "status": "success",
         "message": "Farm boundary geometry updated from GPX file.",
         "farm_id": farm.farm_id,
+        "matched_by": matched_by,
+        "farmer_name": (f"{farm.farmer.first_name} {farm.farmer.last_name}".strip() if farm.farmer else None),
     }

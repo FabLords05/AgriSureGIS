@@ -67,6 +67,8 @@ export interface UploadGpxResult {
   status: string;
   message: string;
   farm_id: number;
+  matched_by?: string | null;
+  farmer_name?: string | null;
 }
 
 export interface UploadCsvResult {
@@ -120,11 +122,12 @@ export function getBulletinSignals(tcbId: number): Promise<TcbSignal[]> {
   return request<TcbSignal[]>(`/api/bulletins/${tcbId}/signals`);
 }
 
-export function uploadGpx(file: File, farmerId: number, farmId: number): Promise<UploadGpxResult> {
+export function uploadGpx(file: File, farmerId?: number, farmId?: number): Promise<UploadGpxResult> {
   const formData = new FormData();
   formData.append('file', file);
-  formData.append('farmer_id', String(farmerId));
-  formData.append('farm_id', String(farmId));
+  // Omitting both lets the backend auto-detect the farmer/farm from the filename.
+  if (farmerId != null) formData.append('farmer_id', String(farmerId));
+  if (farmId != null) formData.append('farm_id', String(farmId));
   return request<UploadGpxResult>('/api/upload/gpx', {
     method: 'POST',
     body: formData,

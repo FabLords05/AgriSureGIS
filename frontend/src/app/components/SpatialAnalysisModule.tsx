@@ -126,19 +126,23 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
             });
           });
       } else {
+        // A pre-selected table row (manual override) takes priority; otherwise let
+        // the backend auto-detect the farmer/farm from the GPX filename.
         const targetFarm = farms.find(f => f.farm_id === selectedFarmId);
-        if (!targetFarm || targetFarm.farmer_id == null) {
-          setUploadedFiles(prev => prev.map(f => f.name === newFile.name ? { ...f, status: "error" } : f));
-          setShowWarning("Select a farm row in the table before uploading a GPX boundary file.");
-          return;
-        }
-        uploadGpx(file, targetFarm.farmer_id, targetFarm.farm_id)
-          .then(() => {
+        const uploadPromise = targetFarm?.farmer_id != null
+          ? uploadGpx(file, targetFarm.farmer_id, targetFarm.farm_id)
+          : uploadGpx(file);
+
+        uploadPromise
+          .then(result => {
             setUploadedFiles(prev => prev.map(f => f.name === newFile.name ? { ...f, status: "done" } : f));
             setUploadStatus({
               type: "success",
-              message: `GPX boundary uploaded for Farm #${targetFarm.farm_id}.`,
+              message: result.farmer_name
+                ? `GPX boundary matched to ${result.farmer_name} (Farm #${result.farm_id}, via ${result.matched_by}).`
+                : `GPX boundary uploaded for Farm #${result.farm_id}.`,
             });
+            setSelectedFarmId(result.farm_id);
             refreshFarms();
           })
           .catch(error => {
@@ -294,7 +298,7 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
             <UploadCloud size={20} className={`mx-auto mb-1.5 ${isDragging ? "text-[#166534]" : "text-muted-foreground"}`} />
             <p className="text-[10px] font-medium">Drop files here or click to browse</p>
             <p className="text-[9px] text-muted-foreground mt-0.5">
-              .CSV farmer records &middot; .GPX farm polygon (select a farm row first)
+              .CSV farmer records &middot; .GPX farm polygon (auto-matched by filename, or select a row first)
             </p>
             <input
               ref={fileInputRef}

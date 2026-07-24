@@ -25,7 +25,7 @@ Priority Order:
 1. Use Case Diagram
 2. UI Prototype Screens
 3. Entity-Relationship Diagram (ERD)
-4. Capstone Manuscript ([.claude/Revised AgriSureGIS Manuscript.pdf](.claude/Revised%20AgriSureGIS%20Manuscript.pdf))
+4. Capstone Manuscript ([docs/Revised AgriSureGIS Manuscript.pdf](docs/Revised%20AgriSureGIS%20Manuscript.pdf))
 5. Development Plan
 
 If documentation conflicts:

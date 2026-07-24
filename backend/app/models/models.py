@@ -34,7 +34,8 @@ class FarmerProfile(Base):
     __tablename__ = "tbl_farmers_profile"
 
     farmer_id = Column(Integer, primary_key=True, index=True)
-    rsbsa_no = Column(String(50), unique=True, nullable=False)
+    farmers_id = Column(String(20), unique=True)
+    rsbsa_no = Column(String(50), unique=True)
     last_name = Column(String(50), nullable=False)
     first_name = Column(String(50), nullable=False)
     middle_name = Column(String(50))
