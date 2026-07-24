@@ -1,3 +1,4 @@
+import io
 import unittest
 from datetime import date
 from decimal import Decimal
@@ -133,6 +134,29 @@ class CsvUploadPreparationTests(unittest.TestCase):
         self.assertIsNone(payload["farmer"]["rsbsa_no"])
         self.assertIsNone(payload["farmer"]["farmers_id"])
         self.assertIsNone(payload["farm"]["csv_farm_reference"])
+
+    def test_purely_numeric_policy_no_is_coerced_to_string(self):
+        # Regression test for a real failure hit against a live DB: "Policy No."
+        # in the real PABS export is purely numeric (e.g. 1192155), so pandas
+        # infers the whole column as int64 -- Postgres then rejected
+        # `policy_no = 1192155` against the VARCHAR column with "operator does
+        # not exist: character varying = integer". Built from a real CSV string
+        # (not a hand-built DataFrame) so pandas' own type inference is actually
+        # exercised, matching how upload_csv() reads a real file.
+        csv_text = (
+            "Province,Municipality,Barangay,Policy No.,Surname,Firstname,Middlename,"
+            "AreaInsured,AmountofCover,Stage No.,FarmersID,RSBSA No.,FARMID,Stage,EstimatedDamage\n"
+            "Agusan del Norte,Buenavista,Poblacion,1192155,Cruz,Ana,,1.0,10000,1,229159,"
+            "16-02-12-002-000035,1033691,Booting,500\n"
+        )
+        df = pd.read_csv(io.StringIO(csv_text))
+
+        payload = prepare_row_payload(df.iloc[0])
+
+        self.assertEqual(payload["insurance"]["policy_no"], "1192155")
+        self.assertIsInstance(payload["insurance"]["policy_no"], str)
+        self.assertEqual(payload["farmer"]["farmers_id"], "229159")
+        self.assertEqual(payload["farm"]["csv_farm_reference"], "1033691")
 
 
 class NormalizeHeaderTests(unittest.TestCase):

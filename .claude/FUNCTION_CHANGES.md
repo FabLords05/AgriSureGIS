@@ -647,7 +647,24 @@ Fabio reported the real CSV upload appeared to hang (waited several minutes, bac
 * Added `test_repeated_boundary_across_many_rows_is_only_queried_once` and `test_same_rsbsa_no_across_rows_is_only_queried_once` — direct regression tests for this exact problem, asserting the database is queried once per distinct boundary/farmer rather than once per row.
 
 ### Status / Next Steps
-* Awaiting Fabio's re-run of `pytest tests/ -v`, then a fresh attempt at the real CSV upload — expecting a large reduction in total query volume (roughly 23,917 boundary queries down to on the order of a few hundred to a couple thousand distinct boundaries, similarly for farmers), which should bring the whole upload down from "several minutes and still not done" to a much shorter, bounded time.
-* Did not add a database index on `upper(province), upper(municipality), upper(barangay)` — with caching, each distinct boundary is only queried once per upload regardless of row count, so the per-query cost matters far less now. Flagging as a possible follow-up if boundary queries are still slow (e.g. once the table has many thousands of rows).
-* Per-row SAVEPOINT count is unchanged (still one per row) — this entry only addresses the SELECT-query volume, which was the larger of the two costs. Not revisiting the SAVEPOINT-per-row design itself, since per-row failure isolation was an explicit, deliberate choice in the entry above.
+* The caching fix worked (request returned quickly instead of hanging), but Fabio's next attempt reported all 23,917 rows failed. **Resolved by the entry below**, a distinct bug this caching change wasn't responsible for.
+
+---
+
+## [2026-07-24] - CSV Ingestion: Coerce Every VARCHAR-Mapped ID to a String
+
+Fabio's retry (fast this time, confirming the caching fix above worked) reported **every single row failing identically**: `psycopg2.errors.UndefinedFunction: operator does not exist: character varying = integer` on `WHERE tbl_insurance_records.policy_no = 1192155`. Root cause: `Policy No.` in the real PABS export is purely numeric (e.g. `1192155`), so pandas infers that whole column as `int64` — `prepare_row_payload()` only ever coerced `FARMID`/`FarmersID` to text via `_stringify_id()`, not `Policy No.` (or `RSBSA No.`/`Georef ID`, which have the same latent risk even though the current file's values happen to be dash-formatted). This bug predates this session entirely — the original `upload_csv()` had the identical `_normalize_value(data.get("Policy No.")) or ""` line — it just never surfaced because nobody had run it against a live database with a real, purely-numeric Policy No. column before now. None of this session's own tests caught it either, since every test fixture used a non-numeric policy number like `"POL-1"`, which never exercises pandas' numeric type inference at all.
+
+### 1. File: `backend/app/api/upload.py`
+* **Changes to Functions:**
+  * `prepare_row_payload()`: `policy_no`, `rsbsa_no`, and `georef_id` are now all passed through `_stringify_id()`, same as `farmers_id`/`csv_farm_reference` already were. All five are VARCHAR-mapped identifiers that PABS could plausibly export as pure digits in some file even if the current one only demonstrates it for `Policy No.`.
+  * `_stringify_id()`'s docstring updated to reflect it's a general "every ID column read from this CSV" helper, not FARMID/FarmersID-specific.
+
+### 2. Files: `backend/tests/test_csv_upload.py`, `backend/tests/test_upload_csv_ingestion.py`
+* Added `test_purely_numeric_policy_no_is_coerced_to_string` (`test_csv_upload.py`) — parses a **real CSV string** through `pd.read_csv()` (not a hand-built `pd.DataFrame([...])`, which never exercises pandas' own type inference) with an all-digit Policy No., confirming it comes out of `prepare_row_payload()` as `str`.
+* Added `test_purely_numeric_policy_no_ingests_successfully_end_to_end` (`test_upload_csv_ingestion.py`) — same scenario through the full `upload_csv()` call, asserting `rows_failed == 0` and the stored `InsuranceRecord.policy_no` is a string.
+* Neither existing test suite caught this originally because every fixture used letters in its policy numbers (`"POL-001"`, `"POL-1"`, etc.) — worth remembering when writing CSV-ingestion test fixtures going forward: use realistic, purely-numeric IDs where the real PABS data is purely numeric, not letter-prefixed placeholders that accidentally dodge pandas' type inference.
+
+### Status / Next Steps
+* Awaiting Fabio's re-run of `pytest tests/ -v`, then a fresh CSV upload attempt — this should be the last blocker for a full, successful end-to-end ingestion of the real 23,917-row file (modulo any genuinely bad individual rows like the `DDINAGAT` typo, which will now report cleanly in `failures` instead of blocking anything).
 

@@ -314,6 +314,23 @@ class UploadCsvIngestionTests(unittest.TestCase):
         farmer = mock_db.tables[models.FarmerProfile].rows[0]
         self.assertEqual(farmer.last_name, "SEÑERES")
 
+    def test_purely_numeric_policy_no_ingests_successfully_end_to_end(self):
+        # Regression test for a real failure hit against a live DB: a purely
+        # numeric "Policy No." (e.g. 1192155, as in the real PABS export) made
+        # pandas infer the whole column as int64, and Postgres rejected the
+        # resulting `policy_no = 1192155` comparison against the VARCHAR column.
+        # _row()'s other tests all use non-numeric policy numbers like "POL-1",
+        # which never exercised pandas' numeric type inference at all.
+        csv_text = _csv(_row("1192155", "Cruz", "Ana", farmers_id="111", farmid="5001"))
+        mock_db = _build_mock_db()
+
+        result = upload_module.upload_csv(file=_fake_upload_file(csv_text), db=mock_db)
+
+        self.assertEqual(result["rows_inserted"], 1)
+        self.assertEqual(result["rows_failed"], 0)
+        insurance = mock_db.tables[models.InsuranceRecord].rows[0]
+        self.assertEqual(insurance.policy_no, "1192155")
+
 
 if __name__ == "__main__":
     unittest.main()

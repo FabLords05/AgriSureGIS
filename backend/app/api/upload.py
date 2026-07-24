@@ -64,9 +64,13 @@ def _normalize_value(value: Any) -> Any:
 
 
 def _stringify_id(value: Any) -> str | None:
-    """Coerces a pandas-inferred numeric ID column (FARMID/FarmersID are pure-digit
-    columns pandas may read as int64/float64) to text, since these map to VARCHAR
-    columns and are never used arithmetically."""
+    """Coerces a pandas-inferred numeric ID column to text. Applies to every
+    VARCHAR-mapped identifier read from the CSV (Policy No., FARMID, FarmersID,
+    RSBSA No., Georef ID) -- any of these can be all-digits in a given export
+    (confirmed for real: Policy No. is pure-digit in the actual PABS CSV, which
+    made Postgres reject `policy_no = 1192155` with "operator does not exist:
+    character varying = integer" since these columns are never used
+    arithmetically and must stay text for comparison against a VARCHAR column."""
     if value is None:
         return None
     if isinstance(value, float) and value.is_integer():
@@ -132,7 +136,7 @@ def prepare_row_payload(row: Any) -> dict[str, Any]:
 
     farmer = {
         "farmers_id": _stringify_id(_normalize_value(get("FarmersID"))),
-        "rsbsa_no": _normalize_value(get("RSBSA No.")),
+        "rsbsa_no": _stringify_id(_normalize_value(get("RSBSA No."))),
         "last_name": _normalize_value(get("Surname")) or "",
         "first_name": _normalize_value(get("Firstname")) or "",
         "middle_name": _normalize_value(get("Middlename")),
@@ -140,12 +144,12 @@ def prepare_row_payload(row: Any) -> dict[str, Any]:
 
     farm = {
         "csv_farm_reference": _stringify_id(_normalize_value(get("FARMID", "Farm ID"))),
-        "georef_id": _normalize_value(get("Georef ID")),
+        "georef_id": _stringify_id(_normalize_value(get("Georef ID"))),
         "area_size": _parse_decimal(get("AreaInsured")),
     }
 
     insurance = {
-        "policy_no": _normalize_value(get("Policy No.")) or "",
+        "policy_no": _stringify_id(_normalize_value(get("Policy No."))) or "",
         "program_type": _normalize_value(get("Program Type")),
         "product_name": _normalize_value(get("Product Name")),
         "effectivity_date": _parse_date(get("Effectivity Date")),
