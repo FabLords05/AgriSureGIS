@@ -668,3 +668,25 @@ Fabio's retry (fast this time, confirming the caching fix above worked) reported
 ### Status / Next Steps
 * Awaiting Fabio's re-run of `pytest tests/ -v`, then a fresh CSV upload attempt — this should be the last blocker for a full, successful end-to-end ingestion of the real 23,917-row file (modulo any genuinely bad individual rows like the `DDINAGAT` typo, which will now report cleanly in `failures` instead of blocking anything).
 
+---
+
+## [2026-07-26] - Sample Ingestion Assets Added to `docs/`
+
+No backend/frontend code touched. Fabio dropped four real-world sample artifacts into `docs/` for GPX-matching/ingestion work on this branch; a replacement flowchart export also lands here (the old `docs/Flowchart.drawio.png` stays as-is, unrelated to this branch's revert).
+
+### 1. File: `docs/Rice Risk Exposure Region X 04-15-2026.csv` (new)
+* Trimmed from the original ~23,918-row PABS export down to 100 lines (header + 99 rows) at Fabio's request, so it's usable as a lightweight test fixture instead of the full file.
+* The naive first-100-rows slice was 94/99 `RSBSA` `Program Type` rows (only 5 non-`RSBSA`), which isn't representative — the full file's `Program Type` column has 8 distinct values (`RSBSA`, `APCP`, `ACEF PROGRAM`, `AGRI-PUHUNAN PROGRAM`, `RSBSA - ARB`, `AGRISENSO PROGRAM`, `ANYO PROGRAM`, `OTHER - LI LC`), and non-`RSBSA` rows are only 437 of 23,917 total, sparse and scattered throughout the file. Rebuilt as: the first 92 `RSBSA` rows (original order) + the first occurrence of each of the 7 non-`RSBSA` program types, merged back into original row order — giving a 100-line sample that exercises every program type instead of being effectively all-`RSBSA`.
+
+### 2. File: `docs/TAB_ABAO , JONEL  J._120961_1148107_2024-08-06.gpx` (new)
+* Real farmer GPX boundary track sample for this branch's GPX-matching work.
+
+### 3. File: `docs/RICE_Insured-Farms_with-PPI-Polygon_02-09-2026.xlsx` (new)
+* Real insured-farms reference workbook with PPI polygon data.
+
+### 4. File: `docs/Parametric_Indemnity_Process_Flowchart.drawio.png` (new)
+* Updated flowchart export. Added alongside (not replacing) the existing `docs/Flowchart.drawio.png`, which an earlier revert on this branch restored to its committed state.
+
+### Status / Next Steps
+* Committed on `fabio/db/pabs-ingestion-gpx-matching`, which has never been pushed to `origin` before now — this is the branch's first push, needs `git push -u origin fabio/db/pabs-ingestion-gpx-matching` (no upstream configured yet).
+
