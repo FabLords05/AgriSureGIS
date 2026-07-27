@@ -1,3 +1,6 @@
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI, Depends, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
@@ -7,11 +10,34 @@ from app.api.upload import router as upload_router
 from app.api.bulletins import router as bulletins_router
 from app.api.assessments import router as assessments_router
 from app.api.farms import router as farms_router
-from app.core.database import get_db
+from app.core.database import SessionLocal, get_db
+from app.core.scheduler import build_scheduler
 from app.models import models
 
+logger = logging.getLogger("agrisuregis.main")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    db = SessionLocal()
+    try:
+        settings = db.query(models.ParserSettings).first()
+        interval = settings.polling_interval_hours if settings else 3
+    finally:
+        db.close()
+
+    scheduler = build_scheduler(interval)
+    scheduler.start()
+    app.state.scheduler = scheduler
+    logger.info("PAGASA polling scheduler started, interval=%dh.", interval)
+
+    yield
+
+    scheduler.shutdown(wait=False)
+
+
 # Initialize the FastAPI application
-app = FastAPI(title="AgriSureGIS API", version="1.0")
+app = FastAPI(title="AgriSureGIS API", version="1.0", lifespan=lifespan)
 
 app.include_router(upload_router)
 app.include_router(bulletins_router, prefix="/api")

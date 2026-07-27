@@ -177,4 +177,11 @@ class AreaExposureSummary(Base):
     computed_at = Column(DateTime, server_default=func.now())
 
     typhoon = relationship("Typhoon")
-    boundary = relationship("AdminBoundary")
+
+
+class ParserSettings(Base):
+    __tablename__ = "tbl_parser_settings"
+
+    setting_id = Column(Integer, primary_key=True, index=True)
+    polling_interval_hours = Column(Integer, nullable=False, default=3)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

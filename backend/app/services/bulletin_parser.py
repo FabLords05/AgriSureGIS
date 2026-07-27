@@ -6,7 +6,7 @@ import pdfplumber
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 from geoalchemy2.elements import WKTElement
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.models.models import Typhoon, TropicalCycloneBulletin, TcbSignal, AdminBoundary
 
@@ -61,40 +61,59 @@ class BulletinParserService:
     def parse_bulletin_text(pdf_path: str) -> dict:
         """
         Extracts raw text from the PDF and parses metadata and wind signal areas.
+
+        Regex patterns for bulletin number, name/category, and coordinates are
+        modeled on the `@pagasa-parser/source-pdf` reference implementation
+        (github.com/pagasa-parser/source-pdf), adapted to Python and verified
+        against a real sample bulletin (docs/TCB#11_kiyapo.pdf — Tropical Storm
+        KIYAPO, Bulletin NR. 11).
         """
         with pdfplumber.open(pdf_path) as pdf:
             text = ""
+            tables = []
             for page in pdf.pages:
                 text += page.extract_text() or ""
-                
+                tables.extend(page.extract_tables())
+
         # 1. Parse Bulletin Number
-        bulletin_no_match = re.search(r"Tropical\s+Cyclone\s+Bulletin\s+No\.\s+(\d+)", text, re.IGNORECASE)
+        # Real bulletins abbreviate to "NR." (e.g. "BULLETIN NR. 11"), not just "No."
+        bulletin_no_match = re.search(r"Tropical\s+Cyclone\s+Bulletin\s+N[ro]\.\s+(\d+)", text, re.IGNORECASE)
         bulletin_no = int(bulletin_no_match.group(1)) if bulletin_no_match else 1
 
-        # 2. Parse Typhoon Name
-        # Standard: TYPHOON "LEON" or TROPICAL STORM "KRISTINE"
-        name_match = re.search(
-            r"(?:TYPHOON|TROPICAL STORM|SEVERE TROPICAL STORM|TROPICAL DEPRESSION)\s+[\"']?([A-Z\s\-]+)[\"']?", 
-            text, 
-            re.IGNORECASE
+        # 2. Parse Category, Typhoon Name, and International Name from the title
+        # line itself (e.g. "Tropical Storm KIYAPO (NOUL)" or 'TYPHOON "LEON"'),
+        # rather than scanning the whole document for a category keyword — the
+        # word "typhoon" can legitimately appear elsewhere in the forecast prose
+        # (e.g. "may be upgraded... reach typhoon category") even when the storm's
+        # *current* category is something else, which used to misclassify it.
+        # Philippine local storm names are always a single word — bounded to one
+        # word (no \s) so a following word on the same line can't be swallowed
+        # into the name (this used to capture e.g. "GARDO Issued at" as the name).
+        title_match = re.search(
+            r"^\s*(TYPHOON|TROPICAL STORM|SEVERE TROPICAL STORM|TROPICAL DEPRESSION)"
+            r"\s+[\"']?([A-Z][A-Z\-]*)[\"']?(?:\s*\(([A-Z][A-Z\-]*)\))?",
+            text,
+            re.IGNORECASE | re.MULTILINE,
         )
-        typhoon_name = name_match.group(1).strip() if name_match else "UNKNOWN"
+        category = title_match.group(1).title() if title_match else "UNKNOWN"
+        typhoon_name = title_match.group(2).strip() if title_match else "UNKNOWN"
+        international_name = title_match.group(3) if title_match and title_match.group(3) else None
 
         # 3. Parse Max Winds and Gusts
         winds_match = re.search(r"maximum\s+sustained\s+winds\s+of\s+(\d+)\s+km/h", text, re.IGNORECASE)
         gusts_match = re.search(r"gustiness\s+of\s+up\s+to\s+(\d+)\s+km/h", text, re.IGNORECASE)
-        
+
         max_winds = int(winds_match.group(1)) if winds_match else None
         gustiness = int(gusts_match.group(1)) if gusts_match else None
 
         # 4. Parse Center Coordinates (Lat, Lon)
-        # Standard: "at 15.4°N, 122.3°E" or "15.4 N, 122.3 E"
-        coords_match = re.search(r"at\s+(\d+\.\d+)\s*°?\s*N,\s*(\d+\.\d+)\s*°?\s*E", text, re.IGNORECASE)
-        if not coords_match:
-            coords_match = re.search(r"(\d+\.\d+)\s*N,\s*(\d+\.\d+)\s*E", text, re.IGNORECASE)
-            
+        # Real phrasing is a parenthesized "(18.8°N, 122.0°E)" pair, not
+        # necessarily immediately preceded by the word "at" — there can be a
+        # full clause in between (e.g. "...estimated based on all available
+        # data at over the coastal waters of ... (18.8°N, 122.0°E)").
+        coords_match = re.search(r"([0-9.]+)\s*°\s*([NS]),\s*([0-9.]+)\s*°\s*([EW])", text, re.IGNORECASE)
         lat = float(coords_match.group(1)) if coords_match else 0.0
-        lon = float(coords_match.group(2)) if coords_match else 0.0
+        lon = float(coords_match.group(3)) if coords_match else 0.0
 
         # 4b. Parse Issued-At Timestamp
         # Standard PAGASA phrasing: "Issued at 5:00 PM, 15 October 2024" (wording around
@@ -116,27 +135,50 @@ class BulletinParserService:
             except ValueError:
                 issued_at = None
 
-        # 5. Extract Signal Text Blocks (Signal 1 to 5)
-        signals_data = {}
-        # Find start indices of signal blocks
-        signal_markers = []
-        for level in range(1, 6):
-            # Matches "Signal No. 2" or "SIGNAL NO. 2"
-            marker = re.search(rf"Signal\s+No\.\s+{level}", text, re.IGNORECASE)
-            if marker:
-                signal_markers.append((level, marker.start()))
-                
-        signal_markers.sort(key=lambda x: x[1])
-        
-        for i, (level, start_idx) in enumerate(signal_markers):
-            end_idx = signal_markers[i+1][1] if i+1 < len(signal_markers) else len(text)
-            signal_text = text[start_idx:end_idx]
-            signals_data[level] = signal_text
+        # 5. Extract wind-signal areas from PAGASA's actual TCWS table (per
+        # signal level, Mindanao column only — this project is scoped to PCIC
+        # Region X / Mindanao per PROJECT_CONTEXT.md, and every AdminBoundary
+        # row seeded here is Mindanao by definition). This replaces the old
+        # approach of regex-scanning the flattened prose for "Signal No. X"
+        # markers, which had no way to distinguish the real TCWS table from a
+        # narrative sentence merely *mentioning* a signal number (e.g. "The
+        # hoisting of Wind Signal No. 3 is not ruled out should KIYAPO
+        # intensify...") — confirmed against docs/TCB#11_kiyapo.pdf, whose real
+        # TCWS table is `TCWS No. | Luzon | Visayas | Mindanao`, one row per
+        # signal level, with "-" in a column when no areas apply there.
+        signals_data: dict[int, str] = {}
+        for table in tables:
+            mindanao_col = None
+            header_row_idx = None
+            for row_idx, row in enumerate(table[:3]):  # header is within the first couple of rows
+                cells = [(cell or "").strip().lower() for cell in row]
+                if any("mindanao" in cell for cell in cells):
+                    mindanao_col = next(i for i, cell in enumerate(cells) if "mindanao" in cell)
+                    header_row_idx = row_idx
+                    break
+            if mindanao_col is None:
+                continue  # not the TCWS table
+
+            current_level = None
+            for row in table[header_row_idx + 1:]:
+                if not row:
+                    continue
+                first_cell = (row[0] or "").strip()
+                level_match = re.match(r"(\d)", first_cell)
+                if level_match:
+                    current_level = int(level_match.group(1))
+                if current_level is None or mindanao_col >= len(row):
+                    continue
+                cell_text = (row[mindanao_col] or "").strip()
+                if not cell_text or cell_text == "-":
+                    continue
+                signals_data[current_level] = (signals_data.get(current_level, "") + "\n" + cell_text).strip()
 
         return {
             "typhoon_name": typhoon_name,
+            "international_name": international_name,
             "bulletin_count": bulletin_no,
-            "category": "Typhoon" if "typhoon" in text.lower() else "Tropical Storm",
+            "category": category,
             "max_sustained_winds": max_winds,
             "gustiness": gustiness,
             "latitude": lat,
@@ -147,21 +189,67 @@ class BulletinParserService:
         }
 
     @classmethod
+    async def scrape_and_save_all(cls, db: Session, temp_dir: str = "temp_bulletins") -> list[dict]:
+        """
+        Fetches all active PAGASA bulletin PDF links, downloads/parses/saves each one,
+        and returns [{"tcb_id", "title", "bulletin_count"}, ...] for whichever were
+        processed. Returns [] if there are no active links or every download/parse
+        attempt fails — never raises, since callers (the manual /parse route, and the
+        scheduled background job) each decide separately whether an empty result is
+        worth surfacing as an error.
+        """
+        links = await cls.fetch_active_bulletin_links()
+        bulletins_created = []
+        for link in links:
+            try:
+                pdf_path = await cls.download_bulletin_pdf(link, temp_dir)
+                parsed_data = cls.parse_bulletin_text(pdf_path)
+                bulletin = cls.save_bulletin_to_db(parsed_data, db)
+
+                if os.path.exists(pdf_path):
+                    os.remove(pdf_path)
+
+                bulletins_created.append({
+                    "tcb_id": bulletin.tcb_id,
+                    "title": bulletin.title,
+                    "bulletin_count": bulletin.bulletin_count,
+                })
+            except Exception as e:
+                print(f"Error processing PDF link {link}: {e}")
+        return bulletins_created
+
+    @classmethod
     def save_bulletin_to_db(cls, parsed_data: dict, db: Session) -> TropicalCycloneBulletin:
         """
         Saves parsed bulletin data to the PostGIS database.
         """
         # 1. Get or Create Typhoon
-        year = datetime.now().year
-        typhoon = db.query(Typhoon).filter(
-            func.lower(Typhoon.name) == parsed_data["typhoon_name"].lower(),
-            Typhoon.year == year
-        ).first()
-        
+        # Grouped by name (case-insensitive) AND recency, not just calendar year:
+        # a bulletin only joins an existing Typhoon if that typhoon has a bulletin
+        # within the last 30 days — PAGASA's local-name list rotates and reuses
+        # names across separate seasons, so a bare name match across arbitrary
+        # time spans would wrongly merge unrelated storm events. Any bulletin
+        # number (1, 2, ... 10, ...) for an active typhoon still lands well inside
+        # this rolling window, since consecutive bulletins for the same event are
+        # issued every few hours, not weeks apart.
+        reference_time = parsed_data.get("issued_at") or datetime.now(timezone.utc)
+        window_start = reference_time - timedelta(days=30)
+
+        typhoon = (
+            db.query(Typhoon)
+            .join(TropicalCycloneBulletin, TropicalCycloneBulletin.typhoon_id == Typhoon.typhoon_id)
+            .filter(
+                func.lower(Typhoon.name) == parsed_data["typhoon_name"].lower(),
+                TropicalCycloneBulletin.issued_at >= window_start,
+            )
+            .order_by(TropicalCycloneBulletin.issued_at.desc())
+            .first()
+        )
+
         if not typhoon:
             typhoon = Typhoon(
                 name=parsed_data["typhoon_name"],
-                year=year,
+                year=reference_time.year,
                 is_active=True
             )
             db.add(typhoon)

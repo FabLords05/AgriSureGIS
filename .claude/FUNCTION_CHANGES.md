@@ -690,3 +690,109 @@ No backend/frontend code touched. Fabio dropped four real-world sample artifacts
 ### Status / Next Steps
 * Committed on `fabio/db/pabs-ingestion-gpx-matching`, which has never been pushed to `origin` before now — this is the branch's first push, needs `git push -u origin fabio/db/pabs-ingestion-gpx-matching` (no upstream configured yet).
 
+---
+
+## [2026-07-27] - Automated PAGASA TCB Ingestion (Background Scheduler + In-App Notification)
+
+TCB ingestion was 100% manual: a GIS specialist had to click "Parse Latest Bulletin" to trigger `POST /api/bulletins/parse`. Per Fabio's decisions (scraping + in-app pop-up only, no email; in-process APScheduler, no OS cron; wire the interval to the existing mock "TCB Polling Interval" Calibration field rather than hardcoding it), this entry automates the scrape/parse/save pipeline and makes the interval live-configurable. Schema change proposed and approved per `docs/PROPOSAL_parser_settings_table.md` — **not yet applied to any live database**, that's Fabio's `psql -f init_schema.sql` to run.
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* Added **`BulletinParserService.scrape_and_save_all(db, temp_dir="temp_bulletins")`**: extracts the fetch→download→parse→save loop previously inlined in `trigger_pagasa_scrape`. Pure refactor, no behavior change — but unlike the HTTP route, this method never raises on an empty/all-failed result, since the new scheduled job needs "nothing new found" to be a quiet, normal outcome rather than an error.
+
+### 2. File: `backend/app/api/bulletins.py`
+* `trigger_pagasa_scrape` (`POST /parse`) is now a thin wrapper: still raises `404` if no links are found (unchanged HTTP contract for the manual button), then delegates to `scrape_and_save_all`.
+* Added **`GET /settings`** / **`PUT /settings`** (→ `/api/bulletins/settings`), backed by the new `ParserSettings` model: `GET` returns the current polling interval (get-or-create a default row if missing); `PUT` validates `1-24` via a new inline `ParserSettingsUpdate(BaseModel)` (matching this file's existing convention from `assessments.py` — no `app/schemas/` module exists in this codebase), persists the new value, and reschedules the **live** APScheduler job via `request.app.state.scheduler`.
+
+### 3. File: `backend/app/models/models.py`
+* Added **`ParserSettings`**: maps the new `tbl_parser_settings` single-row config table (`polling_interval_hours`, `updated_at`).
+
+### 4. File: `backend/init_schema.sql`
+* Added `tbl_parser_settings` (+ drop, + seed row `polling_interval_hours = 3`, matching the frontend's existing default). See `docs/PROPOSAL_parser_settings_table.md` (new) for the full proposal — this is the one schema change in this entry.
+
+### 5. File: `backend/app/core/scheduler.py` (new)
+* Added **`build_scheduler(initial_interval_hours)`**: registers a `BackgroundScheduler` job (`id="pagasa_bulletin_poll"`, `max_instances=1` to guard against overlapping runs if a scrape outlasts the interval).
+* Added **`run_scheduled_scrape()`**: the APScheduler job target. Opens/closes its own `SessionLocal()` session (no FastAPI request context exists in a background job, so `Depends(get_db)` isn't usable here), drives the async `scrape_and_save_all` via `asyncio.run(...)`, and never lets an exception escape the job (logs instead) so one bad scrape can't kill the scheduler thread.
+* Added **`reschedule_bulletin_job(scheduler, new_interval_hours)`**: used by the `PUT /settings` route to reconfigure the already-running job in place.
+* Used `BackgroundScheduler` (thread-based), not `AsyncIOScheduler` — the job mixes `await httpx` calls with sync SQLAlchemy/pdfplumber work, so it's simpler to drive the async call via `asyncio.run(...)` inside a plain scheduler thread than to integrate with uvicorn's own event loop.
+* **Known limitation, not engineered around:** this repo's documented dev setup is single-worker `uvicorn --reload`, so exactly one scheduler runs at a time. A hypothetical multi-worker deployment would start one independent scheduler per worker, all polling redundantly — harmless (saves are idempotent per `(typhoon_id, bulletin_count)`) but wasteful. Out of scope.
+
+### 6. File: `backend/app/main.py`
+* Replaced `app = FastAPI(...)` with a `lifespan` async context manager: on startup, reads the persisted interval from `tbl_parser_settings` (defaults to 3 if missing), builds and starts the scheduler, stashes it on `app.state.scheduler`, and logs the interval; on shutdown, `scheduler.shutdown(wait=False)`. Everything else in `main.py` is unchanged.
+
+### 7. File: `backend/requirements.txt`
+* Added `APScheduler==3.11.0`.
+
+### 8. File: `frontend/src/lib/api.ts`
+* Added **`ParserSettings`** interface + **`getParserSettings()`** / **`updateParserSettings(hours)`**, following the existing `request<T>()` wrapper pattern.
+
+### 9. File: `frontend/src/app/App.tsx`
+* Added a `useEffect` (gated on `currentUser`) polling `getBulletins()` every 60s, tracking the highest `tcb_id` seen in a `ref`. First poll after login only records the baseline — it does not notify about bulletins that already existed. When a higher `tcb_id` appears (i.e. the background scheduler parsed something new with no button click involved), pushes a real `AppNotification` (matching `mockData.ts`'s existing interface/wording) onto the `notifications` state already wired to `Header`'s bell dropdown, and fires a `sonner` `toast.success(...)` (the `<Toaster>` was already mounted).
+* Changed the initial `notifications` state from `useState(mockNotifications)` to `useState([])`, since it's now populated by real events. `mockData.ts` itself is untouched — `mockNotifications` isn't imported anywhere else.
+* No WebSockets/SSE — plain polling of the existing list endpoint, matching this project's synchronous-HTTP-only style.
+
+### 10. File: `frontend/src/app/components/CalibrationModule.tsx`
+* `parserInterval` stays local `useState` (no `App.tsx` prop-drilling needed — nothing else in the app needs this value client-side) but is now backed by a `useEffect` that calls `getParserSettings()` on mount, and `handleSave()` now also calls `updateParserSettings(parserInterval)` alongside its existing local "Settings saved" banner. No JSX/layout changes — same input, same styling.
+
+### 11. Files: `backend/tests/test_bulletin_parser.py`, `backend/tests/test_parser_settings_api.py` (new), `backend/tests/test_scheduler.py` (new)
+* `test_bulletin_parser.py`: added `ScrapeAndSaveAllTests` (`unittest.IsolatedAsyncioTestCase`, this repo's first async test) — empty-links returns `[]` without raising; a failing link is skipped while the rest still process; happy-path dict shape.
+* `test_parser_settings_api.py`: get-or-create default row; existing-value read; update persists + calls `reschedule_bulletin_job` (mocked); Pydantic `ge=1,le=24` rejects out-of-range values via direct `ParserSettingsUpdate` construction — matches this suite's existing convention of calling route functions directly with a mocked `db`/fake `request`, never `TestClient`.
+* `test_scheduler.py`: `build_scheduler`/`reschedule_bulletin_job` register/update the job with the right interval. Deviates slightly from the original plan (which assumed `get_job()` works without `.start()`) — APScheduler keeps unstarted jobs in a pending queue not visible to `get_job()`, so these tests `.start()` then immediately `.shutdown(wait=False)` in a `finally` block. Since the interval is always in hours (minimum 1h), the job cannot actually fire within a test's lifetime — no real network/DB activity occurs. Confirmed safe more broadly: no test in this suite imports `app` from `main.py` (all call functions/services directly), so `lifespan` — and the real scheduler/network calls — never run during `pytest` collection.
+
+### Status / Next Steps
+* **Schema not yet applied** — `tbl_parser_settings` doesn't exist on any live database yet. `GET/PUT /api/bulletins/settings` and the scheduler's startup read will raise `UndefinedTable` until Fabio re-runs `init_schema.sql` (or applies the equivalent `CREATE TABLE`/`INSERT` from `docs/PROPOSAL_parser_settings_table.md`).
+* `APScheduler` needs `pip install -r requirements.txt` in Fabio's venv before the backend will start.
+* Not run against a live database or `pytest` — Fabio needs to run the test suite himself, then the manual end-to-end verification (scheduler starts with logged interval; changing/saving the Calibration interval reschedules the live job per a log line, without restarting `uvicorn`; a simulated new bulletin — e.g. via the existing `/api/bulletins/upload` fallback — shows up as a toast/bell notification within ~60s with no manual "Parse Latest Bulletin" click).
+* No email/SMTP notification (out of scope per Fabio's decision) — only the in-app toast/bell.
+
+---
+
+## [2026-07-27] - Fix: `ParserSettings` Mapper Crash + Typhoon Name/Grouping Bugs
+
+Fabio's first `pytest` run after the entry above hit 10 collection errors (`ModuleNotFoundError: No module named 'app'` — fixed by running `python -m pytest` instead of bare `pytest`, since the `pytest` console-script doesn't add cwd to `sys.path` and this repo has no `pytest.ini`/`conftest.py` to do it another way), then a second run surfaced 18 real test failures. Root cause of nearly all of them: one stray line I introduced.
+
+### 1. File: `backend/app/models/models.py`
+* **Bug fix:** Removed a stray `boundary = relationship("AdminBoundary")` line accidentally left on the new `ParserSettings` model (added in the entry above) — `ParserSettings` has no `boundary_id` column at all. SQLAlchemy configures every mapper in the registry together on first use; this one broken relationship (`NoForeignKeysError: ... between 'tbl_parser_settings' and 'tbl_admin_boundaries'`) cascaded into totally unrelated test failures across `test_assessment_service.py`, `test_bulletin_parser.py`, `test_exposure_calculator.py`, and all of `test_upload_csv_ingestion.py` (the last of these especially misleadingly — `upload_csv()`'s per-row try/except silently caught the resulting `InvalidRequestError` on every row and recorded it as a row failure instead of raising, so the symptom looked like a CSV-ingestion regression rather than a models.py typo). Verified fixed via a standalone `configure_mappers()` check before handing back to Fabio to re-run the full suite.
+
+### 2. File: `backend/app/services/bulletin_parser.py`
+Separately, while looking at the Monitoring module's "Typhoon Events" list, Fabio spotted duplicate-looking entries — "Typhoon KIYAPO" next to "Typhoon KIYAPO Issued at", etc.
+* **Bug fix — `parse_bulletin_text()`:** the typhoon-name capture group `[A-Z\s\-]+` had no upper bound and, with `re.IGNORECASE`, happily consumed through a following word (since `\s` matches the space between words, and even newlines) whenever the source PDF didn't wrap the name in quotes — e.g. `TYPHOON GARDO Issued at 5:00 PM...` parsed as name `"GARDO Issued at"` instead of `"GARDO"`. Tightened to `[A-Z][A-Z\-]*` — a single word, matching the Philippine local-name convention — so it stops at the first space.
+* **Changed `save_bulletin_to_db()`'s "Get or Create Typhoon" step**, per Fabio's decision: group bulletins under the same `Typhoon` row by name (case-insensitive) **and** recency — a bulletin only joins an existing typhoon if that typhoon has some bulletin issued within the last 30 days (`reference_time = parsed_data["issued_at"] or now`; `window_start = reference_time - 30 days`; query joins `Typhoon` to `TropicalCycloneBulletin`, filters `issued_at >= window_start`, orders by `issued_at desc`). Previously it matched by name + current calendar-year only (`Typhoon.year == datetime.now().year`), which had two problems: (a) it used *today's* year rather than the bulletin's own year, so a bulletin from a prior year processed later would misfile; (b) PAGASA's local-name list rotates and reuses names across separate seasons, so a bare name match had no time bound at all and could wrongly merge unrelated storms. Any bulletin number for an ongoing typhoon (bulletin No. 10, 20, ...) still lands well inside the 30-day rolling window since real bulletins for one event are issued every few hours, not weeks apart — per Fabio's confirmation.
+* New `Typhoon` rows now get `year=reference_time.year` (the bulletin's own issued year) instead of `datetime.now().year`.
+
+### 3. File: `backend/cleanup_typhoon_names.py` (new)
+* One-off script (not run automatically, not wired to any endpoint) to fix `Typhoon` rows already corrupted by the name-regex bug before this fix landed: derives each row's "clean" name using the same single-word rule, then either merges the corrupted row's bulletins into an existing clean-named row and deletes the corrupted row, or renames the corrupted row in place if no clean counterpart exists yet.
+
+### 4. File: `backend/tests/test_bulletin_parser.py`
+* Added `test_parse_bulletin_text_name_does_not_swallow_trailing_issued_at` — regression test for the regex fix.
+* Added `test_reuses_existing_typhoon_when_a_bulletin_is_within_30_days` and `test_creates_new_typhoon_when_no_bulletin_within_30_days` — cover both branches of the new grouping logic.
+* Updated `_build_mock_db()`'s Typhoon-query mock to match the new `.join(...).filter(...).order_by(...).first()` chain (previously just `.filter(...).first()`), with a new `existing_typhoon` parameter so tests can control the "found within window" vs. "not found" outcome.
+
+### Status / Next Steps
+* Fabio needs to re-run `python -m pytest tests/ -v` from `backend/` to confirm all failures are now resolved (not yet re-run since these fixes).
+* **`cleanup_typhoon_names.py` has not been run against the live database** — needs Fabio to run it himself (`python cleanup_typhoon_names.py` from `backend/`, in his venv) to fix the corrupted rows already visible in his screenshot. Existing `TcbSignal` rows pointing at a to-be-deleted corrupted `Typhoon` are unaffected (they key off `tcb_id`, not `typhoon_id`).
+
+---
+
+## [2026-07-27] - Bulletin Parsing Rewrite: Bulletin Number, Category, Coordinates, Real TCWS Table
+
+Fabio provided a real sample bulletin (`docs/TCB#11_kiyapo.pdf` — Tropical Storm KIYAPO, Bulletin NR. 11) and pointed at the `pagasa-parser` project (github.com/pagasa-parser) as a reference implementation. Running our existing `parse_bulletin_text()` against this real file (not a hand-typed mock) surfaced four concrete bugs beyond the name-regex fix from the entry above. Fixes below are modeled on `@pagasa-parser/source-pdf`'s regex approach (confirmed via its published source: `Tropical Cyclone Bulletin N[ro]\. (\d+)` for the bulletin number, a title-line-anchored category/name/international-name pattern, and `([0-9.]+)°([NS]),\s?([0-9.]+)°([WE])` for coordinates) and its use of real PDF table extraction (`tabula-java` in their Node.js stack) for the TCWS signal table, rather than regex-scanning flattened prose.
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* **Bug fix — bulletin number:** real bulletins abbreviate to `"BULLETIN NR. 11"`, not `"Bulletin No. 11"`. Regex widened to `N[ro]\.` (matches both). Against the real sample, this was silently defaulting to `1` for every bulletin.
+* **Bug fix — category:** replaced the old `"Typhoon" if "typhoon" in text.lower() else "Tropical Storm"` substring check — which false-positived whenever the word "typhoon" appeared anywhere else in the bulletin's forecast prose (e.g. "may be upgraded... reach typhoon category") — with extraction directly from the title line itself (e.g. `"Tropical Storm KIYAPO (NOUL)"`), via one regex anchored to line-start (`^\s*(TYPHOON|TROPICAL STORM|...)`) that also captures the name and, as a bonus, the international name in parentheses. Against the real sample this was misreporting a Tropical Storm as a "Typhoon".
+* **New field:** `parsed_data["international_name"]` (e.g. `"NOUL"` for KIYAPO) — captured for free by the same title-line regex. Not yet wired into `save_bulletin_to_db()`/the `Typhoon` model; available for future use.
+* **Bug fix — coordinates:** real phrasing is a parenthesized `"(18.8°N, 122.0°E)"` pair with a full clause between the word "at" and the actual numbers (`"...data at over the coastal waters of ... (18.8°N, 122.0°E)"`), and the old fallback regex was missing the `°` symbol entirely — so neither of the two old patterns matched, and every real bulletin silently got `latitude=0.0, longitude=0.0`. Replaced both with one pattern, `([0-9.]+)\s*°\s*([NS]),\s*([0-9.]+)\s*°\s*([EW])`, matched anywhere in the text.
+* **Rewrite — signal/area extraction:** PAGASA bulletins contain the signal-area data as an actual table (`TCWS No. | Luzon | Visayas | Mindanao`, one row per signal level, `"-"` where a column doesn't apply, confirmed against the real sample's actual `page.extract_tables()` output) — not free prose. The old approach regex-scanned the flattened text for any "Signal No. X" occurrence, which had no way to tell the real table apart from a narrative sentence merely *mentioning* a signal (e.g. "The hoisting of Wind Signal No. 3 is not ruled out should KIYAPO intensify...") — against the real sample this fabricated phantom signals `{1, 2, 3}` from unrelated narrative text. Now uses `page.extract_tables()` (already available via `pdfplumber`, already a dependency — no new library needed, unlike `pagasa-parser`'s Java/tabula-java requirement), locates the table row containing "Mindanao" in its header, and reads only that column per signal level (this project is scoped to PCIC Region X/Mindanao per `PROJECT_CONTEXT.md`, so Luzon/Visayas columns are intentionally not extracted). `signals_data` keeps its original `{level: text}` shape, so `save_bulletin_to_db()` needed no changes.
+* Note: the real sample (KIYAPO) only has Luzon areas — its Mindanao column is `"-"` for every signal level — so `signals == {}` is the **correct** result for this file, not a remaining bug.
+
+### 2. File: `backend/tests/test_bulletin_parser.py`
+* Added a `_mock_pdf(text, tables=None)` helper (every mock page now sets both `extract_text` and `extract_tables`, since the production code now reads both).
+* Added `test_parse_bulletin_text_extracts_bulletin_number_with_nr_abbreviation`, `test_parse_bulletin_text_category_is_not_fooled_by_the_word_elsewhere_in_the_text`, `test_parse_bulletin_text_extracts_coordinates_with_degree_symbol_and_no_at_prefix`, `test_parse_bulletin_text_extracts_mindanao_signals_from_table` (mocked table matching the real sample's shape, including a "Warning lead time" continuation row with a blank first cell that must stay attributed to the running signal level, and a Signal 1 row whose Mindanao cell is `"-"` and must be excluded).
+* Added `test_parse_bulletin_text_against_real_sample_pdf` — a true end-to-end regression test that opens `docs/TCB#11_kiyapo.pdf` directly (no mocks) and asserts the exact real values (name, international name, bulletin number, category, winds, coordinates, issued-at, and the correct empty `signals`).
+* Updated the existing metadata/issued-at tests to use the new `_mock_pdf` helper (previously missing `extract_tables`, which would now raise `TypeError` since the new code always iterates it).
+
+### Status / Next Steps
+* Verified directly (regex/table logic hand-run against both mocks and the real PDF) before handing back, but **not yet run through the actual `pytest` suite** — needs Fabio's `python -m pytest tests/ -v` re-run, same as the entry above.
+* `international_name` is parsed but not persisted anywhere yet — flag for later if Fabio wants it stored on `tbl_typhoons`.
+* Did not port `pagasa-parser`'s full `AreaExtractor` (directional-qualifier parsing like "eastern portion of X" into structured province/part/municipality JSON) — our `TcbSignal`/`AdminBoundary` matching only needs municipality-level substring matching today, so this was intentionally left out as bigger scope than asked; flagging in case finer-grained (barangay/partial-area) signal data is wanted later.
+

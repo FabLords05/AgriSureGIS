@@ -1,17 +1,61 @@
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from geoalchemy2.shape import to_shape
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 import os
 import shutil
 
 from app.core.database import get_db
+from app.core.scheduler import reschedule_bulletin_job
 from app.services.bulletin_parser import BulletinParserService
 from app.services.exposure_calculator import ExposureCalculatorService
-from app.models.models import TropicalCycloneBulletin, TcbSignal, Typhoon
+from app.models.models import ParserSettings, TropicalCycloneBulletin, TcbSignal, Typhoon
 
 router = APIRouter(prefix="/bulletins", tags=["bulletins"])
 
 TEMP_DIR = "temp_bulletins"
+
+
+class ParserSettingsUpdate(BaseModel):
+    polling_interval_hours: int = Field(..., ge=1, le=24)
+
+
+def _get_or_create_settings(db: Session) -> ParserSettings:
+    settings = db.query(ParserSettings).first()
+    if not settings:
+        settings = ParserSettings(polling_interval_hours=3)
+        db.add(settings)
+        db.commit()
+        db.refresh(settings)
+    return settings
+
+
+@router.get("/settings")
+def get_parser_settings(db: Session = Depends(get_db)):
+    """
+    Returns the currently persisted TCB polling interval (hours) that drives
+    the background PAGASA scraper — backs the Calibration screen's "TCB
+    Polling Interval" field.
+    """
+    settings = _get_or_create_settings(db)
+    return {"polling_interval_hours": settings.polling_interval_hours}
+
+
+@router.put("/settings")
+def update_parser_settings(payload: ParserSettingsUpdate, request: Request, db: Session = Depends(get_db)):
+    """
+    Persists a new TCB polling interval and reschedules the already-running
+    background scraper job to match, without requiring a backend restart.
+    """
+    settings = _get_or_create_settings(db)
+    settings.polling_interval_hours = payload.polling_interval_hours
+    db.commit()
+    db.refresh(settings)
+
+    reschedule_bulletin_job(request.app.state.scheduler, settings.polling_interval_hours)
+
+    return {"polling_interval_hours": settings.polling_interval_hours}
+
 
 @router.get("/")
 def list_bulletins(db: Session = Depends(get_db)):
@@ -49,30 +93,11 @@ async def trigger_pagasa_scrape(db: Session = Depends(get_db)):
         # Fallback for testing: return empty success or check if there is an active file
         raise HTTPException(status_code=404, detail="No active bulletin PDFs found on PAGASA portal.")
 
-    parsed_count = 0
-    bulletins_created = []
-    for link in links:
-        try:
-            pdf_path = await BulletinParserService.download_bulletin_pdf(link, TEMP_DIR)
-            parsed_data = BulletinParserService.parse_bulletin_text(pdf_path)
-            bulletin = BulletinParserService.save_bulletin_to_db(parsed_data, db)
-            
-            # Remove temp file
-            if os.path.exists(pdf_path):
-                os.remove(pdf_path)
-                
-            bulletins_created.append({
-                "tcb_id": bulletin.tcb_id,
-                "title": bulletin.title,
-                "bulletin_count": bulletin.bulletin_count
-            })
-            parsed_count += 1
-        except Exception as e:
-            print(f"Error processing PDF link {link}: {e}")
+    bulletins_created = await BulletinParserService.scrape_and_save_all(db, TEMP_DIR)
 
     return {
         "status": "success",
-        "parsed_count": parsed_count,
+        "parsed_count": len(bulletins_created),
         "bulletins": bulletins_created
     }
 

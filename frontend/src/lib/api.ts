@@ -93,6 +93,10 @@ export interface ParseBulletinsResult {
   bulletins: Array<{ tcb_id: number; title: string; bulletin_count: number }>;
 }
 
+export interface ParserSettings {
+  polling_interval_hours: number;
+}
+
 export interface TcbSignal {
   signal_id: number;
   signal_level: number;
@@ -128,6 +132,18 @@ export function parseBulletins(): Promise<ParseBulletinsResult> {
 
 export function getBulletinSignals(tcbId: number): Promise<TcbSignal[]> {
   return request<TcbSignal[]>(`/api/bulletins/${tcbId}/signals`);
+}
+
+export function getParserSettings(): Promise<ParserSettings> {
+  return request<ParserSettings>('/api/bulletins/settings');
+}
+
+export function updateParserSettings(hours: number): Promise<ParserSettings> {
+  return request<ParserSettings>('/api/bulletins/settings', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ polling_interval_hours: hours }),
+  });
 }
 
 export function uploadGpx(file: File, farmerId?: number, farmId?: number): Promise<UploadGpxResult> {

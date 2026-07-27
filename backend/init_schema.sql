@@ -14,6 +14,7 @@ DROP TABLE IF EXISTS tbl_farms CASCADE;
 DROP TABLE IF EXISTS tbl_admin_boundaries CASCADE;
 DROP TABLE IF EXISTS tbl_farmers_profile CASCADE;
 DROP TABLE IF EXISTS tbl_system_users CASCADE;
+DROP TABLE IF EXISTS tbl_parser_settings CASCADE;
 
 -- 3. Build the Core Lookup Tables First (Parents)
 CREATE TABLE tbl_system_users (
@@ -168,6 +169,17 @@ CREATE TABLE tbl_area_exposure_summary (
     total_exposure_hours NUMERIC(5,2) NOT NULL,
     computed_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
+
+-- 5b. Automated TCB polling settings (single-row config table backing the
+-- Calibration screen's "TCB Polling Interval" field and the in-process
+-- APScheduler job that drives automated PAGASA bulletin ingestion).
+CREATE TABLE tbl_parser_settings (
+    setting_id SERIAL PRIMARY KEY,
+    polling_interval_hours INT NOT NULL DEFAULT 3,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+INSERT INTO tbl_parser_settings (polling_interval_hours) VALUES (3);
 
 -- 6. Optimize Spatial Queries
 CREATE INDEX idx_farms_location_geom ON tbl_farms USING GIST(location_geom);

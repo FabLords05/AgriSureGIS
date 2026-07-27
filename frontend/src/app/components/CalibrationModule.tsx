@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Settings, Key, Database, Users, Shield, Save, AlertTriangle,
   ChevronDown, ChevronRight, RefreshCw, Trash2, Plus, CheckCircle2,
   Server, Bell, Clock, ToggleLeft, ToggleRight, Eye, EyeOff, DollarSign
 } from "lucide-react";
 import { DAMAGE_FACTORS, GrowthStage } from "./mockData";
+import { getParserSettings, updateParserSettings } from "@/lib/api";
 
 interface SectionProps {
   title: string;
@@ -86,7 +87,14 @@ export function CalibrationModule({ coverageRatePerHa, onCoverageRateChange }: C
   const [addingUser, setAddingUser]   = useState(false);
   const [newUser, setNewUser]         = useState({ name:"", role:"GIS Specialist", email:"", password:"" });
 
+  useEffect(() => {
+    getParserSettings()
+      .then(s => setParserInterval(s.polling_interval_hours))
+      .catch(() => {}); // keep the default of 3 if the backend isn't reachable yet
+  }, []);
+
   const handleSave = () => {
+    updateParserSettings(parserInterval).catch(() => {});
     setSavedSuccess(true);
     setTimeout(() => setSavedSuccess(false), 2500);
   };
