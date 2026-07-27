@@ -496,3 +496,28 @@ Fabio confirmed the correct PCIC formula is `I = (AC / 1000) * IF` — farm area
 * Not run against a live database — same handoff situation as every other entry in this file; Fabio needs to run the test suite himself to confirm.
 * This changes real computed payout amounts. If any assessments were ever computed against a live database using the old formula (unlikely given the repeated "never run against a live database" notes above, but worth confirming), those `RiskAssessment.final_indemnity_payment` values would need recomputing.
 
+---
+
+## [2026-07-27] - Local Environment Setup: DATABASE_URL Wiring + Windows Fixes
+
+**Branch:** `fabio/backend/env-based-db-config` (committed locally, not pushed, no PR open yet).
+
+Set up PostgreSQL, the Python venv, and npm from scratch on Fabio's machine (first real local run this project has had — every prior changelog entry notes "never run against a live database"). This surfaced and fixed real, previously-latent bugs that only appear when actually running the app, not just reading the code.
+
+### 1. File: `backend/app/core/database.py`
+* `SQLALCHEMY_DATABASE_URL` was hardcoded directly in source (`postgresql://agrisure_admin:agrisure_password@localhost:5432/agrisure_db`), never actually reading `DATABASE_URL` from `.env` despite `.claude/ENV_GUIDE.md` documenting exactly that pattern. Now reads `os.getenv("DATABASE_URL", <same value as before>)` via `python-dotenv`'s `load_dotenv()` — existing setups keep working unchanged (same fallback default), but a local `backend/.env` can now actually override it, matching the documented behavior for the first time.
+
+### 2. File: `backend/seed_database.py`
+* Had its own, separate hardcoded `DB_CONFIG` dict (port 5432), completely independent of `database.py`'s connection setup — discovered when seeding failed against a differently-configured local instance even after `database.py` was fixed. Replaced with the same `DATABASE_URL` env-var pattern (psycopg2 natively accepts a full DSN string, so no dict-parsing needed), keeping the two files' DB config in sync.
+
+### 3. File: `backend/.env.example` (new)
+* Documents `DATABASE_URL` per `ENV_GUIDE.md`'s existing convention — previously referenced by that guide but never actually created. Safe to commit (unlike `backend/.env`, which stays gitignored).
+
+### 4. File: `backend/requirements.txt`
+* `uvloop==0.22.1` was pinned unconditionally — `uvloop` does not support Windows at all (confirmed via the actual pip build error: `RuntimeError: uvloop does not support Windows at the moment`), so `pip install -r requirements.txt` couldn't complete on any Windows machine. Changed to `uvloop==0.22.1; sys_platform != "win32"` — still installed (and still speeds up `uvicorn`) on Linux/Mac, silently skipped on Windows where `uvicorn` just falls back to its default asyncio event loop.
+
+### Status / Next Steps
+* Local setup used a self-owned PostgreSQL data directory (`C:\Users\User\pgdata`, port 5433) rather than the Windows-service-managed default instance (port 5432) — the Windows service's `postgres` superuser password was unknown/unrecoverable, and this machine's UAC elevation is non-functional in a way that blocked every service-control/config-reload workaround (confirmed via `whoami /groups` showing "Group used for deny only" on the Administrators SID even inside windows labeled "Administrator"). This is environment-specific to this machine, not a code issue — another teammate's default Windows-service Postgres install on port 5432 should work fine with the same `DATABASE_URL` fallback default.
+* The old, stuck Windows service (`postgresql-x64-17`, port 5432, unknown password) is still installed and running on this machine, unused. Not cleaned up — out of scope, and Fabio may want to deal with it separately (e.g. once genuine admin access is sorted out).
+* Full local smoke test passed: `pytest` suite green, `npm run build` clean, backend (`uvicorn app.main:app --reload`) and frontend (`npm run dev`) both start and serve real seeded data end-to-end in the browser.
+

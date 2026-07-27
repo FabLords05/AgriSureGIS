@@ -1,9 +1,17 @@
+import os
+
+from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-# The connection string to your local Nyarch PostgreSQL server
+load_dotenv()
+
 # Format: postgresql://user:password@host:port/dbname
-SQLALCHEMY_DATABASE_URL = "postgresql://agrisure_admin:agrisure_password@localhost:5432/agrisure_db"
+# Falls back to the shared team default so existing setups keep working
+# unchanged; override locally via backend/.env (gitignored, per ENV_GUIDE.md).
+SQLALCHEMY_DATABASE_URL = os.getenv(
+    "DATABASE_URL", "postgresql://agrisure_admin:agrisure_password@localhost:5432/agrisure_db"
+)
 
 # The Engine is the actual connection to the database
 engine = create_engine(SQLALCHEMY_DATABASE_URL)

@@ -1,18 +1,21 @@
+import os
+
 import pandas as pd
 import psycopg2
+from dotenv import load_dotenv
 
-# 1. Database Connection (Update with your credentials if different)
-DB_CONFIG = {
-    "dbname": "agrisure_db",
-    "user": "agrisure_admin",
-    "password": "agrisure_password",
-    "host": "localhost",
-    "port": "5432"
-}
+load_dotenv()
+
+# Falls back to the shared team default so existing setups keep working
+# unchanged; override locally via backend/.env (gitignored, per ENV_GUIDE.md).
+# Kept in sync with app/core/database.py's DATABASE_URL handling.
+DATABASE_URL = os.getenv(
+    "DATABASE_URL", "postgresql://agrisure_admin:agrisure_password@localhost:5432/agrisure_db"
+)
 
 def run_setup():
     print("Connecting to database...")
-    conn = psycopg2.connect(**DB_CONFIG)
+    conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
 
     print("Loading CSV Data...")
