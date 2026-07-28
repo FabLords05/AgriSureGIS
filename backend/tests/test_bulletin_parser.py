@@ -400,6 +400,7 @@ class ScrapeAndSaveAllTests(unittest.IsolatedAsyncioTestCase):
              patch.object(BulletinParserService, "parse_bulletin_text") as mock_parse, \
              patch.object(BulletinParserService, "save_bulletin_to_db") as mock_save, \
              patch("app.services.bulletin_parser.ExposureCalculatorService.compute_for_typhoon") as mock_compute, \
+             patch("app.services.bulletin_parser.AssessmentService.calculate_for_bulletin") as mock_calculate, \
              patch("os.path.exists", return_value=False):
             mock_fetch.return_value = ["https://pagasa.example/tcb21f.pdf"]
             mock_download.return_value = "temp_bulletins/tcb21f.pdf"
@@ -410,6 +411,7 @@ class ScrapeAndSaveAllTests(unittest.IsolatedAsyncioTestCase):
             result = await BulletinParserService.scrape_and_save_all(mock_db)
 
         mock_compute.assert_called_once_with(9, mock_db)
+        mock_calculate.assert_called_once_with(9, 200, mock_db)
         self.assertTrue(result[0]["is_final"])
 
     async def test_non_final_bulletin_does_not_trigger_exposure_summary(self):
@@ -418,6 +420,7 @@ class ScrapeAndSaveAllTests(unittest.IsolatedAsyncioTestCase):
              patch.object(BulletinParserService, "parse_bulletin_text") as mock_parse, \
              patch.object(BulletinParserService, "save_bulletin_to_db") as mock_save, \
              patch("app.services.bulletin_parser.ExposureCalculatorService.compute_for_typhoon") as mock_compute, \
+             patch("app.services.bulletin_parser.AssessmentService.calculate_for_bulletin") as mock_calculate, \
              patch("os.path.exists", return_value=False):
             mock_fetch.return_value = ["https://pagasa.example/tcb11.pdf"]
             mock_download.return_value = "temp_bulletins/tcb11.pdf"
@@ -427,19 +430,22 @@ class ScrapeAndSaveAllTests(unittest.IsolatedAsyncioTestCase):
             await BulletinParserService.scrape_and_save_all(MagicMock())
 
         mock_compute.assert_not_called()
+        mock_calculate.assert_not_called()
 
     async def test_propagates_pagasa_scrape_error_and_skips_reconciliation(self):
         # A real fetch failure must not be treated as "confirmed nothing active" —
         # it should propagate (the scheduler job's own try/except handles it) and
         # never reach the reconciliation step.
         with patch.object(BulletinParserService, "fetch_active_bulletin_links", new_callable=AsyncMock) as mock_fetch, \
-             patch("app.services.bulletin_parser.ExposureCalculatorService.compute_for_typhoon") as mock_compute:
+             patch("app.services.bulletin_parser.ExposureCalculatorService.compute_for_typhoon") as mock_compute, \
+             patch("app.services.bulletin_parser.AssessmentService.calculate_for_bulletin") as mock_calculate:
             mock_fetch.side_effect = PagasaScrapeError("network down")
 
             with self.assertRaises(PagasaScrapeError):
                 await BulletinParserService.scrape_and_save_all(MagicMock())
 
         mock_compute.assert_not_called()
+        mock_calculate.assert_not_called()
 
 
 def _fake_httpx_client(response=None, get_side_effect=None):
@@ -484,16 +490,19 @@ class ReconcileActiveTyphoonsTests(unittest.TestCase):
     "TCB#<n>[F]_<name>.pdf"), closing any typhoon no longer represented there.
     """
 
-    def _build_mock_db(self, active_typhoons):
+    def _build_mock_db(self, active_typhoons, latest_bulletin_tcb_id=999):
         mock_db = MagicMock()
         mock_db.query.return_value.filter.return_value.all.return_value = active_typhoons
+        latest_bulletin = MagicMock(tcb_id=latest_bulletin_tcb_id)
+        mock_db.query.return_value.filter.return_value.order_by.return_value.first.return_value = latest_bulletin
         return mock_db
 
+    @patch("app.services.bulletin_parser.AssessmentService.calculate_for_bulletin")
     @patch("app.services.bulletin_parser.ExposureCalculatorService.compute_for_typhoon")
-    def test_closes_typhoon_no_longer_in_active_links(self, mock_compute):
+    def test_closes_typhoon_no_longer_in_active_links(self, mock_compute, mock_calculate):
         stale = Typhoon(name="GARDO", year=2026, is_active=True)
         stale.typhoon_id = 5
-        mock_db = self._build_mock_db([stale])
+        mock_db = self._build_mock_db([stale], latest_bulletin_tcb_id=55)
 
         closed = BulletinParserService._reconcile_active_typhoons(
             ["https://pagasa.example/TCB#3_francisco.pdf"], mock_db
@@ -502,9 +511,11 @@ class ReconcileActiveTyphoonsTests(unittest.TestCase):
         self.assertEqual(closed, [stale])
         self.assertFalse(stale.is_active)
         mock_compute.assert_called_once_with(5, mock_db)
+        mock_calculate.assert_called_once_with(5, 55, mock_db)
 
+    @patch("app.services.bulletin_parser.AssessmentService.calculate_for_bulletin")
     @patch("app.services.bulletin_parser.ExposureCalculatorService.compute_for_typhoon")
-    def test_keeps_typhoon_still_in_active_links(self, mock_compute):
+    def test_keeps_typhoon_still_in_active_links(self, mock_compute, mock_calculate):
         active = Typhoon(name="FRANCISCO", year=2026, is_active=True)
         active.typhoon_id = 6
         mock_db = self._build_mock_db([active])
@@ -516,9 +527,11 @@ class ReconcileActiveTyphoonsTests(unittest.TestCase):
         self.assertEqual(closed, [])
         self.assertTrue(active.is_active)
         mock_compute.assert_not_called()
+        mock_calculate.assert_not_called()
 
+    @patch("app.services.bulletin_parser.AssessmentService.calculate_for_bulletin")
     @patch("app.services.bulletin_parser.ExposureCalculatorService.compute_for_typhoon")
-    def test_matches_name_despite_final_suffix_in_filename(self, mock_compute):
+    def test_matches_name_despite_final_suffix_in_filename(self, mock_compute, mock_calculate):
         # "TCB#21F_francisco.pdf" — the numeric part carries the same trailing
         # "F" final-bulletin marker used inside the PDF text.
         active = Typhoon(name="FRANCISCO", year=2026, is_active=True)
@@ -531,19 +544,43 @@ class ReconcileActiveTyphoonsTests(unittest.TestCase):
 
         self.assertEqual(closed, [])
         mock_compute.assert_not_called()
+        mock_calculate.assert_not_called()
 
+    @patch("app.services.bulletin_parser.AssessmentService.calculate_for_bulletin")
     @patch("app.services.bulletin_parser.ExposureCalculatorService.compute_for_typhoon")
-    def test_closes_everything_when_active_links_is_empty(self, mock_compute):
+    def test_closes_everything_when_active_links_is_empty(self, mock_compute, mock_calculate):
         # A successful check that found zero active bulletins is a real signal —
         # every currently is_active=True typhoon should close.
         stale = Typhoon(name="GARDO", year=2026, is_active=True)
         stale.typhoon_id = 8
-        mock_db = self._build_mock_db([stale])
+        mock_db = self._build_mock_db([stale], latest_bulletin_tcb_id=88)
 
         closed = BulletinParserService._reconcile_active_typhoons([], mock_db)
 
         self.assertEqual(closed, [stale])
         self.assertFalse(stale.is_active)
+        mock_calculate.assert_called_once_with(8, 88, mock_db)
+
+    @patch("app.services.bulletin_parser.AssessmentService.calculate_for_bulletin")
+    @patch("app.services.bulletin_parser.ExposureCalculatorService.compute_for_typhoon")
+    def test_one_typhoon_failing_to_close_does_not_block_others(self, mock_compute, mock_calculate):
+        # If computing the exposure summary or payout blows up for one typhoon
+        # (e.g. it has no bulletins at all), the rest of the reconciliation loop
+        # should still close the others rather than aborting entirely.
+        failing = Typhoon(name="GARDO", year=2026, is_active=True)
+        failing.typhoon_id = 10
+        healthy = Typhoon(name="HAMBALOS", year=2026, is_active=True)
+        healthy.typhoon_id = 11
+        mock_db = self._build_mock_db([failing, healthy], latest_bulletin_tcb_id=111)
+        mock_compute.side_effect = [Exception("no bulletins for this typhoon"), MagicMock()]
+
+        closed = BulletinParserService._reconcile_active_typhoons([], mock_db)
+
+        self.assertEqual(closed, [failing, healthy])
+        self.assertFalse(failing.is_active)
+        self.assertFalse(healthy.is_active)
+        # calculate_for_bulletin is only reached for the typhoon whose compute_for_typhoon succeeded.
+        mock_calculate.assert_called_once_with(11, 111, mock_db)
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@ from geoalchemy2.elements import WKTElement
 from datetime import datetime, timedelta, timezone
 
 from app.models.models import Typhoon, TropicalCycloneBulletin, TcbSignal, AdminBoundary
+from app.services.assessment_service import AssessmentService
 from app.services.exposure_calculator import ExposureCalculatorService
 
 # Base URL for PAGASA tropical cyclone bulletins (mock or real index page)
@@ -239,12 +240,15 @@ class BulletinParserService:
                     os.remove(pdf_path)
 
                 # A final bulletin ("NR. 21F") means no more TCBs will follow for
-                # this typhoon — auto-run the exposure summary now instead of
-                # waiting on a manual POST /api/bulletins/{tcb_id}/compute-exposure
-                # click. Per Fabio's decision, this stops at the exposure summary;
-                # the assessment/payout calculation stays a separate manual step.
+                # this typhoon — auto-run the exposure summary and the assessment/
+                # payout calculation now, instead of waiting on the manual
+                # POST /api/bulletins/{tcb_id}/compute-exposure and
+                # POST /api/assessments/calculate clicks. Matches the manuscript's
+                # database dictionary (p.41: closing a typhoon "triggers the final
+                # payout computation").
                 if parsed_data.get("is_final"):
                     ExposureCalculatorService.compute_for_typhoon(bulletin.typhoon_id, db)
+                    AssessmentService.calculate_for_bulletin(bulletin.typhoon_id, bulletin.tcb_id, db)
 
                 bulletins_created.append({
                     "tcb_id": bulletin.tcb_id,
@@ -264,12 +268,17 @@ class BulletinParserService:
         Cross-checks every Typhoon still marked is_active=True against PAGASA's
         current active-bulletin listing (storm name parsed from each link's
         filename — see ACTIVE_LINK_NAME_RE). Closes (is_active=False + auto-runs
-        the exposure summary) any typhoon no longer represented there, even if we
-        never saw an explicit final ("F") bulletin for it — PAGASA doesn't
-        guarantee one is always published before a storm drops off the active
-        list. Only ever called with a successfully-fetched `active_links` (see
-        `PagasaScrapeError` above) — an empty-but-successful list correctly
-        means "close everything still marked active."
+        the exposure summary and assessment/payout calculation) any typhoon no
+        longer represented there, even if we never saw an explicit final ("F")
+        bulletin for it — PAGASA doesn't guarantee one is always published before
+        a storm drops off the active list. Only ever called with a
+        successfully-fetched `active_links` (see `PagasaScrapeError` above) — an
+        empty-but-successful list correctly means "close everything still marked
+        active."
+
+        Each typhoon's closing actions are individually try/excepted so one
+        typhoon failing to close (e.g. it has no bulletins at all, an edge case)
+        doesn't stop the rest of the reconciliation loop from closing others.
         """
         currently_active_names = set()
         for link in active_links:
@@ -282,7 +291,18 @@ class BulletinParserService:
             if typhoon.name.upper() not in currently_active_names:
                 typhoon.is_active = False
                 db.commit()
-                ExposureCalculatorService.compute_for_typhoon(typhoon.typhoon_id, db)
+                try:
+                    ExposureCalculatorService.compute_for_typhoon(typhoon.typhoon_id, db)
+                    latest_bulletin = (
+                        db.query(TropicalCycloneBulletin)
+                        .filter(TropicalCycloneBulletin.typhoon_id == typhoon.typhoon_id)
+                        .order_by(TropicalCycloneBulletin.issued_at.desc())
+                        .first()
+                    )
+                    if latest_bulletin is not None:
+                        AssessmentService.calculate_for_bulletin(typhoon.typhoon_id, latest_bulletin.tcb_id, db)
+                except Exception as e:
+                    print(f"Error closing out typhoon {typhoon.name!r} ({typhoon.typhoon_id}): {e}")
                 closed.append(typhoon)
         return closed
 

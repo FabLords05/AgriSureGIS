@@ -1019,3 +1019,34 @@ instead.
   day, but no Windows hardware available to test the walkthrough end-to-end.
 * Not pushed yet.
 
+---
+
+## [2026-07-28] - Typhoon-Close Summary Endpoint + Auto-Triggered Payout Computation
+
+**Branch:** `fabio/db/typhoon-summary-report`, stacked on `fabio/db/pabs-ingestion-gpx-matching` (committed locally, not pushed, no PR open yet).
+
+The `88ffc30` final-bulletin-detection entry above already auto-runs the exposure summary when a typhoon closes, but explicitly stopped short of the payout calculation ("per Fabio's explicit scope decision, not an oversight") and never produced a single consolidated report — only a queryable set of per-municipality rows. Re-checked against the manuscript's database dictionary (p.41): `tbl_typhoons.is_active` flipping to `FALSE` is documented as triggering "the final payout computation." Per updated direction this session, both gaps are closed here — this **revisits**, not corrects, the prior decision, which was reasonable at the time.
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* Added `from app.services.assessment_service import AssessmentService` (no circular import — `assessment_service.py`'s own imports never reach back to `bulletin_parser.py`).
+* `scrape_and_save_all()`: after an explicit final ("...F") bulletin's `ExposureCalculatorService.compute_for_typhoon()` call, also calls `AssessmentService.calculate_for_bulletin(bulletin.typhoon_id, bulletin.tcb_id, db)` — already inside the method's existing per-link `try/except`, so no new error handling needed here.
+* `_reconcile_active_typhoons()`: same auto-trigger, but this path closes a typhoon without a specific "final" bulletin in hand (absence-from-PAGASA's-listing detection) — fetches that typhoon's most recent bulletin (`order_by(issued_at.desc()).first()`) to supply the `bulletin_id` `calculate_for_bulletin()` needs (only to read its `issued_at.date()` as the eligibility cutoff). This loop previously had **no** try/except around a typhoon's closing actions — added one around both calls so one typhoon failing to close (e.g. no bulletins at all, an edge case) doesn't stop the rest of the reconciliation loop from closing others.
+* Both methods' docstrings updated — the previous "this stops at the exposure summary" language is no longer accurate.
+
+### 2. File: `backend/app/api/typhoons.py` (new)
+* Added **`GET /api/typhoons/{typhoon_id}/summary`**: read-only consolidated report over already-computed data (no side effects, doesn't recompute anything) — works for any typhoon regardless of `is_active` state, including one with nothing computed yet. Returns: `typhoon_id`, `typhoon_name`, `year`, `is_active`, `total_bulletins_issued`, `first_issued_at`/`last_issued_at` (bulletin lifecycle span), `total_municipalities_affected`, `peak_signal_level` (max across all affected boundaries), `total_eligible_boundaries` (count where `is_eligible_6hr`), `areas_affected` (per-boundary rows, same shape as the existing `POST /bulletins/{tcb_id}/compute-exposure` response's `summaries` for consumer consistency), `assessments_computed`, and `total_indemnity_payout` (summed `final_indemnity_payment` across this typhoon's `tbl_risk_assessment` rows, joined via `tbl_area_exposure_summary.typhoon_id`). Named the aggregate field `total_bulletins_issued` rather than reusing `bulletin_count`, which already means "this specific bulletin's sequence number" elsewhere in the API.
+
+### 3. File: `backend/app/main.py`
+* Registered `typhoons_router` under the `/api` prefix.
+
+### 4. File: `backend/tests/test_bulletin_parser.py`
+* Extended the existing final-bulletin and `_reconcile_active_typhoons` tests to also patch `AssessmentService.calculate_for_bulletin` and assert it's called with the right `(typhoon_id, bulletin_id, db)` (or not called at all, for the non-final/still-active/scrape-error cases). Added `_build_mock_db`'s new `latest_bulletin_tcb_id` param for the reconciliation tests' bulletin-lookup query. Added `test_one_typhoon_failing_to_close_does_not_block_others`, confirming the new try/except lets a later typhoon in the loop still close after an earlier one's `compute_for_typhoon` raises.
+
+### 5. File: `backend/tests/test_typhoons_api.py` (new)
+* `GetTyphoonSummaryTests`: 404 for an unknown `typhoon_id`; empty-data case (typhoon exists, nothing computed yet — confirms no crash on `max()`/`sum()` over empty lists); full aggregation case with two areas (one eligible, one not) and two assessments, asserting every aggregate field lands correctly.
+
+### Status / Next Steps
+* **Real behavior change, not just additive:** from this point on, closing a typhoon (either via an explicit final bulletin or via reconciliation) computes and persists real indemnity payout amounts automatically, with no manual `POST /api/assessments/calculate` click in between. Flagging explicitly for Fabio's attention before this merges — this is money being computed without a human review step, which is exactly what the prior scope decision was deliberately avoiding.
+* Not run against a live database — same handoff situation as every other entry in this file; Fabio needs to run the test suite and manually exercise the new summary endpoint via Swagger UI against a typhoon that's already had exposure/assessment data computed, to sanity-check the aggregation numbers by hand.
+* Not pushed yet.
+
