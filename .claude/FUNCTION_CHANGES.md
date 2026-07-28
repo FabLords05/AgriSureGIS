@@ -796,3 +796,49 @@ Fabio provided a real sample bulletin (`docs/TCB#11_kiyapo.pdf` — Tropical Sto
 * `international_name` is parsed but not persisted anywhere yet — flag for later if Fabio wants it stored on `tbl_typhoons`.
 * Did not port `pagasa-parser`'s full `AreaExtractor` (directional-qualifier parsing like "eastern portion of X" into structured province/part/municipality JSON) — our `TcbSignal`/`AdminBoundary` matching only needs municipality-level substring matching today, so this was intentionally left out as bigger scope than asked; flagging in case finer-grained (barangay/partial-area) signal data is wanted later.
 
+---
+
+## [2026-07-27] - Final-Bulletin Detection: Auto-Close Typhoon + Auto-Run Exposure Summary
+
+Fabio confirmed PAGASA's real signal for "no more bulletins will follow" is a trailing `F` on the bulletin number itself (e.g. `"NR. 21F"` for Francisco's last bulletin) — not any particular closing-sentence wording (which we have no real sample of). Per Fabio's decision, a detected final bulletin now auto-closes the typhoon and auto-runs the exposure summary; it deliberately stops short of the assessment/payout calculation, which stays a separate manual step.
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* **`parse_bulletin_text()`:** bulletin-number regex widened to `N[ro]\.\s+(\d+)([A-Za-z]?)`, capturing an optional trailing letter. New `parsed_data["is_final"]` = `True` when that letter is `"F"`/`"f"`. Verified against both the real KIYAPO sample (`bulletin_count=11, is_final=False` — it explicitly says "next bulletin at 5:00 PM today") and a synthetic Francisco `"NR. 21F"` case (`bulletin_count=21, is_final=True`).
+* **`save_bulletin_to_db()`:** when `is_final` is set and the resolved `Typhoon.is_active` is still `True`, flips it to `False` and commits — the first code path that ever sets this existing-but-previously-unused column.
+* **`scrape_and_save_all()`:** added `from app.services.exposure_calculator import ExposureCalculatorService`; after a final bulletin is saved, calls `ExposureCalculatorService.compute_for_typhoon(bulletin.typhoon_id, db)` inline (inside the existing per-link try/except, so a failure here doesn't crash the rest of the scrape loop). Since both the manual `POST /api/bulletins/parse` route and the new scheduled job funnel through this one shared method, this trigger applies to both without duplicating logic. `bulletins_created` dict entries now also include `"is_final"`.
+
+### 2. File: `backend/tests/test_bulletin_parser.py`
+* Added `test_parse_bulletin_text_detects_final_bulletin_marker` (the `"NR. 21F"` case) and an `is_final` assertion on the existing NR./real-sample tests.
+* Added `test_save_bulletin_to_db_marks_typhoon_inactive_when_final` — uses a real `Typhoon(...)` instance (not a `MagicMock`) as `existing_typhoon` so `.is_active`'s actual before/after state can be asserted directly.
+* Added `test_final_bulletin_triggers_exposure_summary` and `test_non_final_bulletin_does_not_trigger_exposure_summary` to `ScrapeAndSaveAllTests`, patching `app.services.bulletin_parser.ExposureCalculatorService.compute_for_typhoon` to assert it's called with the right `typhoon_id` only in the final case.
+* Updated `test_returns_created_bulletin_dicts_on_happy_path`'s exact-dict assertion to include the new `"is_final"` key.
+
+### Status / Next Steps
+* Verified directly (hand-run against both the auto-trigger and typhoon-inactive scenarios) before handing back; not yet run through `pytest` — needs Fabio's re-run, same as the two entries above.
+* The assessment/payout calculation (`AssessmentService.calculate_for_bulletin()`) intentionally still requires a manual `POST /api/assessments/calculate` call even after a final bulletin — per Fabio's explicit scope decision, not an oversight.
+* Only real-world confirmation of the `F`-suffix convention is Fabio's own domain knowledge (Francisco's `"NR. 21F"`) — no real *final* bulletin PDF was available to verify end-to-end the way `docs/TCB#11_kiyapo.pdf` verified the other parsing fixes. Worth dropping a real final-bulletin sample into `docs/` later if one becomes available.
+
+---
+
+## [2026-07-27] - Active-Typhoon Reconciliation Against PAGASA's Current Listing
+
+Fabio asked for a way to cross-check whether the typhoons we have on file are still actually "active" per PAGASA, since the "F" final-bulletin marker (previous entry) is only a signal PAGASA sometimes sends — it doesn't cover a storm that simply stops getting new bulletins without one. Per Fabio's decisions: this runs automatically as part of the existing scheduler/scrape cycle (not a separate on-demand endpoint), and closing a stale typhoon does the same thing the final-bulletin path does (mark inactive + auto-run the exposure summary).
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* **New `PagasaScrapeError` exception** + **behavior change in `fetch_active_bulletin_links()`**: previously swallowed *any* failure (bad HTTP status or a network exception) into a bare `return []`, identical to a successful check that genuinely found nothing active. Now raises `PagasaScrapeError` for real failures; `[]` is returned only for a confirmed-successful check with zero links. This distinction matters because the new reconciliation step (below) treats an empty result as "PAGASA confirms nothing is active — close everything still marked active," which would have been actively dangerous to trigger off of a transient network hiccup instead of a real empty check.
+* **New `ACTIVE_LINK_NAME_RE`** (module-level): `TCB#\d+[A-Za-z]?_([A-Za-z]+)\.pdf` — parses the storm name out of a real PAGASA bulletin filename (e.g. `"TCB#11_kiyapo.pdf"` → `KIYAPO`). Tolerates an optional trailing letter on the bulletin number (`"TCB#21F_francisco.pdf"`) since Fabio confirmed the same "F" final-bulletin marker can appear in the filename's own number, not just inside the PDF text.
+* **New `_reconcile_active_typhoons(active_links, db)`**: for every `Typhoon` row still marked `is_active=True`, checks whether its name appears among the storm names parsed from `active_links`; if not, closes it (`is_active=False` + `ExposureCalculatorService.compute_for_typhoon(...)`) — same action as an explicit final bulletin, just triggered by absence from PAGASA's list instead. An empty-but-successful `active_links` list correctly means "close everything."
+* **`scrape_and_save_all()`**: calls `_reconcile_active_typhoons(links, db)` once, after the per-link download/parse/save loop, using the same `links` already fetched at the top of the method. Since the initial `links = await cls.fetch_active_bulletin_links()` call is *not* wrapped in the per-link try/except, a `PagasaScrapeError` here propagates straight out of `scrape_and_save_all()` — skipping the loop and reconciliation entirely — and is caught by the scheduler job's own top-level try/except (`backend/app/core/scheduler.py`'s `run_scheduled_scrape()`), so a failed PAGASA check just gets logged and retried next cycle rather than closing anything.
+
+### 2. File: `backend/app/api/bulletins.py`
+* `trigger_pagasa_scrape()` now catches `PagasaScrapeError` from its own initial `fetch_active_bulletin_links()` check and returns the same existing `404 "No active bulletin PDFs found on PAGASA portal."` response as a genuinely empty result — no visible behavior change for the manual-trigger button, just an internal distinction that only matters for reconciliation.
+
+### 3. File: `backend/tests/test_bulletin_parser.py`
+* New `FetchActiveBulletinLinksTests` (mocking `httpx.AsyncClient`): non-200 response and a network exception both raise `PagasaScrapeError`; a successful zero-link response still returns `[]`.
+* New `ReconcileActiveTyphoonsTests`: closes a stale typhoon absent from the active-links list; leaves one present in the list untouched; correctly matches a name despite the filename's own `"21F"`-style final suffix; closes everything when `active_links` is empty.
+* New `test_propagates_pagasa_scrape_error_and_skips_reconciliation` on `ScrapeAndSaveAllTests` — confirms a fetch failure isn't swallowed and never reaches the exposure-summary call.
+
+### Status / Next Steps
+* Verified directly (hand-run against all of the above scenarios, including confirming existing `scrape_and_save_all` tests still pass unmodified — a bare `MagicMock()`'s `.all()` iterates as empty by default, so the new reconciliation step doesn't interfere with tests that don't care about it) before handing back; not yet run through `pytest` — needs Fabio's re-run.
+* Name-matching is filename-based only (same assumption `GpxFarmerMatcherService` already relies on for GPX filenames) — a PAGASA filename that doesn't follow the `TCB#<n>[F]_<name>.pdf` convention would fail to match and could cause a false closure. No real-world counterexample has been seen; flagging as a known limitation, not engineered around further.
+

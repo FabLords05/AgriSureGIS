@@ -7,7 +7,7 @@ import shutil
 
 from app.core.database import get_db
 from app.core.scheduler import reschedule_bulletin_job
-from app.services.bulletin_parser import BulletinParserService
+from app.services.bulletin_parser import BulletinParserService, PagasaScrapeError
 from app.services.exposure_calculator import ExposureCalculatorService
 from app.models.models import ParserSettings, TropicalCycloneBulletin, TcbSignal, Typhoon
 
@@ -88,7 +88,12 @@ async def trigger_pagasa_scrape(db: Session = Depends(get_db)):
     """
     Triggers web scraping of the PAGASA portal to download and parse any active bulletins.
     """
-    links = await BulletinParserService.fetch_active_bulletin_links()
+    try:
+        links = await BulletinParserService.fetch_active_bulletin_links()
+    except PagasaScrapeError:
+        # Same response as "confirmed nothing active" — a real fetch failure vs. a
+        # genuinely empty list is only distinguished internally, for reconciliation.
+        raise HTTPException(status_code=404, detail="No active bulletin PDFs found on PAGASA portal.")
     if not links:
         # Fallback for testing: return empty success or check if there is an active file
         raise HTTPException(status_code=404, detail="No active bulletin PDFs found on PAGASA portal.")

@@ -9,36 +9,57 @@ from geoalchemy2.elements import WKTElement
 from datetime import datetime, timedelta, timezone
 
 from app.models.models import Typhoon, TropicalCycloneBulletin, TcbSignal, AdminBoundary
+from app.services.exposure_calculator import ExposureCalculatorService
 
 # Base URL for PAGASA tropical cyclone bulletins (mock or real index page)
 PAGASA_INDEX_URL = "https://pubfiles.pagasa.dost.gov.ph/tamss/weather/bulletin/"
+
+# Real PAGASA bulletin filenames follow this pattern (e.g. "TCB#11_kiyapo.pdf",
+# or "TCB#21F_francisco.pdf" for a typhoon's final bulletin — the same trailing
+# "F" convention used in the bulletin number inside the PDF text itself).
+ACTIVE_LINK_NAME_RE = re.compile(r"TCB#\d+[A-Za-z]?_([A-Za-z]+)\.pdf", re.IGNORECASE)
+
+
+class PagasaScrapeError(Exception):
+    """
+    Raised when the PAGASA bulletin index couldn't actually be checked (network
+    failure, non-200 response) — distinct from a successful check that found
+    zero active bulletins, which returns an empty list instead. This
+    distinction matters for reconciliation (see `_reconcile_active_typhoons`):
+    treating a failed check the same as "confirmed nothing active" would wrongly
+    auto-close every genuinely ongoing typhoon on a transient network hiccup.
+    """
+
 
 class BulletinParserService:
     @staticmethod
     async def fetch_active_bulletin_links() -> list:
         """
-        Scrapes the PAGASA bulletin portal to find PDF links to active tropical cyclone bulletins.
+        Scrapes the PAGASA bulletin portal to find PDF links to active tropical
+        cyclone bulletins. Raises `PagasaScrapeError` if the portal couldn't be
+        reached/read at all; returns `[]` only for a successful check that found
+        no active bulletins.
         """
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(PAGASA_INDEX_URL)
-                if response.status_code != 200:
-                    return []
-                
-                soup = BeautifulSoup(response.text, "html.parser")
-                pdf_links = []
-                for link in soup.find_all("a", href=True):
-                    href = link["href"]
-                    if href.endswith(".pdf"):
-                        # Resolve relative links to absolute URLs if necessary
-                        if not href.startswith("http"):
-                            base_url = PAGASA_INDEX_URL.rsplit("/", 1)[0]
-                            href = f"{base_url}/{href}"
-                        pdf_links.append(href)
-                return pdf_links
         except Exception as e:
-            print(f"Error scraping PAGASA links: {e}")
-            return []
+            raise PagasaScrapeError(f"Error scraping PAGASA links: {e}") from e
+
+        if response.status_code != 200:
+            raise PagasaScrapeError(f"PAGASA index returned HTTP {response.status_code}")
+
+        soup = BeautifulSoup(response.text, "html.parser")
+        pdf_links = []
+        for link in soup.find_all("a", href=True):
+            href = link["href"]
+            if href.endswith(".pdf"):
+                # Resolve relative links to absolute URLs if necessary
+                if not href.startswith("http"):
+                    base_url = PAGASA_INDEX_URL.rsplit("/", 1)[0]
+                    href = f"{base_url}/{href}"
+                pdf_links.append(href)
+        return pdf_links
 
     @staticmethod
     async def download_bulletin_pdf(pdf_url: str, output_dir: str = "temp_bulletins") -> str:
@@ -75,10 +96,14 @@ class BulletinParserService:
                 text += page.extract_text() or ""
                 tables.extend(page.extract_tables())
 
-        # 1. Parse Bulletin Number
+        # 1. Parse Bulletin Number (and final-bulletin marker)
         # Real bulletins abbreviate to "NR." (e.g. "BULLETIN NR. 11"), not just "No."
-        bulletin_no_match = re.search(r"Tropical\s+Cyclone\s+Bulletin\s+N[ro]\.\s+(\d+)", text, re.IGNORECASE)
+        # PAGASA appends a trailing "F" to the number on a typhoon's last bulletin
+        # (e.g. "NR. 21F" for Francisco) — this is the actual, confirmed signal that
+        # no more bulletins will follow, not any particular closing-sentence wording.
+        bulletin_no_match = re.search(r"Tropical\s+Cyclone\s+Bulletin\s+N[ro]\.\s+(\d+)([A-Za-z]?)", text, re.IGNORECASE)
         bulletin_no = int(bulletin_no_match.group(1)) if bulletin_no_match else 1
+        is_final = bool(bulletin_no_match and bulletin_no_match.group(2).upper() == "F")
 
         # 2. Parse Category, Typhoon Name, and International Name from the title
         # line itself (e.g. "Tropical Storm KIYAPO (NOUL)" or 'TYPHOON "LEON"'),
@@ -178,6 +203,7 @@ class BulletinParserService:
             "typhoon_name": typhoon_name,
             "international_name": international_name,
             "bulletin_count": bulletin_no,
+            "is_final": is_final,
             "category": category,
             "max_sustained_winds": max_winds,
             "gustiness": gustiness,
@@ -194,9 +220,12 @@ class BulletinParserService:
         Fetches all active PAGASA bulletin PDF links, downloads/parses/saves each one,
         and returns [{"tcb_id", "title", "bulletin_count"}, ...] for whichever were
         processed. Returns [] if there are no active links or every download/parse
-        attempt fails — never raises, since callers (the manual /parse route, and the
-        scheduled background job) each decide separately whether an empty result is
-        worth surfacing as an error.
+        attempt fails — never raises for a per-link failure, since callers (the manual
+        /parse route, and the scheduled background job) each decide separately whether
+        an empty result is worth surfacing as an error. Does propagate
+        `PagasaScrapeError` if the PAGASA portal itself couldn't be reached at all —
+        deliberately not caught here, since that also skips the reconciliation step
+        below rather than risk treating "couldn't check" the same as "confirmed empty."
         """
         links = await cls.fetch_active_bulletin_links()
         bulletins_created = []
@@ -209,14 +238,53 @@ class BulletinParserService:
                 if os.path.exists(pdf_path):
                     os.remove(pdf_path)
 
+                # A final bulletin ("NR. 21F") means no more TCBs will follow for
+                # this typhoon — auto-run the exposure summary now instead of
+                # waiting on a manual POST /api/bulletins/{tcb_id}/compute-exposure
+                # click. Per Fabio's decision, this stops at the exposure summary;
+                # the assessment/payout calculation stays a separate manual step.
+                if parsed_data.get("is_final"):
+                    ExposureCalculatorService.compute_for_typhoon(bulletin.typhoon_id, db)
+
                 bulletins_created.append({
                     "tcb_id": bulletin.tcb_id,
                     "title": bulletin.title,
                     "bulletin_count": bulletin.bulletin_count,
+                    "is_final": parsed_data.get("is_final", False),
                 })
             except Exception as e:
                 print(f"Error processing PDF link {link}: {e}")
+
+        cls._reconcile_active_typhoons(links, db)
         return bulletins_created
+
+    @classmethod
+    def _reconcile_active_typhoons(cls, active_links: list[str], db: Session) -> list[Typhoon]:
+        """
+        Cross-checks every Typhoon still marked is_active=True against PAGASA's
+        current active-bulletin listing (storm name parsed from each link's
+        filename — see ACTIVE_LINK_NAME_RE). Closes (is_active=False + auto-runs
+        the exposure summary) any typhoon no longer represented there, even if we
+        never saw an explicit final ("F") bulletin for it — PAGASA doesn't
+        guarantee one is always published before a storm drops off the active
+        list. Only ever called with a successfully-fetched `active_links` (see
+        `PagasaScrapeError` above) — an empty-but-successful list correctly
+        means "close everything still marked active."
+        """
+        currently_active_names = set()
+        for link in active_links:
+            match = ACTIVE_LINK_NAME_RE.search(link)
+            if match:
+                currently_active_names.add(match.group(1).upper())
+
+        closed = []
+        for typhoon in db.query(Typhoon).filter(Typhoon.is_active.is_(True)).all():
+            if typhoon.name.upper() not in currently_active_names:
+                typhoon.is_active = False
+                db.commit()
+                ExposureCalculatorService.compute_for_typhoon(typhoon.typhoon_id, db)
+                closed.append(typhoon)
+        return closed
 
     @classmethod
     def save_bulletin_to_db(cls, parsed_data: dict, db: Session) -> TropicalCycloneBulletin:
@@ -255,6 +323,12 @@ class BulletinParserService:
             db.add(typhoon)
             db.commit()
             db.refresh(typhoon)
+
+        # 1b. A bulletin number with a trailing "F" (e.g. "NR. 21F") is PAGASA's
+        # own signal that no more bulletins will follow for this typhoon.
+        if parsed_data.get("is_final") and typhoon.is_active:
+            typhoon.is_active = False
+            db.commit()
 
         # 2. Check if this Bulletin count already exists for this typhoon
         bulletin = db.query(TropicalCycloneBulletin).filter(
