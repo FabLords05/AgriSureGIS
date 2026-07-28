@@ -979,5 +979,43 @@ updated with an explicit warning against editing that file for CORS.
   re-extraction reset them, frontend restarted with corrected env vars. Core app
   features (bulletins, farms, assessments, CSV upload) and the GeoServer WFS
   boundary layer + WMS farm overlay toggle all confirmed working in-browser.
+* Pushed (`fabio/db/pabs-ingestion-gpx-matching`).
+
+---
+
+## [2026-07-28] - Windows Setup Guide
+
+Fabio asked for a Windows-specific setup walkthrough. Written by checking actual
+code behavior rather than trusting existing docs at face value, since the
+GeoServer work earlier the same day surfaced two cases (`DATABASE_URL`,
+`VITE_API_BASE_URL`) where `.claude/ENV_GUIDE.md` described env-var behavior the
+code doesn't actually implement — confirmed via `grep` that nothing in
+`backend/app/` imports `python-dotenv` or reads `os.environ`/`os.getenv` at all,
+despite the package being listed in `requirements.txt`; `DATABASE_URL` and
+`PAGASA_SCRAPE_URL` are both hardcoded in source
+(`backend/app/core/database.py`, `backend/app/services/bulletin_parser.py`)
+instead.
+
+### 1. File: `docs/WINDOWS_SETUP.md` (new)
+* Full walkthrough: prerequisites (Git, Python 3.11+, Node 20 LTS, PostgreSQL+PostGIS
+  via the EDB installer/Stack Builder, optional JDK for GeoServer), DB
+  user/database/extension creation matching the hardcoded credentials in
+  `database.py` (flagged as a doc/code mismatch rather than silently "fixed"),
+  backend venv/pip/uvicorn steps (PowerShell-specific execution-policy note for
+  venv activation), frontend npm/`.env` steps (repeats the `VITE_API_BASE_URL`
+  no-`/api`-suffix warning from the GeoServer work), and an optional GeoServer
+  section (Windows paths/`startup.bat`/`JAVA_HOME` via PowerShell, same JDK 17
+  Marlin-renderer warning, explicit "don't edit `web.xml` for CORS" warning
+  referencing the incident from the same day's GeoServer entry, and a pointer to
+  `.claude/GEOSERVER_SETUP.md` §5–6 for the OS-independent workspace/datastore/
+  publish steps rather than duplicating them).
+
+### 2. File: `README.md`
+* Added a link to `docs/WINDOWS_SETUP.md` under Contents.
+
+### Status / Next Steps
+* Not verified on an actual Windows machine — written from the codebase's actual
+  behavior (grepped, not assumed) plus the Linux setup already verified the same
+  day, but no Windows hardware available to test the walkthrough end-to-end.
 * Not pushed yet.
 
