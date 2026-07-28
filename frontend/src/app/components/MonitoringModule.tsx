@@ -9,7 +9,10 @@ import {
   PieChart, Pie, Cell, LineChart, Line, CartesianGrid, Legend
 } from "recharts";
 import { mockFarmers, FarmerRecord } from "./mockData";
-import { Bulletin, TcbSignal, getBulletins, parseBulletins, getBulletinSignals } from "@/lib/api";
+import {
+  Bulletin, TcbSignal, TyphoonSummary, getBulletins, parseBulletins, getBulletinSignals,
+  getTyphoonSummary, computeExposure, calculateAssessments,
+} from "@/lib/api";
 
 const signalChartData = [
   { signal:"Signal 1", farms:6,  area:12.0 },
@@ -166,6 +169,121 @@ function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bull
               className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-[#1e3a5f] text-white text-xs font-semibold hover:bg-[#172f4d] transition-colors"
             >
               <Download size={12} /> Download TCB
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Typhoon Summary Modal ───────────────────────────────────────────────────
+// Read-only view of GET /api/typhoons/{typhoon_id}/summary, plus a manual
+// "Recompute" action (POST compute-exposure, then POST assessments/calculate)
+// for typhoons that need a fresh run rather than relying solely on the
+// auto-trigger that fires when a final bulletin closes the typhoon.
+function TyphoonSummaryModal({
+  summary, isRecomputing, onRecompute, onClose,
+}: { summary: TyphoonSummary; isRecomputing: boolean; onRecompute: () => void; onClose: () => void }) {
+  const signalColor = (level: number) =>
+    level >= 4 ? "#ef4444" : level === 3 ? "#f97316" : level === 2 ? "#d97706" : "#166534";
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+      <div className="bg-card border border-border rounded-2xl shadow-2xl w-[720px] max-h-[85vh] flex flex-col overflow-hidden">
+        {/* Header */}
+        <div className="flex items-center justify-between px-5 py-3 border-b border-border shrink-0" style={{ background: "#0f1e0f" }}>
+          <div className="flex items-center gap-3">
+            <BarChart2 size={15} className="text-emerald-400" />
+            <div>
+              <p className="text-[12px] font-bold text-white">Typhoon Summary — {summary.typhoon_name} ({summary.year})</p>
+              <p className="text-[10px] text-white/60">
+                {summary.is_active ? "Still active" : "Closed"} · {summary.total_bulletins_issued} bulletin(s) issued
+              </p>
+            </div>
+          </div>
+          <button onClick={onClose} className="w-6 h-6 flex items-center justify-center rounded hover:bg-white/10 text-white/60 hover:text-white transition-colors">
+            <X size={13} />
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="flex-1 overflow-auto p-5 bg-[#fafafa] dark:bg-[#0f1a0f]">
+          <div className="grid grid-cols-4 gap-2 mb-4">
+            {[
+              ["Municipalities Affected", String(summary.total_municipalities_affected)],
+              ["Peak Signal", summary.peak_signal_level != null ? `No. ${summary.peak_signal_level}` : "—"],
+              ["Eligible Boundaries", String(summary.total_eligible_boundaries)],
+              ["Assessments Computed", String(summary.assessments_computed)],
+            ].map(([label, value]) => (
+              <div key={label} className="bg-card border border-border rounded-xl px-3 py-2">
+                <p className="text-[9px] text-muted-foreground uppercase tracking-wide">{label}</p>
+                <p className="text-lg font-bold mt-0.5 text-[#166534]">{value}</p>
+              </div>
+            ))}
+          </div>
+
+          <div className="bg-card border-2 border-[#166534] rounded-xl px-4 py-2.5 mb-4 flex items-center justify-between">
+            <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Total Indemnity Payout</span>
+            <span className="text-xl font-black text-[#166534]">₱{summary.total_indemnity_payout.toLocaleString()}</span>
+          </div>
+
+          <div className="grid grid-cols-2 gap-2 text-[10px] mb-4">
+            <div className="flex gap-2"><span className="text-muted-foreground w-28 shrink-0">First Bulletin:</span><span className="font-semibold">{summary.first_issued_at ?? "—"}</span></div>
+            <div className="flex gap-2"><span className="text-muted-foreground w-28 shrink-0">Last Bulletin:</span><span className="font-semibold">{summary.last_issued_at ?? "—"}</span></div>
+          </div>
+
+          <div className="border border-border rounded-lg overflow-hidden">
+            <p className="font-bold text-[11px] px-3 py-2 uppercase tracking-wide bg-muted/40">Areas Affected</p>
+            {summary.areas_affected.length === 0 ? (
+              <p className="text-[10px] text-muted-foreground px-3 py-3">
+                No exposure data computed for this typhoon yet — use Recompute below.
+              </p>
+            ) : (
+              <table className="w-full text-[10px]">
+                <thead>
+                  <tr className="bg-[#166534] text-white">
+                    <th className="px-2.5 py-1.5 text-left">Municipality</th>
+                    <th className="px-2.5 py-1.5 text-left">Province</th>
+                    <th className="px-2.5 py-1.5 text-center">Peak Signal</th>
+                    <th className="px-2.5 py-1.5 text-right">Exposure (h)</th>
+                    <th className="px-2.5 py-1.5 text-center">6h Eligible</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {summary.areas_affected.map((a, i) => (
+                    <tr key={a.boundary_id ?? i} className={`border-t border-border ${i % 2 === 0 ? "" : "bg-muted/10"}`}>
+                      <td className="px-2.5 py-1.5 font-medium">{a.municipality}</td>
+                      <td className="px-2.5 py-1.5 text-muted-foreground">{a.province}</td>
+                      <td className="px-2.5 py-1.5 text-center font-bold" style={{ color: signalColor(a.max_signal_level) }}>
+                        No. {a.max_signal_level}
+                      </td>
+                      <td className="px-2.5 py-1.5 text-right">{a.total_exposure_hours.toFixed(2)}</td>
+                      <td className="px-2.5 py-1.5 text-center">
+                        {a.is_eligible_6hr
+                          ? <CheckCircle size={11} className="inline text-emerald-600" />
+                          : <span className="text-muted-foreground">—</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="flex items-center justify-between px-5 py-3 border-t border-border shrink-0">
+          <p className="text-[10px] text-muted-foreground">Typhoon ID {summary.typhoon_id}</p>
+          <div className="flex gap-2">
+            <button onClick={onClose} className="px-3 py-1.5 rounded-lg border border-border text-xs hover:bg-muted transition-colors">Close</button>
+            <button
+              onClick={onRecompute}
+              disabled={isRecomputing}
+              className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-[#1e3a5f] text-white text-xs font-semibold hover:bg-[#172f4d] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+            >
+              <RefreshCw size={12} className={isRecomputing ? "animate-spin" : ""} />
+              {isRecomputing ? "Recomputing…" : "Recompute"}
             </button>
           </div>
         </div>

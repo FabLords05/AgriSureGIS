@@ -7,11 +7,47 @@ export interface Bulletin {
   bulletin_count: number;
   category: string | null;
   typhoon_name: string;
+  typhoon_is_active: boolean;
   max_sustained_winds: string | null;
   gustiness: string | null;
   issued_at: string | null;
   center_lat: number | null;
   center_lng: number | null;
+}
+
+export interface TyphoonSummaryArea {
+  boundary_id: number | null;
+  province: string;
+  municipality: string;
+  max_signal_level: number;
+  start_time: string;
+  end_time: string;
+  total_exposure_hours: number;
+  is_eligible_6hr: boolean;
+}
+
+export interface TyphoonSummary {
+  status: string;
+  typhoon_id: number;
+  typhoon_name: string;
+  year: number;
+  is_active: boolean;
+  total_bulletins_issued: number;
+  first_issued_at: string | null;
+  last_issued_at: string | null;
+  total_municipalities_affected: number;
+  peak_signal_level: number | null;
+  total_eligible_boundaries: number;
+  areas_affected: TyphoonSummaryArea[];
+  assessments_computed: number;
+  total_indemnity_payout: number;
+}
+
+export interface ComputeExposureResult {
+  status: string;
+  typhoon_id: number;
+  boundaries_computed: number;
+  summaries: Array<TyphoonSummaryArea & { summary_id: number }>;
 }
 
 export interface GeoJsonMultiPolygon {
@@ -180,4 +216,12 @@ export function calculateAssessments(typhoonId: number, bulletinId: number): Pro
 
 export function getAssessmentsExportUrl(typhoonId: number): string {
   return `${API_BASE_URL}/api/assessments/export?typhoon_id=${typhoonId}`;
+}
+
+export function getTyphoonSummary(typhoonId: number): Promise<TyphoonSummary> {
+  return request<TyphoonSummary>(`/api/typhoons/${typhoonId}/summary`);
+}
+
+export function computeExposure(tcbId: number): Promise<ComputeExposureResult> {
+  return request<ComputeExposureResult>(`/api/bulletins/${tcbId}/compute-exposure`, { method: 'POST' });
 }

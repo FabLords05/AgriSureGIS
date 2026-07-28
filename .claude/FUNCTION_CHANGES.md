@@ -1050,3 +1050,30 @@ The `88ffc30` final-bulletin-detection entry above already auto-runs the exposur
 * Not run against a live database — same handoff situation as every other entry in this file; Fabio needs to run the test suite and manually exercise the new summary endpoint via Swagger UI against a typhoon that's already had exposure/assessment data computed, to sanity-check the aggregation numbers by hand.
 * Not pushed yet.
 
+---
+
+## [2026-07-28] - Frontend Scaffolding for Typhoon Summary (Not Yet Wired Into UI)
+
+**Branch:** `fabio/db/typhoon-summary-report` (same branch as the summary endpoint above; committed locally, not pushed, no PR open yet).
+
+Prep work for consuming the `GET /api/typhoons/{typhoon_id}/summary` endpoint (previous entry) from the frontend. This entry is **additive scaffolding only** — the new modal component exists but is not yet rendered or triggered from anywhere in `MonitoringModule`, and the new API functions are imported but unused. Left in this state deliberately, pending Fabio's decision on trigger placement and recompute semantics, rather than guessing at UI wiring outside the prototype's existing patterns.
+
+### 1. File: `backend/app/api/bulletins.py`
+* `list_bulletins()`: added `typhoon_is_active` (from `typhoon.is_active`, defaulting `True` when no typhoon row is joined) to each row of the `GET /api/bulletins/` response, so the frontend can tell which bulletins belong to a closed typhoon without a second request.
+
+### 2. File: `frontend/src/lib/api.ts`
+* `Bulletin` interface: added `typhoon_is_active: boolean`, matching the backend addition above.
+* Added **`TyphoonSummaryArea`** and **`TyphoonSummary`** interfaces, matching `GET /api/typhoons/{typhoon_id}/summary`'s response shape.
+* Added **`ComputeExposureResult`** interface, matching `POST /api/bulletins/{tcb_id}/compute-exposure`'s response shape.
+* Added **`getTyphoonSummary(typhoonId)`**: `GET /api/typhoons/{typhoonId}/summary`.
+* Added **`computeExposure(tcbId)`**: `POST /api/bulletins/{tcbId}/compute-exposure`.
+
+### 3. File: `frontend/src/app/components/MonitoringModule.tsx`
+* Added **`TyphoonSummaryModal`** component: read-only view of a typhoon's summary (municipalities affected, peak signal, eligible boundaries, assessments computed, total indemnity payout, per-municipality areas-affected table), plus a "Recompute" button intended to call `computeExposure` then `calculateAssessments` for typhoons that need a fresh run outside the backend's own auto-trigger.
+* Imported `TyphoonSummary`, `getTyphoonSummary`, `computeExposure`, `calculateAssessments` in anticipation of wiring — **not yet called from any handler**.
+
+### Status / Next Steps
+* **Not wired up.** No state, no trigger button, and no `<TyphoonSummaryModal>` render call exist yet in `MonitoringModule`. Outstanding decisions before that wiring goes in: (1) whether the "View Summary" trigger appears only on closed-typhoon rows or on every row, and (2) whether "Recompute" uses the bulletin row that opened the modal or the typhoon's latest bulletin.
+* Not run against a live frontend/backend pairing.
+* Not pushed yet.
+

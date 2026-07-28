@@ -75,6 +75,7 @@ def list_bulletins(db: Session = Depends(get_db)):
             "bulletin_count": b.bulletin_count,
             "category": b.category,
             "typhoon_name": typhoon.name if typhoon else "Unknown",
+            "typhoon_is_active": typhoon.is_active if typhoon else True,
             "max_sustained_winds": b.max_sustained_winds,
             "gustiness": b.gustiness,
             "issued_at": b.issued_at,
