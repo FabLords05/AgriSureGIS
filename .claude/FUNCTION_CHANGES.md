@@ -842,3 +842,20 @@ Fabio asked for a way to cross-check whether the typhoons we have on file are st
 * Verified directly (hand-run against all of the above scenarios, including confirming existing `scrape_and_save_all` tests still pass unmodified — a bare `MagicMock()`'s `.all()` iterates as empty by default, so the new reconciliation step doesn't interfere with tests that don't care about it) before handing back; not yet run through `pytest` — needs Fabio's re-run.
 * Name-matching is filename-based only (same assumption `GpxFarmerMatcherService` already relies on for GPX filenames) — a PAGASA filename that doesn't follow the `TCB#<n>[F]_<name>.pdf` convention would fail to match and could cause a false closure. No real-world counterexample has been seen; flagging as a known limitation, not engineered around further.
 
+---
+
+## [2026-07-28] - Fix Map Attribution Links Kicking Users Back to Login
+
+**Branch:** `fabio/db/pabs-ingestion-gpx-matching` (James's frontend edit, per Fabio's request to use this branch — committed locally, not pushed yet).
+
+James found that clicking the Leaflet/OpenStreetMap attribution links at the bottom-right of the map (Spatial Analysis screen) navigated the whole browser tab away to `leafletjs.com`/`openstreetmap.org`. Since this SPA has no URL routing, pressing Back afterward doesn't restore the app's prior state — it reloads the app from scratch, which drops the user (all state is in-memory `useState`, including `currentUser`) back on the Login screen instead of wherever they were.
+
+### 1. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* **Changes to Functions/Behavior:**
+  * Added `target="_blank" rel="noopener noreferrer"` to the `TileLayer`'s custom OpenStreetMap copyright attribution string.
+  * Added a `mapWrapperRef` + `useEffect` with a `MutationObserver` that patches every link inside `.leaflet-control-attribution` (including Leaflet's own auto-injected "Leaflet" credit link, which isn't reachable via a react-leaflet prop) to also open in a new tab. The observer is needed because Leaflet renders its attribution control after mount, not as part of React's initial render.
+
+### Status / Next Steps
+* Verified in-browser by James: clicking both attribution links now opens a new tab instead of navigating the app away.
+* Not pushed yet.
+

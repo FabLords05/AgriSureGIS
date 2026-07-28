@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { MapContainer, TileLayer, GeoJSON, CircleMarker, Marker, Popup } from "react-leaflet";
 import type { Layer } from "leaflet";
 import type { Feature, FeatureCollection } from "geojson";
@@ -111,15 +111,36 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
   const selectedFarm = selectedFarmId != null ? farms.find(f => f.farm_id === selectedFarmId) : null;
   const uniqueAffectedAreas = Array.from(new Set(affectedAreas.map(s => s.area_name)));
 
+  // The map's attribution links (Leaflet's own "Leaflet" credit + the OSM copyright
+  // link below) default to same-tab navigation. Since this SPA has no URL routing,
+  // clicking them navigates the whole app away — hitting Back afterward reloads the
+  // app from scratch and drops the user back on the login screen instead of where
+  // they were. Force every attribution link to open in a new tab instead.
+  const mapWrapperRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const wrapper = mapWrapperRef.current;
+    if (!wrapper) return;
+    const patchLinks = () => {
+      wrapper.querySelectorAll(".leaflet-control-attribution a").forEach(a => {
+        a.setAttribute("target", "_blank");
+        a.setAttribute("rel", "noopener noreferrer");
+      });
+    };
+    patchLinks();
+    const observer = new MutationObserver(patchLinks);
+    observer.observe(wrapper, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, []);
+
   return (
-    <div className="relative w-full h-full overflow-hidden rounded-lg border border-border bg-card">
+    <div ref={mapWrapperRef} className="relative w-full h-full overflow-hidden rounded-lg border border-border bg-card">
       <MapContainer
         center={DEFAULT_CENTER}
         zoom={9}
         style={{ height: "100%", width: "100%" }}
       >
         <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a>'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
 
