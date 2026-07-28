@@ -104,6 +104,25 @@ export interface TcbSignal {
   area_name: string;
 }
 
+export interface AreaExposureSummary {
+  summary_id: number;
+  boundary_id: number;
+  province: string;
+  municipality: string;
+  max_signal_level: number;
+  start_time: string;
+  end_time: string;
+  total_exposure_hours: number;
+  is_eligible_6hr: boolean;
+}
+
+export interface ComputeExposureResult {
+  status: string;
+  typhoon_id: number;
+  boundaries_computed: number;
+  summaries: AreaExposureSummary[];
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, init);
   if (!response.ok) {
@@ -132,6 +151,10 @@ export function parseBulletins(): Promise<ParseBulletinsResult> {
 
 export function getBulletinSignals(tcbId: number): Promise<TcbSignal[]> {
   return request<TcbSignal[]>(`/api/bulletins/${tcbId}/signals`);
+}
+
+export function computeExposure(tcbId: number): Promise<ComputeExposureResult> {
+  return request<ComputeExposureResult>(`/api/bulletins/${tcbId}/compute-exposure`, { method: 'POST' });
 }
 
 export function getParserSettings(): Promise<ParserSettings> {
@@ -180,4 +203,36 @@ export function calculateAssessments(typhoonId: number, bulletinId: number): Pro
 
 export function getAssessmentsExportUrl(typhoonId: number): string {
   return `${API_BASE_URL}/api/assessments/export?typhoon_id=${typhoonId}`;
+}
+
+// Combined export across every typhoon (not scoped to one bulletin/typhoon
+// folder), in the PABS-required column format. IRID/P/S columns come back
+// blank -- no definition for them was available; see the backend docstring.
+export function getAssessmentsExportPabsUrl(): string {
+  return `${API_BASE_URL}/api/assessments/export-pabs`;
+}
+
+export interface PabsAssessmentRow {
+  assessment_id: number;
+  FARMER_NAME: string | null;
+  FARMERID: string | null;
+  FARMID: number | null;
+  IRID: null;
+  AREA: number | null;
+  TYPHOON_NAME: string | null;
+  PERIOD_OF_EXPOSURE: number | null;
+  WIND_VELOCITY: number | null;
+  DATE_FILED: string | null;
+  DATE_OF_OCCURRENCE: string | null;
+  P: null;
+  S: null;
+  AC: number | null;
+  REMARKS: null;
+  municipality: string | null;
+  province: string | null;
+}
+
+// JSON version of the same combined PABS-format summary, for on-screen display.
+export function getAssessmentsPabsSummary(): Promise<{ status: string; data: PabsAssessmentRow[] }> {
+  return request<{ status: string; data: PabsAssessmentRow[] }>('/api/assessments/pabs-summary');
 }

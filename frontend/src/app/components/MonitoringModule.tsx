@@ -2,14 +2,17 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import {
   Activity, Download, CheckCircle, Clock, AlertTriangle, FileDown,
   Wifi, RefreshCw, Eye, BarChart2, TrendingUp, Zap,
-  Satellite, X, MapPin, User
+  Satellite, X, MapPin, User, MapPinned
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip as RTooltip, ResponsiveContainer,
   PieChart, Pie, Cell, LineChart, Line, CartesianGrid, Legend
 } from "recharts";
 import { mockFarmers, FarmerRecord } from "./mockData";
-import { Bulletin, TcbSignal, getBulletins, parseBulletins, getBulletinSignals } from "@/lib/api";
+import {
+  Bulletin, TcbSignal, getBulletins, parseBulletins, getBulletinSignals,
+  computeExposure, ComputeExposureResult,
+} from "@/lib/api";
 
 const signalChartData = [
   { signal:"Signal 1", farms:6,  area:12.0 },
@@ -168,6 +171,86 @@ function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bull
               <Download size={12} /> Download TCB
             </button>
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── TCB Exposure Summary Modal ──────────────────────────────────────────────
+// Per Fabio's request: a view showing, for a given TCB, the list of affected
+// areas and how long each was under a wind signal (POST /{tcb_id}/compute-exposure).
+function ExposureSummaryModal({
+  bulletin, result, isLoading, error, onClose,
+}: {
+  bulletin: Bulletin;
+  result: ComputeExposureResult | null;
+  isLoading: boolean;
+  error: string | null;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+      <div className="bg-card border border-border rounded-2xl shadow-2xl w-[640px] max-h-[80vh] flex flex-col overflow-hidden">
+        <div className="flex items-center justify-between px-5 py-3 border-b border-border shrink-0" style={{ background: "#0f1e0f" }}>
+          <div className="flex items-center gap-3">
+            <MapPinned size={15} className="text-emerald-400" />
+            <div>
+              <p className="text-[12px] font-bold text-white">Exposure Summary — TCB No. {bulletin.bulletin_count}, {bulletin.typhoon_name}</p>
+              <p className="text-[10px] text-white/60">Areas affected and total wind-signal exposure time</p>
+            </div>
+          </div>
+          <button onClick={onClose} className="w-6 h-6 flex items-center justify-center rounded hover:bg-white/10 text-white/60 hover:text-white transition-colors">
+            <X size={13} />
+          </button>
+        </div>
+
+        <div className="flex-1 overflow-auto p-4">
+          {isLoading ? (
+            <p className="text-[11px] text-muted-foreground text-center py-6">Computing exposure summary…</p>
+          ) : error ? (
+            <div className="px-3 py-2 text-[11px] text-white bg-red-600 rounded-lg">{error}</div>
+          ) : !result || result.summaries.length === 0 ? (
+            <p className="text-[11px] text-muted-foreground text-center py-6">No affected areas recorded for this bulletin yet.</p>
+          ) : (
+            <table className="w-full text-[11px]">
+              <thead>
+                <tr className="bg-[#166534] text-white">
+                  <th className="px-3 py-2 text-left font-semibold">Province</th>
+                  <th className="px-3 py-2 text-left font-semibold">Municipality</th>
+                  <th className="px-3 py-2 text-left font-semibold">Max Signal</th>
+                  <th className="px-3 py-2 text-left font-semibold">Start</th>
+                  <th className="px-3 py-2 text-left font-semibold">End</th>
+                  <th className="px-3 py-2 text-left font-semibold">Exposure (h)</th>
+                  <th className="px-3 py-2 text-left font-semibold">6h+ Eligible</th>
+                </tr>
+              </thead>
+              <tbody>
+                {result.summaries.map((s, i) => (
+                  <tr key={s.summary_id} className={`border-t border-border ${i % 2 === 0 ? "" : "bg-muted/10"}`}>
+                    <td className="px-3 py-2">{s.province}</td>
+                    <td className="px-3 py-2 font-medium">{s.municipality}</td>
+                    <td className="px-3 py-2">No. {s.max_signal_level}</td>
+                    <td className="px-3 py-2 text-muted-foreground whitespace-nowrap">{s.start_time}</td>
+                    <td className="px-3 py-2 text-muted-foreground whitespace-nowrap">{s.end_time}</td>
+                    <td className="px-3 py-2 font-semibold">{s.total_exposure_hours.toFixed(1)}</td>
+                    <td className="px-3 py-2">
+                      {s.is_eligible_6hr
+                        ? <span className="text-emerald-600 font-medium">Yes</span>
+                        : <span className="text-muted-foreground">No</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        <div className="flex items-center justify-between px-5 py-3 border-t border-border shrink-0">
+          <p className="text-[10px] text-muted-foreground">
+            {result ? `${result.boundaries_computed} area(s) computed` : ""}
+          </p>
+          <button onClick={onClose} className="px-3 py-1.5 rounded-lg border border-border text-xs hover:bg-muted transition-colors">Close</button>
         </div>
       </div>
     </div>
@@ -350,6 +433,11 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
   const [viewingSignals, setViewingSignals] = useState<TcbSignal[]>([]);
   const [isLoadingViewingSignals, setIsLoadingViewingSignals] = useState(false);
 
+  const [exposureBulletin, setExposureBulletin] = useState<Bulletin | null>(null);
+  const [exposureResult, setExposureResult] = useState<ComputeExposureResult | null>(null);
+  const [isLoadingExposure, setIsLoadingExposure] = useState(false);
+  const [exposureError, setExposureError] = useState<string | null>(null);
+
   const [sarFarmer, setSarFarmer] = useState<FarmerRecord | null>(null);
 
   const totalFarms = mockFarmers.length;
@@ -416,6 +504,20 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
     }
   };
 
+  const handleViewExposure = async (b: Bulletin) => {
+    setExposureBulletin(b);
+    setExposureResult(null);
+    setExposureError(null);
+    setIsLoadingExposure(true);
+    try {
+      setExposureResult(await computeExposure(b.tcb_id));
+    } catch (error) {
+      setExposureError(error instanceof Error ? error.message : "Failed to compute exposure summary.");
+    } finally {
+      setIsLoadingExposure(false);
+    }
+  };
+
   const handleDownloadBulletinSummary = (b: Bulletin) => {
     const content = [
       "PAGASA TROPICAL CYCLONE BULLETIN",
@@ -455,6 +557,15 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
           signals={viewingSignals}
           isLoadingSignals={isLoadingViewingSignals}
           onClose={() => setViewingTCB(null)}
+        />
+      )}
+      {exposureBulletin && (
+        <ExposureSummaryModal
+          bulletin={exposureBulletin}
+          result={exposureResult}
+          isLoading={isLoadingExposure}
+          error={exposureError}
+          onClose={() => setExposureBulletin(null)}
         />
       )}
 
@@ -544,6 +655,13 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
                             title="Download TCB Summary"
                           >
                             <Download size={11} className="text-muted-foreground" />
+                          </button>
+                          <button
+                            onClick={e => { e.stopPropagation(); handleViewExposure(b); }}
+                            className="p-1 hover:bg-muted rounded"
+                            title="View Exposure Summary (areas & exposure time)"
+                          >
+                            <MapPinned size={11} className="text-emerald-600" />
                           </button>
                         </div>
                       </td>
