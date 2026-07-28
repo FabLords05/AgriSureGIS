@@ -9,6 +9,7 @@ During typhoon disasters, the platform automates the extraction of meteorologica
 
 ## Technology Stack
 - **Backend:** FastAPI (Python), PostgreSQL with PostGIS extension, SQLAlchemy ORM, GeoAlchemy2, GeoPandas, Shapely, pyproj, BeautifulSoup4 (PAGASA PDF scraping), pdfplumber.
+- **Spatial Layer Serving:** GeoServer, serving map layers (farm boundaries, wind footprints, typhoon trajectories) between the Web-GIS Application Layer and the Presentation Layer.
 - **Frontend:** React (Vite), Leaflet JS (map rendering), Tailwind CSS.
 - **Deployment:** On-premise local server within PCIC Region X LAN (no public cloud dependency for data privacy).
 

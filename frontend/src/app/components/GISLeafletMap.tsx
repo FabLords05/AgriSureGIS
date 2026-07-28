@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { MapContainer, TileLayer, GeoJSON, CircleMarker, Marker, Popup } from "react-leaflet";
+import { MapContainer, TileLayer, WMSTileLayer, GeoJSON, CircleMarker, Marker, Popup } from "react-leaflet";
 import type { Layer } from "leaflet";
 import type { Feature, FeatureCollection } from "geojson";
 import L from "leaflet";
@@ -47,8 +47,23 @@ const typhoonIcon = L.divIcon({
 // Region X (Northern Mindanao) municipality outlines, for spatial context only —
 // PSGC codes sourced from the PSA/NAMRIA-derived 2023 dataset. Not used in any
 // exposure calculation (ExposureCalculatorService still matches on province/
-// municipality/barangay text, per tbl_admin_boundaries having no geom column).
+// municipality/barangay text). Preferred source is GeoServer WFS (live from
+// tbl_admin_boundaries.boundary_geom, see .claude/GEOSERVER_SETUP.md); falls back
+// to this bundled static file if GeoServer is unset/unreachable.
 const REGION_X_BOUNDARIES_URL = "/data/region10-boundaries.geojson";
+
+// Requests go through the Vite dev server's /geoserver-proxy path (see vite.config.ts),
+// which forwards to VITE_GEOSERVER_URL server-side — this keeps every GeoServer
+// request same-origin from the browser's perspective, so it works without needing
+// CORS configured on GeoServer at all.
+const GEOSERVER_URL = import.meta.env.VITE_GEOSERVER_URL as string | undefined;
+const GEOSERVER_WORKSPACE = "agrisuregis";
+const GEOSERVER_PROXY_BASE = "/geoserver-proxy";
+const REGION_X_BOUNDARIES_WFS_URL = GEOSERVER_URL
+  ? `${GEOSERVER_PROXY_BASE}/${GEOSERVER_WORKSPACE}/ows?service=WFS&version=2.0.0&request=GetFeature&typeName=${GEOSERVER_WORKSPACE}:tbl_admin_boundaries&outputFormat=application/json`
+  : null;
+const FARMS_WMS_LAYER = `${GEOSERVER_WORKSPACE}:tbl_farms`;
+const FARMS_WMS_URL = GEOSERVER_URL ? `${GEOSERVER_PROXY_BASE}/${GEOSERVER_WORKSPACE}/wms` : null;
 
 function styleBoundary() {
   return { color: "#166534", weight: 1, opacity: 0.5, fillOpacity: 0, dashArray: "4, 4" };
@@ -74,6 +89,7 @@ function approximateFarmPosition(municipality: string | null, indexInMunicipalit
 export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBulletin, darkMode }: GISLeafletMapProps) {
   const [affectedAreas, setAffectedAreas] = useState<TcbSignal[]>([]);
   const [regionXBoundaries, setRegionXBoundaries] = useState<FeatureCollection | null>(null);
+  const [showFarmsWmsOverlay, setShowFarmsWmsOverlay] = useState(false);
 
   useEffect(() => {
     if (!selectedBulletin) {
@@ -86,10 +102,23 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
   }, [selectedBulletin]);
 
   useEffect(() => {
-    fetch(REGION_X_BOUNDARIES_URL)
-      .then(res => res.json())
+    const loadStaticFallback = () =>
+      fetch(REGION_X_BOUNDARIES_URL)
+        .then(res => res.json())
+        .then(setRegionXBoundaries)
+        .catch(() => setRegionXBoundaries(null));
+
+    if (!REGION_X_BOUNDARIES_WFS_URL) {
+      loadStaticFallback();
+      return;
+    }
+    fetch(REGION_X_BOUNDARIES_WFS_URL)
+      .then(res => {
+        if (!res.ok) throw new Error(`GeoServer WFS request failed: ${res.status}`);
+        return res.json();
+      })
       .then(setRegionXBoundaries)
-      .catch(() => setRegionXBoundaries(null));
+      .catch(loadStaticFallback);
   }, []);
 
   const surveyedFarms = farms.filter(f => f.location_geom != null);
@@ -143,6 +172,18 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a>'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
+
+        {/* Optional GeoServer WMS reference overlay for farm boundaries — additive only,
+            the interactive farm layer below (click/popup, from FastAPI) is unaffected. */}
+        {showFarmsWmsOverlay && FARMS_WMS_URL && (
+          <WMSTileLayer
+            url={FARMS_WMS_URL}
+            layers={FARMS_WMS_LAYER}
+            format="image/png"
+            transparent
+            opacity={0.6}
+          />
+        )}
 
         {regionXBoundaries && (
           <GeoJSON data={regionXBoundaries} style={styleBoundary} onEachFeature={labelBoundary} />
@@ -228,6 +269,18 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
           );
         })}
       </MapContainer>
+
+      {/* GeoServer WMS overlay toggle — only shown when VITE_GEOSERVER_URL is configured */}
+      {GEOSERVER_URL && (
+        <label className="absolute top-3 right-3 flex items-center gap-1.5 bg-card/90 border border-border rounded-lg px-3 py-2 shadow-md z-[1000] text-[10px] cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={showFarmsWmsOverlay}
+            onChange={e => setShowFarmsWmsOverlay(e.target.checked)}
+          />
+          GeoServer farm overlay
+        </label>
+      )}
 
       {/* Legend */}
       <div className="absolute bottom-3 left-3 bg-card/90 border border-border rounded-lg px-3 py-2 shadow-md z-[1000]">

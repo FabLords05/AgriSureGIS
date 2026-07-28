@@ -49,7 +49,12 @@ CREATE TABLE tbl_admin_boundaries (
     psgc_code VARCHAR(10) UNIQUE NOT NULL,
     province VARCHAR(100) NOT NULL,
     municipality VARCHAR(100) NOT NULL,
-    barangay VARCHAR(100) NOT NULL
+    barangay VARCHAR(100) NOT NULL,
+    -- Municipality-level outline, backfilled from frontend/public/data/region10-boundaries.geojson
+    -- (matched on psgc_municipality) so GeoServer can publish region boundaries as a live WFS
+    -- layer instead of the static bundled GeoJSON. Not used in any exposure calculation --
+    -- ExposureCalculatorService still matches on province/municipality/barangay text.
+    boundary_geom GEOMETRY(MultiPolygon, 4326)
 );
 
 -- Step 1 of the parametric lookup: (crop stage, wind signal, exposure hours) -> yield loss %.
@@ -184,6 +189,7 @@ INSERT INTO tbl_parser_settings (polling_interval_hours) VALUES (3);
 -- 6. Optimize Spatial Queries
 CREATE INDEX idx_farms_location_geom ON tbl_farms USING GIST(location_geom);
 CREATE INDEX idx_tcb_center_geom ON tbl_tropical_cyclone_bulletins USING GIST(center_geom);
+CREATE INDEX idx_admin_boundaries_boundary_geom ON tbl_admin_boundaries USING GIST(boundary_geom);
 
 -- 7. Real PCIC seed data for the two-step parametric lookup (replaces the old
 -- made-up placeholder block). Source: PCIC "Table 11" damage matrix and Rice

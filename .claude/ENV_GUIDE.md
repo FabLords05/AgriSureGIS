@@ -11,7 +11,8 @@ Copy `.env.example` to `.env` in the `backend/` directory. **Do not commit `.env
 | `SMTP_HOST` | SMTP server address for email alerts. | Internal mail server / SMTP provider. |
 | `SMTP_USER` | SMTP server login username. | Mail administrator. |
 | `SMTP_PASSWORD`| SMTP server password. | Mail administrator. |
-| `VITE_API_BASE_URL` | Backend base URL for frontend API calls. | Default is `http://localhost:8000/api`. |
+| `VITE_API_BASE_URL` | Backend base URL for frontend API calls. **No `/api` suffix** — every path in `frontend/src/lib/api.ts` already includes its own leading `/api/...`, so appending `/api` here causes a `/api/api/...` 404. | Default is `http://localhost:8000`. |
+| `VITE_GEOSERVER_URL` | GeoServer base URL for WMS/WFS spatial layer requests (farm boundary overlay, region boundaries). | Default is `http://localhost:8080/geoserver`. See `.claude/GEOSERVER_SETUP.md`. If unset or unreachable, the map falls back to the bundled static boundary file and skips the farm overlay. |
 
 ## Key Security Rules
 1. Never put database passwords directly in the codebase. Always use environment variables.

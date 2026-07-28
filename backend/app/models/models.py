@@ -28,6 +28,7 @@ class AdminBoundary(Base):
     province = Column(String(100), nullable=False)
     municipality = Column(String(100), nullable=False)
     barangay = Column(String(100), nullable=False)
+    boundary_geom = Column(Geometry(geometry_type="MULTIPOLYGON", srid=4326))
 
 
 class FarmerProfile(Base):

@@ -7,7 +7,7 @@ Traditional insurance validation depends on physical inspections of damaged area
 
 ## 2. Three-Tier System Architecture
 - **Presentation Layer:** Developed using React and Leaflet JS, styled with Tailwind CSS. Renders interactive maps showing farm boundaries (from GPX files), typhoon trajectories, and wind footprint layers.
-- **Web-GIS Application Layer:** FastAPI coordinates API endpoints.
+- **Web-GIS Application Layer:** FastAPI coordinates API endpoints, with GeoServer serving spatial layers (farm boundaries, wind footprints, typhoon trajectories) to the Presentation Layer.
   - Uses `BeautifulSoup` to scrape new bulletins from PAGASA.
   - Uses `pdfplumber` to extract typhoon metrics from bulletin PDFs.
   - Uses `GeoPandas` and `Shapely` to perform geometric intersections.

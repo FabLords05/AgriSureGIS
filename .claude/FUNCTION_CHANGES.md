@@ -859,3 +859,125 @@ James found that clicking the Leaflet/OpenStreetMap attribution links at the bot
 * Verified in-browser by James: clicking both attribution links now opens a new tab instead of navigating the app away.
 * Not pushed yet.
 
+---
+
+## [2026-07-28] - GeoServer Integration (Schema, Backfill, Frontend WFS/WMS)
+
+Fabio asked to wire up GeoServer, the 2nd-tier spatial layer server shown in
+`docs/system architecture.png` but never actually implemented (confirmed zero
+references anywhere in the codebase prior to this change). Scoped after finding that
+`tbl_farms`' interactive click/popup layer can't move to WMS without losing
+interactivity (WMS returns raster, not clickable features), and that
+`tbl_admin_boundaries` had no geometry column at all — so region boundaries were a
+static bundled file, not something GeoServer could serve from PostGIS. Fabio chose:
+farm layer stays additive-only (existing FastAPI-sourced interactive layer untouched,
+new optional WMS overlay added), and to add the missing geometry column so region
+boundaries can move to a live GeoServer WFS source. GeoServer itself installs
+natively (no Docker) — actual install/publish steps are a runbook for Fabio, not
+run by Claude, per `.claude/CLAUDE.md`'s DB/venv execution rules.
+
+### 1. File: `backend/init_schema.sql`
+* **`tbl_admin_boundaries`**: added `boundary_geom GEOMETRY(MultiPolygon, 4326)` column and
+  `idx_admin_boundaries_boundary_geom` GIST index, so GeoServer has a real PostGIS
+  geometry to publish for the region-boundaries layer. Backfilled from
+  `frontend/public/data/region10-boundaries.geojson` (see backfill script below), not
+  used in any exposure calculation — `ExposureCalculatorService` still matches on
+  province/municipality/barangay text.
+
+### 2. File: `backend/app/models/models.py`
+* **`AdminBoundary`**: added `boundary_geom = Column(Geometry(geometry_type="MULTIPOLYGON", srid=4326))`
+  to match the schema change above.
+
+### 3. File: `backend/backfill_admin_boundary_geom.py` (new)
+* **`run_backfill()`**: one-off script reading `region10-boundaries.geojson` and
+  `UPDATE`-ing `tbl_admin_boundaries.boundary_geom` for every row matching a
+  feature's `(province, municipality)` — matched on text, not `psgc_code`, since the
+  geojson's `psgc_municipality` codes are municipality-level and don't correspond to
+  any single barangay's `psgc_code`. Prints unmatched municipalities (expected for
+  ones with no seeded farms yet, not an error). Not run yet — needs Fabio, per venv
+  execution rules.
+
+### 4. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* **Changes to Functions/Behavior:**
+  * Added `GEOSERVER_URL`/`GEOSERVER_PROXY_BASE`/`REGION_X_BOUNDARIES_WFS_URL`/
+    `FARMS_WMS_LAYER`/`FARMS_WMS_URL` constants. `VITE_GEOSERVER_URL` is only used to
+    decide *whether* GeoServer is configured (shows/hides the overlay toggle, gates
+    the WFS attempt); actual requests are built against the `/geoserver-proxy` path
+    (see `vite.config.ts` below), not the raw `VITE_GEOSERVER_URL`, so the browser
+    never makes a cross-origin request.
+  * The `regionXBoundaries` fetch effect now tries GeoServer WFS
+    (`agrisuregis:tbl_admin_boundaries`, GeoJSON output) first and falls back to the
+    existing static `region10-boundaries.geojson` fetch if `VITE_GEOSERVER_URL` is
+    unset or the WFS request fails — same rendering/tooltip code (`styleBoundary`,
+    `labelBoundary`) either way, so this changes only the data source, not behavior.
+  * Added `showFarmsWmsOverlay` state and a new checkbox control (top-right,
+    only rendered when `VITE_GEOSERVER_URL` is set) toggling a `<WMSTileLayer>` for
+    `agrisuregis:tbl_farms`, rendered as a semi-transparent overlay alongside —
+    not replacing — the existing interactive per-farm `<GeoJSON>` layer, so
+    click-to-select/popups are unaffected.
+
+### 5. File: `frontend/vite.config.ts`
+* **Changes to Config:** switched `defineConfig({...})` to the function form
+  `defineConfig(({ mode }) => {...})` so it can `loadEnv()` and read
+  `VITE_GEOSERVER_URL` at dev-server-config time (not just client-side via
+  `import.meta.env`). Added `server.proxy['/geoserver-proxy']` forwarding to
+  `VITE_GEOSERVER_URL` with `changeOrigin: true`, only registered when that env var
+  is set. This exists specifically to avoid needing CORS configured on GeoServer —
+  see the incident note below.
+
+### 6. File: `.claude/GEOSERVER_SETUP.md` (new)
+* Runbook for Fabio: native GeoServer install (no Docker), applying the schema
+  change to the live DB, running the backfill script, creating the `agrisuregis`
+  workspace + PostGIS datastore, publishing `tbl_farms`/`tbl_admin_boundaries` as
+  WMS/WFS layers, and a written incident note steering away from editing GeoServer's
+  `web.xml` for CORS (see below).
+
+### 7. File: `.claude/ENV_GUIDE.md`
+* Documented new `VITE_GEOSERVER_URL` variable.
+
+### 8. File: `frontend/.env.example` (was empty)
+* Populated with `VITE_API_BASE_URL` (pre-existing var, was missing from this file)
+  and the new `VITE_GEOSERVER_URL`, per `ENV_GUIDE.md`'s rule to keep this file in
+  sync with what the code reads.
+* **Follow-up correction**, found while testing: initially set
+  `VITE_API_BASE_URL=http://localhost:8000/api`, copying `ENV_GUIDE.md`'s documented
+  default verbatim without checking it against `frontend/src/lib/api.ts` — every path
+  there already includes its own leading `/api/...` (e.g. `request('/api/bulletins/')`),
+  so that combination produced `/api/api/bulletins/` and 404'd every core feature
+  (bulletins, farms, assessments, CSV upload) once Fabio copied it into a real `.env`.
+  Corrected to `http://localhost:8000` (no suffix) in both this file and
+  `ENV_GUIDE.md`. GeoServer's own requests were unaffected (they go through
+  `/geoserver-proxy`, not `API_BASE_URL`), which is what made this identifiable as a
+  separate bug rather than a GeoServer regression.
+
+### 9. Files: `.claude/PROJECT_CONTEXT.md`, `.claude/MASTER_DEVELOPMENT_CONTEXT.md`, `docs/README.md`
+* Added GeoServer to the written architecture descriptions, matching what
+  `docs/system architecture.png` already showed but the text docs omitted.
+
+### Incident: GeoServer outage from a bad CORS fix attempt
+While testing, the frontend's WFS call to GeoServer hit a CORS error (expected —
+GeoServer doesn't send CORS headers by default). The Jetty-bundled GeoServer
+distribution ships a *Tomcat*-specific `CorsFilter` block in `web.xml`, commented
+out; its own comment says "enable CORS in Tomcat," which doesn't apply to this
+Jetty-based install. Uncommenting it anyway threw `ClassNotFoundException:
+org.apache.catalina.filters.CorsFilter` and crashed the entire GeoServer webapp
+(503 on everything, including the admin UI). A follow-up attempt to hand-revert the
+comment markers over chat left the XML malformed (unclosed `<web-app>` tag),
+crashing it a second way. Recovered by extracting a clean `web.xml` from Fabio's
+original downloaded archive rather than continuing to hand-patch it. Fabio then
+deleted and re-extracted the whole GeoServer folder to get a guaranteed-clean state,
+which also reset `data_dir` (workspace/datastore/published layers) back to
+out-of-the-box defaults, requiring the workspace/datastore/publish steps to be
+redone. Final fix avoids `web.xml` entirely — see `vite.config.ts` above. Runbook
+updated with an explicit warning against editing that file for CORS.
+
+### Status / Next Steps
+* **Verified working end-to-end by Fabio**: schema applied, database reseeded,
+  `boundary_geom` backfilled, GeoServer installed (JDK 11 — JDK 17 hit a separate
+  `NoClassDefFoundError`/Marlin-renderer incompatibility on WMS `GetMap`/rendering
+  operations), workspace/datastore/layers republished after the folder
+  re-extraction reset them, frontend restarted with corrected env vars. Core app
+  features (bulletins, farms, assessments, CSV upload) and the GeoServer WFS
+  boundary layer + WMS farm overlay toggle all confirmed working in-browser.
+* Not pushed yet.
+
