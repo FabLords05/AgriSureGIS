@@ -7,7 +7,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
-from app.models.models import AdminBoundary, AreaExposureSummary, FarmerProfile, InsuranceRecord, RiskAssessment
+from app.models.models import AdminBoundary, AreaExposureSummary, FarmerProfile, InsuranceRecord, RiskAssessment, Typhoon
 from app.services.assessment_service import AssessmentService
 
 router = APIRouter(prefix="/assessments", tags=["assessments"])
@@ -161,4 +161,107 @@ def export_assessments_csv(
         iter([buffer.getvalue()]),
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=pcic_payout_export.csv"},
+    )
+
+
+def _build_pabs_rows(db: Session) -> list[dict]:
+    """
+    Shared row-building for the PABS-format views (JSON summary + CSV export):
+    every typhoon combined, not scoped to one bulletin/typhoon folder, in the
+    exact column layout PCIC's PABS system requires for indemnity computation,
+    per Fabio's request.
+
+    Three columns from the required format -- IRID, P, and S -- have no known
+    equivalent anywhere in our schema and no definition was available at
+    implementation time (not in the manuscript, not in any project doc). They are
+    left blank (None) rather than filled with guessed values. REMARKS is per the
+    source format's own legend a manually-inputted field, so it's left blank too,
+    for someone to fill in afterward -- this system has no source for that data.
+    """
+    assessments = (
+        db.query(RiskAssessment)
+        .filter(RiskAssessment.matrix_id.isnot(None))
+        .order_by(RiskAssessment.assessment_date.desc())
+        .all()
+    )
+
+    rows = []
+    for a in assessments:
+        insurance = a.insurance_record
+        farm = insurance.farm if insurance else None
+        farmer = (
+            db.query(FarmerProfile).filter(FarmerProfile.farmer_id == insurance.farmer_id).first()
+            if insurance and insurance.farmer_id
+            else None
+        )
+        summary = (
+            db.query(AreaExposureSummary).filter(AreaExposureSummary.summary_id == a.summary_id).first()
+            if a.summary_id
+            else None
+        )
+        typhoon = (
+            db.query(Typhoon).filter(Typhoon.typhoon_id == summary.typhoon_id).first()
+            if summary and summary.typhoon_id
+            else None
+        )
+
+        farmer_name = None
+        if farmer:
+            middle_initial = f" {farmer.middle_name[0]}." if farmer.middle_name else ""
+            farmer_name = f"{farmer.last_name}, {farmer.first_name}.{middle_initial}"
+
+        rows.append(
+            {
+                "assessment_id": a.assessment_id,
+                "FARMER_NAME": farmer_name,
+                "FARMERID": farmer.farmers_id if farmer else None,
+                "FARMID": farm.farm_id if farm else None,
+                "IRID": None,  # Unresolved -- see docstring above.
+                "AREA": float(farm.area_size) if farm and farm.area_size is not None else None,
+                "TYPHOON_NAME": typhoon.name if typhoon else None,
+                "PERIOD_OF_EXPOSURE": a.period_of_exposure,
+                "WIND_VELOCITY": a.wind_velocity,
+                # MM/DD/YYYY -- matches the PABS reference format exactly (see
+                # pabs_format_mockup.csv), not the raw datetime the DB stores.
+                "DATE_FILED": a.assessment_date.strftime("%m/%d/%Y") if a.assessment_date else None,
+                "DATE_OF_OCCURRENCE": summary.start_time.strftime("%m/%d/%Y") if summary and summary.start_time else None,
+                "P": None,  # Unresolved -- see docstring above.
+                "S": None,  # Unresolved -- see docstring above.
+                "AC": float(insurance.amount_cover) if insurance and insurance.amount_cover is not None else None,
+                "REMARKS": None,  # Manually inputted per the source format's own legend.
+                # Extra fields beyond the PABS spec, kept for on-screen filtering/context
+                # (not written to the CSV export).
+                "municipality": farm.boundary.municipality if farm and farm.boundary else None,
+                "province": farm.boundary.province if farm and farm.boundary else None,
+            }
+        )
+    return rows
+
+
+@router.get("/pabs-summary")
+def get_assessments_pabs_summary(db: Session = Depends(get_db)):
+    """JSON version of the PABS-format combined summary, for on-screen display."""
+    return {"status": "success", "data": _build_pabs_rows(db)}
+
+
+@router.get("/export-pabs")
+def export_assessments_pabs_csv(db: Session = Depends(get_db)):
+    """Downloads the same combined PABS-format summary as a CSV file."""
+    rows = _build_pabs_rows(db)
+    pabs_columns = [
+        "FARMER_NAME", "FARMERID", "FARMID", "IRID", "AREA", "TYPHOON_NAME",
+        "PERIOD_OF_EXPOSURE", "WIND_VELOCITY", "DATE_FILED", "DATE_OF_OCCURRENCE",
+        "P", "S", "AC", "REMARKS",
+    ]
+    dataframe = pd.DataFrame(rows, columns=pabs_columns)
+    buffer = io.StringIO()
+    # float_format matches AREA/AC to the reference format's 2-decimal style
+    # (e.g. "16542.00", not "16542.0").
+    dataframe.to_csv(buffer, index=False, float_format="%.2f")
+    buffer.seek(0)
+
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=pabs_indemnity_export.csv"},
     )

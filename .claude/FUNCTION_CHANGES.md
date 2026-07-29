@@ -1019,3 +1019,57 @@ instead.
   day, but no Windows hardware available to test the walkthrough end-to-end.
 * Not pushed yet.
 
+---
+
+## [2026-07-29] - Assessment & Reporting: PABS-Format Combined Summary + Exposure Summary Mock
+
+**Branch:** `fabio/db/pabs-ingestion-gpx-matching` (James's frontend work + supporting backend fix, per Fabio's request to use this branch — committed locally, not pushed yet).
+
+Restructured the Assessment & Reporting screen around the PABS-mandated combined-CSV format (all typhoons together, not scoped to one bulletin/typhoon), then iterated through several rounds of Fabio's feedback (relayed through James) on how the computation trigger and its result table should actually be shaped.
+
+### 1. File: `backend/app/api/assessments.py`
+* Added **`_build_pabs_rows()`**: shared row-builder joining `RiskAssessment` → `InsuranceRecord` → `Farm` → `FarmerProfile`, and `RiskAssessment` → `AreaExposureSummary` → `Typhoon`, filtered to `matrix_id IS NOT NULL` (real computed assessments only, excludes legacy CSV-import seed rows). `IRID`, `P`, `S` have no known schema equivalent and are left `None`; `REMARKS` is a manually-inputted field per the source format's own legend, also left `None`.
+* Added **`GET /pabs-summary`** (JSON) and **`GET /export-pabs`** (CSV) using that shared builder.
+* `DATE_FILED` / `DATE_OF_OCCURRENCE` now formatted `MM/DD/YYYY` (previously raw datetimes) to match the reference format (`pabs_format_mockup.csv`) exactly.
+* `export_assessments_pabs_csv()`: added `float_format="%.2f"` so `AC`/`AREA` come out as e.g. `"16542.00"`, matching the reference CSV's decimal style instead of pandas' default float printing (`16542.0`).
+
+### 2. File: `frontend/src/lib/api.ts`
+* Added `PabsAssessmentRow` type, `getAssessmentsPabsSummary()`, `getAssessmentsExportPabsUrl()`.
+* Added `AreaExposureSummary` type, `ComputeExposureResult` type, `computeExposure()` — supports Monitoring's new TCB Exposure Summary modal (see `MonitoringModule.tsx` entry below).
+
+### 3. File: `frontend/src/app/App.tsx`
+* `AssessmentModule` no longer receives `selectedBulletin`/`onSelectBulletin` — Assessment stopped needing shared bulletin-selection state once it moved to the always-combined summary view.
+
+### 4. File: `frontend/src/app/components/AssessmentModule.tsx`
+* Net rewrite of the screen. In order, per successive rounds of feedback:
+  * Replaced the mock/prototype table with the real PABS-format combined summary (`getAssessmentsPabsSummary()`), sortable/filterable by municipality and wind signal, plus a "Review & Export CSV" modal previewing exactly what `/export-pabs` will download.
+  * Added a temporary `TEMP_PREVIEW_ROWS` hardcoded fallback so James could see the table populated before any real assessment existed — removed once real backend wiring was confirmed working (a 0-row real result is a legitimate outcome, not a bug, per `AssessmentService.calculate_for_bulletin()`'s eligibility rules).
+  * Added, then removed, a per-bulletin "Compute Assessments" trigger (`calculateAssessments()`) — removed per Fabio's correction that computation must combine a typhoon's whole TCB range into one result, not run per individual bulletin.
+  * Sidebar iterated through several shapes on Fabio's/his teammate's feedback: per-typhoon folders (too many, including duplicate names from a `typhoon_id` bulletin-title-parsing bug) → a single flat "All Bulletins" list → a typhoon list deduped by `typhoon_name` (not `typhoon_id`, to actually fix the duplicate-name display) → finally reference-only (no selection at all), since Fabio's final direction was that Compute always combines every typhoon into one result, matching the farmer-level table's own "all typhoons combined" behavior.
+  * Added a mocked "Exposure Summary — All Typhoons Combined" panel (Typhoon / Areas / Signal Number / Exposure (h) / Start Time / End Time columns, per Fabio's exact spec) behind a "Compute Exposure Summary" button in the top bar — explicitly marked "Mock preview — pending backend wiring" since Fabio said he's wiring the real combined endpoint himself.
+  * Added **`formatPabsCell()`** so the CSV preview modal's on-screen `AREA`/`AC` values match the CSV export's `float_format="%.2f"` exactly (the modal claims "exactly what the downloaded CSV will contain" — now genuinely true).
+
+### 5. File: `frontend/src/app/components/MonitoringModule.tsx`
+* Added **`ExposureSummaryModal`** + **`handleViewExposure()`**: a per-bulletin view (`POST /{tcb_id}/compute-exposure` via the new `computeExposure()`) showing affected areas, max signal, start/end time, exposure hours, and 6h+ eligibility — a real-data view, separate from Assessment's new mocked all-typhoons panel above.
+
+### Status / Next Steps
+* Assessment's Exposure Summary panel is frontend-mocked only (`MOCK_EXPOSURE_ROWS`) — Fabio said he'll wire it to a real combined-TCB backend endpoint himself; the frontend only needs `handleComputeExposure()` swapped to call it once that endpoint exists.
+* `IRID`, `P`, `S` columns remain undefined/blank in the PABS output — still no schema/doc source, deferred per earlier agreement with Fabio ("we will deal about it later").
+* `MonitoringModule.tsx` still uses `mockFarmers` for its stat cards (`totalFarms`, etc.) in this diff — a separate mock-data-removal pass noted elsewhere is not reflected in this file's current working-tree state; flagging so it isn't assumed done.
+* Two mockup CSVs were created outside the repo for manual testing (not part of this commit): `C:\Users\User\Desktop\pabs_format_mockup.csv` (reference PABS-format sample) and `C:\Users\User\Desktop\mockup_assessment_test_data.csv` (uploadable via `/api/upload/csv`, Talakag/Claveria boundaries, for testing real Compute Assessments end-to-end).
+* Not pushed yet — awaiting Fabio's/James's own push per `CLAUDE.md`'s git-handoff rules.
+
+---
+
+## [2026-07-29] - Merge: Summary-Tcb-Pabs-format into pabs-ingestion-gpx-matching
+
+Merged `origin/Summary-Tcb-Pabs-format` (PABS-format Assessment/Exposure Summary work,
+entry above) into `fabio/db/pabs-ingestion-gpx-matching`, per Fabio's request to
+consolidate the two branches. `origin/Summary-Tcb-Pabs-format` is being deleted on
+the remote after this merge is pushed.
+
+* Clean merge on all files except this one — both branches had independently
+  appended a changelog entry at the same location; resolved by keeping both,
+  in chronological order.
+* Not pushed yet.
+

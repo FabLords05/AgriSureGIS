@@ -114,11 +114,7 @@ export default function App() {
             />
           )}
           {activeModule === "assessment"  && (
-            <AssessmentModule
-              darkMode={darkMode}
-              selectedBulletin={selectedBulletin}
-              onSelectBulletin={setSelectedBulletin}
-            />
+            <AssessmentModule darkMode={darkMode} />
           )}
           {activeModule === "calibration" && (
             <CalibrationModule
