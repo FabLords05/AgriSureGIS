@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import {
   Settings, Key, Database, Users, Shield, Save, AlertTriangle,
   ChevronDown, ChevronRight, RefreshCw, Trash2, Plus, CheckCircle2,
-  Server, Bell, Clock, ToggleLeft, ToggleRight, Eye, EyeOff, DollarSign
+  Server, Bell, Clock, ToggleLeft, ToggleRight, Eye, EyeOff, DollarSign, Wifi
 } from "lucide-react";
 import { DAMAGE_FACTORS, GrowthStage } from "./mockData";
 import { getParserSettings, updateParserSettings } from "@/lib/api";
@@ -87,10 +87,20 @@ export function CalibrationModule({ coverageRatePerHa, onCoverageRateChange }: C
   const [addingUser, setAddingUser]   = useState(false);
   const [newUser, setNewUser]         = useState({ name:"", role:"GIS Specialist", email:"", password:"" });
 
+  // Backend API status -- real, not mock. Piggybacks on the getParserSettings()
+  // call this screen already makes on mount, rather than firing an extra
+  // request just to check connectivity.
+  const [backendOk, setBackendOk] = useState<boolean | null>(null);
+  const [lastCheck, setLastCheck] = useState<string | null>(null);
+
   useEffect(() => {
     getParserSettings()
-      .then(s => setParserInterval(s.polling_interval_hours))
-      .catch(() => {}); // keep the default of 3 if the backend isn't reachable yet
+      .then(s => {
+        setParserInterval(s.polling_interval_hours);
+        setBackendOk(true);
+      })
+      .catch(() => setBackendOk(false)) // keep the default of 3 if the backend isn't reachable yet
+      .finally(() => setLastCheck(new Date().toLocaleTimeString()));
   }, []);
 
   const handleSave = () => {
@@ -262,6 +272,26 @@ export function CalibrationModule({ coverageRatePerHa, onCoverageRateChange }: C
             <Save size={13} /> Save All Settings
           </button>
         </div>
+
+        {/* System Status -- moved here from Monitoring & Extraction */}
+        <Section title="System Status" icon={<Wifi size={15} />}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              {backendOk
+                ? <CheckCircle2 size={12} className="text-emerald-500 shrink-0" />
+                : <AlertTriangle size={12} className="text-amber-500 shrink-0" />
+              }
+              <span className="text-[11px]">Backend API</span>
+            </div>
+            <span className="text-[10px] text-muted-foreground">
+              {backendOk === null ? "Checking…" : backendOk ? "Connected" : "Unreachable"}
+            </span>
+          </div>
+          <div className="mt-3 pt-2 border-t border-border flex items-center gap-1.5">
+            <Clock size={10} className="text-muted-foreground" />
+            <span className="text-[10px] text-muted-foreground">Last check: {lastCheck ?? "—"}</span>
+          </div>
+        </Section>
 
         {/* Coverage Parameters */}
         <Section title="RSBSA Coverage Rate (Sum Insured)" icon={<DollarSign size={15} />}>

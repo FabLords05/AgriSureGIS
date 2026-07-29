@@ -1,40 +1,25 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
-  Activity, Download, CheckCircle, Clock, AlertTriangle, FileDown,
-  Wifi, RefreshCw, Eye, BarChart2, TrendingUp, Zap,
-  Satellite, X, MapPin, User, MapPinned
+  Activity, Download, FileDown,
+  RefreshCw, Eye, BarChart2, TrendingUp, Zap,
+  Satellite, X, MapPin, User, MapPinned, ShieldCheck
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip as RTooltip, ResponsiveContainer,
   PieChart, Pie, Cell, LineChart, Line, CartesianGrid, Legend
 } from "recharts";
-import { mockFarmers, FarmerRecord } from "./mockData";
 import {
-  Bulletin, TcbSignal, getBulletins, parseBulletins, getBulletinSignals,
-  computeExposure, ComputeExposureResult,
+  Bulletin, TcbSignal, Farm, Assessment, InsuranceSummary,
+  getBulletins, parseBulletins, getBulletinSignals,
+  computeExposure, ComputeExposureResult, getFarms, getAssessments, getInsuranceSummary,
 } from "@/lib/api";
 
-const signalChartData = [
-  { signal:"Signal 1", farms:6,  area:12.0 },
-  { signal:"Signal 2", farms:11, area:26.0 },
-  { signal:"Signal 3", farms:5,  area:14.5 },
-];
+interface FarmRow extends Farm {
+  assessment: Assessment | null;
+}
 
-const growthPieData = [
-  { name:"Seedling",     value:5, color:"#86efac" },
-  { name:"Vegetative",   value:6, color:"#22c55e" },
-  { name:"Reproductive", value:5, color:"#eab308" },
-  { name:"Ripening",     value:4, color:"#f59e0b" },
-];
-
-const timelineData = [
-  { time:"00:00", bulletins:1, farms:0 },
-  { time:"03:00", bulletins:2, farms:5 },
-  { time:"06:00", bulletins:3, farms:11 },
-  { time:"09:00", bulletins:4, farms:16 },
-  { time:"12:00", bulletins:5, farms:19 },
-  { time:"15:00", bulletins:6, farms:19 },
-];
+const GROWTH_STAGE_COLORS = ["#22c55e", "#eab308", "#f59e0b", "#86efac", "#a3a3a3"];
+const SIGNAL_BAR_COLOR = "#166534";
 
 function uniqueAreas(signals: TcbSignal[]): string[] {
   return Array.from(new Set(signals.map(s => s.area_name)));
@@ -257,8 +242,11 @@ function ExposureSummaryModal({
   );
 }
 
-// ─── SAR Quick-View Modal (mock — no backend GEE integration exists yet) ────
-function SARQuickViewModal({ farmer, onClose }: { farmer: FarmerRecord; onClose: () => void }) {
+// ─── SAR Quick-View Modal ─────────────────────────────────────────────────
+// Farm identity/assessment data is real (farmRows below); the SAR imagery
+// itself is still a simulated canvas render -- no real Google Earth Engine
+// integration exists in this codebase to source actual Sentinel-1 imagery.
+function SARQuickViewModal({ farm, onClose }: { farm: FarmRow; onClose: () => void }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
@@ -268,7 +256,7 @@ function SARQuickViewModal({ farmer, onClose }: { farmer: FarmerRecord; onClose:
     if (!ctx) return;
     const W = canvas.width, H = canvas.height;
 
-    let seed = farmer.rowId * 1234567;
+    let seed = farm.farm_id * 1234567;
     const rand = () => { seed = (seed * 16807 + 0) % 2147483647; return seed / 2147483647; };
 
     const imgData = ctx.createImageData(W, H);
@@ -311,7 +299,7 @@ function SARQuickViewModal({ farmer, onClose }: { farmer: FarmerRecord; onClose:
 
     ctx.fillStyle = "#fbbf24";
     ctx.font = "bold 10px monospace";
-    ctx.fillText(farmer.farmId, fx + 4, fy - 4);
+    ctx.fillText(`#${farm.farm_id}`, fx + 4, fy - 4);
 
     ctx.fillStyle = "rgba(0,0,0,0.55)";
     ctx.fillRect(4, H - 32, 130, 28);
@@ -321,11 +309,12 @@ function SARQuickViewModal({ farmer, onClose }: { farmer: FarmerRecord; onClose:
     ctx.fillStyle = "rgba(30,100,220,0.7)"; ctx.fillRect(8, H - 18, 8, 8);
     ctx.fillStyle = "#fff"; ctx.fillText("Flood Extent", 20, H - 10);
 
-  }, [farmer]);
+  }, [farm]);
 
-  const floodPct = 25 + (farmer.rowId * 7) % 45;
-  const plantedPct = 60 + (farmer.rowId * 13) % 35;
-  const coherence = (0.42 + (farmer.rowId * 0.037) % 0.4).toFixed(2);
+  const floodPct = 25 + (farm.farm_id * 7) % 45;
+  const plantedPct = 60 + (farm.farm_id * 13) % 35;
+  const coherence = (0.42 + (farm.farm_id * 0.037) % 0.4).toFixed(2);
+  const signalNo = farm.assessment?.wind_velocity ?? null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65">
@@ -334,7 +323,7 @@ function SARQuickViewModal({ farmer, onClose }: { farmer: FarmerRecord; onClose:
           <div className="flex items-center gap-2.5">
             <Satellite size={15} className="text-emerald-400" />
             <div>
-              <p className="text-[12px] font-bold text-white">Sentinel-1 SAR Imagery — {farmer.farmId}</p>
+              <p className="text-[12px] font-bold text-white">Sentinel-1 SAR Imagery — Farm #{farm.farm_id}</p>
               <p className="text-[10px] text-white/60">Google Earth Engine · C-Band SAR · VV+VH · simulated preview</p>
             </div>
           </div>
@@ -357,17 +346,17 @@ function SARQuickViewModal({ farmer, onClose }: { farmer: FarmerRecord; onClose:
             <div className="px-3 py-2.5 border-b border-border">
               <div className="flex items-center gap-1.5 mb-2">
                 <User size={11} className="text-[#166534]" />
-                <p className="text-[11px] font-bold">{farmer.insuredName}</p>
+                <p className="text-[11px] font-bold">{farm.farmer_name ?? "Unknown farmer"}</p>
               </div>
               <div className="space-y-1 text-[10px]">
-                <div className="flex justify-between"><span className="text-muted-foreground">Farm ID</span><span className="font-mono text-[#166534]">{farmer.farmId}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Municipality</span><span>{farmer.municipality}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Area</span><span>{farmer.areaHectare.toFixed(2)} ha</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Growth Stage</span><span className="font-medium">{farmer.growthStage}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Farm ID</span><span className="font-mono text-[#166534]">#{farm.farm_id}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Municipality</span><span>{farm.municipality ?? "—"}</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Area</span><span>{(farm.area_size ?? 0).toFixed(2)} ha</span></div>
+                <div className="flex justify-between"><span className="text-muted-foreground">Crop Stage</span><span className="font-medium">{farm.assessment?.crop_stage ?? "Not yet assessed"}</span></div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Signal</span>
-                  <span className={`px-1.5 py-0.5 rounded border text-[9px] font-bold ${farmer.signalNo === 2 ? "bg-amber-100 text-amber-700 border-amber-200" : farmer.signalNo === 3 ? "bg-red-100 text-red-700 border-red-200" : "bg-emerald-100 text-emerald-700 border-emerald-200"}`}>
-                    S{farmer.signalNo}
+                  <span className={`px-1.5 py-0.5 rounded border text-[9px] font-bold ${signalNo === 2 ? "bg-amber-100 text-amber-700 border-amber-200" : signalNo != null && signalNo >= 3 ? "bg-red-100 text-red-700 border-red-200" : "bg-emerald-100 text-emerald-700 border-emerald-200"}`}>
+                    {signalNo != null ? `S${signalNo}` : "—"}
                   </span>
                 </div>
               </div>
@@ -424,7 +413,6 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
   const [isLoadingBulletins, setIsLoadingBulletins] = useState(false);
   const [isParsing, setIsParsing] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [lastCheck, setLastCheck] = useState<string | null>(null);
 
   const [selectedSignals, setSelectedSignals] = useState<TcbSignal[]>([]);
   const [isLoadingSelectedSignals, setIsLoadingSelectedSignals] = useState(false);
@@ -438,12 +426,81 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
   const [isLoadingExposure, setIsLoadingExposure] = useState(false);
   const [exposureError, setExposureError] = useState<string | null>(null);
 
-  const [sarFarmer, setSarFarmer] = useState<FarmerRecord | null>(null);
+  const [sarFarmer, setSarFarmer] = useState<FarmRow | null>(null);
 
-  const totalFarms = mockFarmers.length;
-  const plantedFarms = mockFarmers.filter(f => f.planted).length;
-  const totalArea = mockFarmers.reduce((s, f) => s + (f.planted ? f.areaHectare : 0), 0);
-  const totalIndemnity = mockFarmers.reduce((s, f) => s + f.indemnityPayment, 0);
+  const [farms, setFarms] = useState<Farm[]>([]);
+  const [assessments, setAssessments] = useState<Assessment[]>([]);
+  const [insuranceSummary, setInsuranceSummary] = useState<InsuranceSummary | null>(null);
+
+  useEffect(() => {
+    getFarms().then(res => setFarms(res.data)).catch(() => setFarms([]));
+    getAssessments().then(res => setAssessments(res.data)).catch(() => setAssessments([]));
+    getInsuranceSummary().then(setInsuranceSummary).catch(() => setInsuranceSummary(null));
+  }, []);
+
+  // Most recent assessment per farm_id (list_assessments() is ordered by assessment_date desc).
+  const assessmentByFarmId = useMemo(() => {
+    const map = new Map<number, Assessment>();
+    for (const a of assessments) {
+      if (a.farm_id != null && !map.has(a.farm_id)) map.set(a.farm_id, a);
+    }
+    return map;
+  }, [assessments]);
+
+  const farmRows: FarmRow[] = useMemo(
+    () => farms.map(f => ({ ...f, assessment: assessmentByFarmId.get(f.farm_id) ?? null })),
+    [farms, assessmentByFarmId]
+  );
+
+  // "Affected" = has a real computed assessment (wind_velocity set) -- excludes
+  // the legacy CSV-import seed rows, which only carry a crop_stage placeholder
+  // and never get wind_velocity/period_of_exposure populated (see upload.py).
+  const affectedFarmRows = useMemo(() => farmRows.filter(f => f.assessment?.wind_velocity != null), [farmRows]);
+
+  const totalFarms = farms.length;
+  const affectedFarms = affectedFarmRows.length;
+  const totalArea = affectedFarmRows.reduce((s, f) => s + (f.area_size ?? 0), 0);
+  const totalIndemnity = affectedFarmRows.reduce((s, f) => s + (f.assessment?.final_indemnity_payment ?? 0), 0);
+
+  const growthStageData = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const f of farmRows) {
+      const stage = f.assessment?.crop_stage ?? "Not Assessed";
+      counts.set(stage, (counts.get(stage) ?? 0) + 1);
+    }
+    return Array.from(counts.entries()).map(([name, value], i) => ({
+      name, value, color: GROWTH_STAGE_COLORS[i % GROWTH_STAGE_COLORS.length],
+    }));
+  }, [farmRows]);
+
+  const signalChartData = useMemo(() => {
+    const bySignal = new Map<number, { farms: number; area: number }>();
+    for (const f of affectedFarmRows) {
+      const signal = f.assessment!.wind_velocity!;
+      const entry = bySignal.get(signal) ?? { farms: 0, area: 0 };
+      entry.farms += 1;
+      entry.area += f.area_size ?? 0;
+      bySignal.set(signal, entry);
+    }
+    return Array.from(bySignal.entries())
+      .sort(([a], [b]) => a - b)
+      .map(([signal, v]) => ({ signal: `Signal ${signal}`, farms: v.farms, area: Math.round(v.area * 10) / 10 }));
+  }, [affectedFarmRows]);
+
+  const bulletinTimelineData = useMemo(() => {
+    const byDate = new Map<string, number>();
+    for (const b of bulletins) {
+      if (!b.issued_at) continue;
+      const day = b.issued_at.slice(0, 10);
+      byDate.set(day, (byDate.get(day) ?? 0) + 1);
+    }
+    const sortedDays = Array.from(byDate.keys()).sort();
+    let cumulative = 0;
+    return sortedDays.map(day => {
+      cumulative += byDate.get(day)!;
+      return { day, bulletins: cumulative };
+    });
+  }, [bulletins]);
 
   const loadBulletins = useCallback(async () => {
     setIsLoadingBulletins(true);
@@ -451,7 +508,6 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
     try {
       const data = await getBulletins();
       setBulletins(data);
-      setLastCheck(new Date().toLocaleTimeString());
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : "Failed to load bulletins.");
     } finally {
@@ -544,13 +600,14 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
   const statCards = [
     { label:"Active Typhoon",       value: latestBulletin?.typhoon_name ?? "—", sub: latestBulletin?.category ?? "No bulletins yet", icon:<Zap size={18} />,        color:"#ef4444", bg:"bg-red-50 dark:bg-red-950/30",     border:"border-red-200 dark:border-red-900" },
     { label:"TCBs Downloaded",      value: bulletins.length, sub:"from PAGASA parser",  icon:<Download size={18} />,   color:"#1e3a5f", bg:"bg-blue-50 dark:bg-blue-950/30",   border:"border-blue-200 dark:border-blue-900" },
-    { label:"Affected Farms",       value:`${plantedFarms}/${totalFarms}`,  sub:`${totalArea.toFixed(1)} ha planted`,icon:<Activity size={18} />, color:"#166534", bg:"bg-green-50 dark:bg-green-950/30", border:"border-green-200 dark:border-green-900" },
-    { label:"Est. Total Indemnity", value:`₱${(totalIndemnity/1000).toFixed(0)}K`, sub:"Pending finalization", icon:<BarChart2 size={18} />, color:"#ca8a04", bg:"bg-amber-50 dark:bg-amber-950/30", border:"border-amber-200 dark:border-amber-900" },
+    { label:"Affected Farms",       value:`${affectedFarms}/${totalFarms}`,  sub:`${totalArea.toFixed(1)} ha`,icon:<Activity size={18} />, color:"#166534", bg:"bg-green-50 dark:bg-green-950/30", border:"border-green-200 dark:border-green-900" },
+    { label:"Est. Total Indemnity", value:`₱${(totalIndemnity/1000).toFixed(0)}K`, sub:"From real computed assessments", icon:<BarChart2 size={18} />, color:"#ca8a04", bg:"bg-amber-50 dark:bg-amber-950/30", border:"border-amber-200 dark:border-amber-900" },
+    { label:"Active Insurance",     value: insuranceSummary ? `${insuranceSummary.active_count}/${insuranceSummary.total_count}` : "—", sub:"Within coverage window", icon:<ShieldCheck size={18} />, color:"#7c3aed", bg:"bg-purple-50 dark:bg-purple-950/30", border:"border-purple-200 dark:border-purple-900" },
   ];
 
   return (
-    <div className="h-full overflow-auto bg-background p-4 space-y-4">
-      {sarFarmer && <SARQuickViewModal farmer={sarFarmer} onClose={() => setSarFarmer(null)} />}
+    <div className="h-full overflow-hidden bg-background p-4 flex flex-col gap-4">
+      {sarFarmer && <SARQuickViewModal farm={sarFarmer} onClose={() => setSarFarmer(null)} />}
       {viewingTCB && (
         <TCBViewerModal
           bulletin={viewingTCB}
@@ -570,7 +627,7 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
       )}
 
       {/* Stat Cards */}
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid grid-cols-5 gap-3 shrink-0">
         {statCards.map((c, i) => (
           <div key={i} className={`bg-card border rounded-xl p-4 ${c.border}`}>
             <div className="flex items-start justify-between">
@@ -587,9 +644,9 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
         ))}
       </div>
 
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-3 gap-4 flex-1 min-h-0">
         {/* TCB Bulletin List */}
-        <div className="col-span-2 bg-card border border-border rounded-xl flex flex-col overflow-hidden">
+        <div className="col-span-2 bg-card border border-border rounded-xl flex flex-col overflow-hidden min-h-0">
           <div className="flex items-center justify-between px-4 py-3 border-b border-border">
             <div className="flex items-center gap-2">
               <FileDown size={15} className="text-[#166534]" />
@@ -609,14 +666,16 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
             <div className="px-4 py-2 text-[11px] text-white bg-red-600">{loadError}</div>
           )}
 
-          <div className="flex-1 overflow-auto">
+          {/* Fills whatever space is left in this card and scrolls internally --
+              the page itself no longer scrolls, only this list does. */}
+          <div className="flex-1 min-h-0 overflow-auto">
             {isLoadingBulletins && bulletins.length === 0 ? (
               <p className="px-4 py-3 text-[11px] text-muted-foreground">Loading bulletins…</p>
             ) : bulletins.length === 0 ? (
               <p className="px-4 py-3 text-[11px] text-muted-foreground">No bulletins parsed yet.</p>
             ) : (
               <table className="w-full text-[11px]">
-                <thead>
+                <thead className="sticky top-0 z-10 bg-card">
                   <tr className="bg-muted/50 text-muted-foreground">
                     <th className="px-3 py-2 text-left font-semibold">Bulletin</th>
                     <th className="px-3 py-2 text-left font-semibold">Typhoon</th>
@@ -694,23 +753,26 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
                     <p className="text-[10px] font-semibold">Farmers Under Signal No. {selectedMaxSignal} — Click to view SAR Imagery</p>
                   </div>
                   <div className="flex flex-wrap gap-1.5">
-                    {mockFarmers
-                      .filter(f => f.signalNo === selectedMaxSignal && f.planted)
+                    {affectedFarmRows
+                      .filter(f => f.assessment?.wind_velocity === selectedMaxSignal)
                       .slice(0, 10)
                       .map(f => (
                         <button
-                          key={f.farmId}
+                          key={f.farm_id}
                           onClick={() => setSarFarmer(f)}
                           className="flex items-center gap-1 px-2 py-1 rounded-lg bg-card border border-border hover:bg-[#166534] hover:text-white hover:border-[#166534] transition-all group text-[10px]"
-                          title={`${f.insuredName} — ${f.municipality}`}
+                          title={`${f.farmer_name ?? "Unknown farmer"} — ${f.municipality ?? "—"}`}
                         >
                           <MapPin size={9} className="text-[#166534] group-hover:text-white" />
-                          <span className="font-mono">{f.farmId}</span>
-                          <span className="text-muted-foreground group-hover:text-white/80 text-[9px]">{f.insuredName.split(" ").pop()}</span>
+                          <span className="font-mono">#{f.farm_id}</span>
+                          <span className="text-muted-foreground group-hover:text-white/80 text-[9px]">{f.farmer_name?.split(" ").pop() ?? "—"}</span>
                           <Satellite size={8} className="text-muted-foreground group-hover:text-white/80 ml-0.5" />
                         </button>
                       ))
                     }
+                    {affectedFarmRows.filter(f => f.assessment?.wind_velocity === selectedMaxSignal).length === 0 && (
+                      <p className="text-[10px] text-muted-foreground">No assessed farms recorded under this signal level yet.</p>
+                    )}
                   </div>
                 </div>
               )}
@@ -718,109 +780,90 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
           )}
         </div>
 
-        {/* Right Panel */}
+        {/* Right Panel -- System Status moved to Calibration & Settings */}
         <div className="flex flex-col gap-4">
-          {/* System Status */}
-          <div className="bg-card border border-border rounded-xl p-4">
-            <div className="flex items-center gap-2 mb-3">
-              <Wifi size={14} className="text-[#166534]" />
-              <span className="text-xs font-semibold">System Status</span>
-            </div>
-            <div className="space-y-2">
-              {[
-                { label:"Backend API",      ok: !loadError, detail: loadError ? "Unreachable" : "Connected" },
-                { label:"GEE Connection",   ok:true,  detail:"1000 EEC allocated (mock)"  },
-                { label:"Email Alerts",     ok:true,  detail:"SMTP connected (mock)"      },
-                { label:"Database Backup",  ok:false, detail:"Last: 30 Oct 2024 (mock)"   },
-                { label:"Session Monitor",  ok:true,  detail:"5-min timeout active (mock)"},
-              ].map((s, i) => (
-                <div key={i} className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    {s.ok
-                      ? <CheckCircle size={11} className="text-emerald-500 shrink-0" />
-                      : <AlertTriangle size={11} className="text-amber-500 shrink-0" />
-                    }
-                    <span className="text-[11px]">{s.label}</span>
-                  </div>
-                  <span className="text-[10px] text-muted-foreground">{s.detail}</span>
-                </div>
-              ))}
-            </div>
-            <div className="mt-3 pt-2 border-t border-border flex items-center gap-1.5">
-              <Clock size={10} className="text-muted-foreground" />
-              <span className="text-[10px] text-muted-foreground">Last check: {lastCheck ?? "—"}</span>
-            </div>
-          </div>
-
-          {/* Growth Stage Pie (mock — no assessment endpoint match yet) */}
+          {/* Growth Stage Distribution -- from real assessment.crop_stage values */}
           <div className="bg-card border border-border rounded-xl p-4 flex-1">
             <div className="flex items-center gap-2 mb-2">
               <TrendingUp size={14} className="text-[#ca8a04]" />
               <span className="text-xs font-semibold">Growth Stage Distribution</span>
             </div>
-            <ResponsiveContainer width="100%" height={130}>
-              <PieChart>
-                <Pie data={growthPieData} dataKey="value" cx="50%" cy="50%" innerRadius={30} outerRadius={55} paddingAngle={3}>
-                  {growthPieData.map((d, i) => <Cell key={i} fill={d.color} />)}
-                </Pie>
-                <RTooltip
-                  contentStyle={{ backgroundColor: darkMode ? "#111e11" : "#fff", border:"1px solid #ccc", borderRadius:6, fontSize:11 }}
-                  formatter={(v: number) => [`${v} farms`, ""]}
-                />
-              </PieChart>
-            </ResponsiveContainer>
-            <div className="flex flex-wrap gap-x-2 gap-y-1 mt-1">
-              {growthPieData.map(d => (
-                <span key={d.name} className="flex items-center gap-1 text-[10px]">
-                  <span className="w-2 h-2 rounded-sm" style={{ backgroundColor: d.color }} />
-                  {d.name} ({d.value})
-                </span>
-              ))}
-            </div>
+            {growthStageData.length === 0 ? (
+              <p className="text-[11px] text-muted-foreground py-6 text-center">No farms yet.</p>
+            ) : (
+              <>
+                <ResponsiveContainer width="100%" height={130}>
+                  <PieChart>
+                    <Pie data={growthStageData} dataKey="value" cx="50%" cy="50%" innerRadius={30} outerRadius={55} paddingAngle={3}>
+                      {growthStageData.map((d, i) => <Cell key={i} fill={d.color} />)}
+                    </Pie>
+                    <RTooltip
+                      contentStyle={{ backgroundColor: darkMode ? "#111e11" : "#fff", border:"1px solid #ccc", borderRadius:6, fontSize:11 }}
+                      formatter={(v: number) => [`${v} farms`, ""]}
+                    />
+                  </PieChart>
+                </ResponsiveContainer>
+                <div className="flex flex-wrap gap-x-2 gap-y-1 mt-1">
+                  {growthStageData.map(d => (
+                    <span key={d.name} className="flex items-center gap-1 text-[10px]">
+                      <span className="w-2 h-2 rounded-sm" style={{ backgroundColor: d.color }} />
+                      {d.name} ({d.value})
+                    </span>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
         </div>
       </div>
 
-      {/* Bottom Charts Row (mock — no assessment endpoint match yet) */}
-      <div className="grid grid-cols-2 gap-4">
+      {/* Bottom Charts Row -- from real assessment/bulletin data */}
+      <div className="grid grid-cols-2 gap-4 shrink-0">
         <div className="bg-card border border-border rounded-xl p-4">
           <div className="flex items-center gap-2 mb-3">
             <BarChart2 size={14} className="text-[#1e3a5f]" />
             <span className="text-xs font-semibold">Farms by Signal Number</span>
           </div>
-          <ResponsiveContainer width="100%" height={150}>
-            <BarChart data={signalChartData} barSize={28}>
-              <CartesianGrid strokeDasharray="3 3" stroke={darkMode ? "#1c2e1c" : "#e5e7eb"} />
-              <XAxis dataKey="signal" tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
-              <RTooltip
-                contentStyle={{ backgroundColor: darkMode ? "#111e11" : "#fff", border:"1px solid #ccc", borderRadius:6, fontSize:11 }}
-              />
-              <Bar dataKey="farms"  name="Farms"       fill="#166534" radius={[4,4,0,0]} />
-              <Bar dataKey="area"   name="Area (ha)"   fill="#1e3a5f" radius={[4,4,0,0]} />
-              <Legend iconSize={10} iconType="square" wrapperStyle={{ fontSize: 10 }} />
-            </BarChart>
-          </ResponsiveContainer>
+          {signalChartData.length === 0 ? (
+            <p className="text-[11px] text-muted-foreground py-8 text-center">No assessed farms yet.</p>
+          ) : (
+            <ResponsiveContainer width="100%" height={150}>
+              <BarChart data={signalChartData} barSize={28}>
+                <CartesianGrid strokeDasharray="3 3" stroke={darkMode ? "#1c2e1c" : "#e5e7eb"} />
+                <XAxis dataKey="signal" tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
+                <RTooltip
+                  contentStyle={{ backgroundColor: darkMode ? "#111e11" : "#fff", border:"1px solid #ccc", borderRadius:6, fontSize:11 }}
+                />
+                <Bar dataKey="farms"  name="Farms"       fill={SIGNAL_BAR_COLOR} radius={[4,4,0,0]} />
+                <Bar dataKey="area"   name="Area (ha)"   fill="#1e3a5f" radius={[4,4,0,0]} />
+                <Legend iconSize={10} iconType="square" wrapperStyle={{ fontSize: 10 }} />
+              </BarChart>
+            </ResponsiveContainer>
+          )}
         </div>
 
         <div className="bg-card border border-border rounded-xl p-4">
           <div className="flex items-center gap-2 mb-3">
             <Activity size={14} className="text-[#ef4444]" />
-            <span className="text-xs font-semibold">TCB Download Timeline (01 Nov 2024)</span>
+            <span className="text-xs font-semibold">TCB Download Timeline</span>
           </div>
-          <ResponsiveContainer width="100%" height={150}>
-            <LineChart data={timelineData}>
-              <CartesianGrid strokeDasharray="3 3" stroke={darkMode ? "#1c2e1c" : "#e5e7eb"} />
-              <XAxis dataKey="time" tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
-              <RTooltip
-                contentStyle={{ backgroundColor: darkMode ? "#111e11" : "#fff", border:"1px solid #ccc", borderRadius:6, fontSize:11 }}
-              />
-              <Line type="monotone" dataKey="bulletins" name="Bulletins"    stroke="#166534" strokeWidth={2} dot={{ r:3 }} />
-              <Line type="monotone" dataKey="farms"     name="Farms Logged" stroke="#ca8a04" strokeWidth={2} dot={{ r:3 }} strokeDasharray="5 3" />
-              <Legend iconSize={10} wrapperStyle={{ fontSize: 10 }} />
-            </LineChart>
-          </ResponsiveContainer>
+          {bulletinTimelineData.length === 0 ? (
+            <p className="text-[11px] text-muted-foreground py-8 text-center">No bulletins with a known issue date yet.</p>
+          ) : (
+            <ResponsiveContainer width="100%" height={150}>
+              <LineChart data={bulletinTimelineData}>
+                <CartesianGrid strokeDasharray="3 3" stroke={darkMode ? "#1c2e1c" : "#e5e7eb"} />
+                <XAxis dataKey="day" tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
+                <RTooltip
+                  contentStyle={{ backgroundColor: darkMode ? "#111e11" : "#fff", border:"1px solid #ccc", borderRadius:6, fontSize:11 }}
+                />
+                <Line type="monotone" dataKey="bulletins" name="Cumulative Bulletins" stroke="#166534" strokeWidth={2} dot={{ r:3 }} />
+                <Legend iconSize={10} wrapperStyle={{ fontSize: 10 }} />
+              </LineChart>
+            </ResponsiveContainer>
+          )}
         </div>
       </div>
 

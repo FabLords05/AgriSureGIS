@@ -1189,3 +1189,60 @@ above) since there was otherwise no way to turn the mock exposure data into real
   so it can be identified and deleted later without touching real records.
 * Not pushed yet.
 
+---
+
+## [2026-07-30] - Monitoring/Spatial/Calibration Real-Data Pass, Auto-Assessment on Parse
+
+**Branch:** `fabio/db/pabs-ingestion-gpx-matching` (James's frontend work + supporting backend changes, committed locally, not pushed yet). Does **not** touch `AssessmentModule.tsx` — that file was independently reworked by Fabio's own `425e129` commit on this branch (real per-typhoon exposure panel + `GET /bulletins/typhoon/{typhoon_id}/summary`), merged in separately from this entry.
+
+### 1. File: `backend/app/api/insurance.py` (new)
+* Added **`GET /insurance/summary`**: counts `InsuranceRecord` rows currently within their `effectivity_date`–`expiry_date` window against the total policy count. Backs Monitoring's new "Active Insurance Policies" stat card.
+
+### 2. File: `backend/app/main.py`
+* Registered `insurance_router` under `/api`.
+
+### 3. File: `backend/app/api/farms.py`
+* `list_farms()`: now also looks up each farm's most recent `InsuranceRecord` (by `effectivity_date desc`) and returns `policy_no`, `effectivity_date`, `expiry_date` (formatted `MM/DD/YYYY`) alongside the existing fields — backs the new "Effective Date"/"Expiry Date" columns in Spatial Analysis's Farm Records table.
+
+### 4. File: `backend/app/services/bulletin_parser.py`
+* **Behavior change, overrides an earlier explicit decision:** `scrape_and_save_all()` now calls `AssessmentService.calculate_for_bulletin(bulletin.typhoon_id, bulletin.tcb_id, db)` after **every** successfully parsed bulletin (previously only `ExposureCalculatorService.compute_for_typhoon()` ran, and only for a detected *final* bulletin). Since `calculate_for_bulletin()` already recomputes the exposure summary internally before checking payout eligibility, this is a strict superset of the old behavior, not just an addition.
+  * `_reconcile_active_typhoons()` updated the same way: on closing a typhoon that dropped off PAGASA's active list, it now looks up that typhoon's most recent bulletin and runs the same assessment computation (falling back to the old exposure-only call if no bulletin is found, which shouldn't happen in practice).
+  * **Why this overrides the prior decision:** the 2026-07-27 entry ("Final-Bulletin Detection") explicitly recorded Fabio's call to keep assessment/payout calculation a separate manual step even after auto-closing a typhoon. This entry reverses that — confirmed directly with the user, not done unilaterally — so that clicking "Parse Latest Bulletin" (or the scheduled background scrape) now makes results appear in Assessment & Reporting without an extra manual `POST /api/assessments/calculate` call. **Flagging for Fabio's review**, since he made the original manual-only call and may want it reverted or handled differently.
+
+### 5. File: `frontend/src/lib/api.ts`
+* Added `InsuranceSummary` type + `getInsuranceSummary()`.
+* `Farm` interface: added `policy_no`, `effectivity_date`, `expiry_date`.
+
+### 6. File: `frontend/src/app/components/MonitoringModule.tsx`
+* Removed remaining `mockFarmers`/`FarmerRecord` usage entirely (the 2026-07-29 entry above already flagged this file as not actually cleaned up despite an earlier todo item claiming it was):
+  * "Affected Farms" / "Est. Total Indemnity" stat cards now computed from real `getFarms()`/`getAssessments()`, counting only farms with a real computed assessment (`wind_velocity` set — excludes legacy CSV-import seed rows).
+  * "Growth Stage Distribution", "Farms by Signal Number", and "TCB Download Timeline" charts now computed from real crop-stage/signal/bulletin-date data instead of hardcoded arrays, each with an honest empty state.
+  * The "Farmers Under Signal No. X" list feeding `SARQuickViewModal` is now real farm data; the SAR *imagery* itself remains a simulated canvas render (no real Google Earth Engine integration exists anywhere in this codebase) — `SARQuickViewModal` reworked to take a `FarmRow` instead of the mock `FarmerRecord`.
+* Added a 5th stat card, **"Active Insurance"** (`X/Y` from the new `/insurance/summary` endpoint).
+* Removed the "System Status" panel (moved to Calibration & Settings, see below).
+* **Layout change:** root container changed from `overflow-auto` (whole-page scroll) to a bounded `flex flex-col overflow-hidden` — the page itself no longer scrolls. The PAGASA TCB Bulletins list is the only element that scrolls now (`flex-1 min-h-0 overflow-auto`, sticky header), instead of growing unbounded and pushing the charts below off-screen.
+
+### 7. File: `frontend/src/app/components/CalibrationModule.tsx`
+* Added a new **"System Status"** section (moved from Monitoring), showing a real Backend API connected/unreachable status — piggybacks on the `getParserSettings()` call this screen already makes on mount rather than firing an extra request just for a health check.
+
+### 8. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* Removed the "Data Import" CSV/GPX drag-drop panel entirely (per explicit confirmation that this removes the only upload UI in the app — CSV/GPX ingestion is still possible via the API directly, e.g. Swagger docs).
+* The former "Export Period of Exposure" button (client-side CSV download) is now an **"Upload CSV"** button in its place — opens a native file picker, uploads via the existing `uploadCsv()` API. The client-side export feature itself is gone from this screen.
+* "Filter map" changed from a `<select>` dropdown to a type-ahead search box: typing narrows a suggestion list of municipalities (prefix match), clicking one applies the filter; clearing the box resets to "All."
+* Added two new Farm Records table columns: "Effective Date", "Expiry Date" (from the `farms.py` change above).
+* Passes `focusMunicipality` to `GISLeafletMap` so picking a municipality also flies the map to it (see below).
+
+### 9. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* Added **`FlyToSelectedFarm`**: flies the map to whichever farm is selected (real GPX polygon bounds if surveyed, else its approximate marker position) — covers both clicking a farm on the map and clicking its row in the Farm Records table.
+* Added **`FlyToMunicipality`**: flies to a searched/selected municipality's real boundary outline (from the existing `region10-boundaries.geojson` context layer), floored at zoom 12 so it never pulls back further than that even for a large/sprawling municipality shape.
+* Removed the click-`Popup` on both surveyed (GPX polygon) and unsurveyed (approximate marker) farms — redundant with the existing "Selected Farm Info Panel" overlay, which already shows the same (and more) detail.
+* Clicking a farm now visibly highlights it with a real fill-color change (amber `#f59e0b`), not just a border-color/weight tweak as before.
+
+### 10. File: `backend/requirements-win.txt`
+* Added `APScheduler==3.11.0` — was present in `requirements.txt` but missing from the Windows-specific file entirely, causing `ModuleNotFoundError: No module named 'apscheduler'` on a fresh Windows venv setup (surfaced when moving the project to a new drive location and reinstalling).
+
+### Status / Next Steps
+* Merged into `fabio/db/pabs-ingestion-gpx-matching` on top of `425e129` (Fabio's per-typhoon exposure summary + mock test data). The predicted `api.ts` conflict auto-merged cleanly (both sides only added new types/functions); the only manual resolution needed was combining a `react-leaflet` import line in `GISLeafletMap.tsx` (both sides added a different new import — `WMSTileLayer` for Fabio's GeoServer overlay, `useMap` for this entry's fly-to-farm/fly-to-municipality) and this changelog file itself.
+* Auto-assessment-on-parse (item 4 above) needs Fabio's explicit sign-off — implemented per direct user request during testing, not per his own decision.
+* Not pushed yet — awaiting the user's own push per `CLAUDE.md`'s git-handoff rules.
+

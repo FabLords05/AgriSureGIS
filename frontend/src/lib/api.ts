@@ -30,6 +30,9 @@ export interface Farm {
   csv_farm_reference: string | null;
   georef_id: string | null;
   location_geom: GeoJsonMultiPolygon | null;
+  policy_no: string | null;
+  effectivity_date: string | null;
+  expiry_date: string | null;
 }
 
 export interface Assessment {
@@ -211,6 +214,16 @@ export function uploadGpx(file: File, farmerId?: number, farmId?: number): Promi
 
 export function getFarms(): Promise<{ status: string; data: Farm[] }> {
   return request<{ status: string; data: Farm[] }>('/api/farms/');
+}
+
+export interface InsuranceSummary {
+  status: string;
+  active_count: number;
+  total_count: number;
+}
+
+export function getInsuranceSummary(): Promise<InsuranceSummary> {
+  return request<InsuranceSummary>('/api/insurance/summary');
 }
 
 export function getAssessments(typhoonId?: number, policyNo?: string): Promise<{ status: string; data: Assessment[] }> {

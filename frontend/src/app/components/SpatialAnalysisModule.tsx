@@ -1,11 +1,11 @@
-import { useState, useRef, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import {
-  UploadCloud, FileText, Map as MapIcon, ChevronUp, ChevronDown,
-  Filter, ArrowUpDown, Download, AlertTriangle, CheckCircle2, Table2, Satellite
+  Map as MapIcon, ChevronUp, ChevronDown,
+  Filter, ArrowUpDown, UploadCloud, CheckCircle2, Table2, Satellite
 } from "lucide-react";
 import { GISLeafletMap } from "./GISLeafletMap";
 import { AOISARPanel } from "./AOISARPanel";
-import { uploadCsv, uploadGpx, getFarms, getAssessments, Farm, Assessment, Bulletin } from "@/lib/api";
+import { getFarms, getAssessments, uploadCsv, Farm, Assessment, Bulletin } from "@/lib/api";
 
 interface FarmRow extends Farm {
   assessment: Assessment | null;
@@ -13,8 +13,6 @@ interface FarmRow extends Farm {
 
 type SortField = "farm_id" | "farmer_name" | "municipality" | "barangay" | "area_size";
 type SortDir   = "asc" | "desc";
-
-interface UploadedFile { name: string; size: string; type: "csv" | "gpx"; status: "ready" | "processing" | "done" | "error" }
 
 interface SpatialAnalysisModuleProps {
   darkMode: boolean;
@@ -29,14 +27,13 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
   const [selectedFarmId, setSelectedFarmId] = useState<number | null>(null);
   const [showSARPanel, setShowSARPanel]      = useState(false);
   const [filterMuni, setFilterMuni] = useState("All");
+  const [muniQuery, setMuniQuery] = useState("");
+  const [showMuniSuggestions, setShowMuniSuggestions] = useState(false);
   const [sortField, setSortField] = useState<SortField>("farm_id");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
-  const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
-  const [isDragging, setIsDragging] = useState(false);
   const [topPanelH, setTopPanelH] = useState(55);
-  const [showWarning, setShowWarning] = useState<string | null>(null);
   const [uploadStatus, setUploadStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const csvInputRef = useRef<HTMLInputElement>(null);
 
   const refreshFarms = () => {
     setIsLoadingFarms(true);
@@ -71,6 +68,22 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
     return ["All", ...Array.from(set).sort()];
   }, [farmRows]);
 
+  // Type-ahead suggestions for the municipality search box -- matches on the
+  // typed letters as a prefix (case-insensitive), same idea as the old select
+  // dropdown but searchable instead of scroll-to-find.
+  const muniSuggestions = useMemo(() => {
+    const options = municipalities.filter(m => m !== "All");
+    const q = muniQuery.trim().toLowerCase();
+    if (!q) return options;
+    return options.filter(m => m.toLowerCase().startsWith(q));
+  }, [municipalities, muniQuery]);
+
+  const selectMunicipality = (m: string) => {
+    setFilterMuni(m);
+    setMuniQuery(m);
+    setShowMuniSuggestions(false);
+  };
+
   const filteredFarms = farmRows
     .filter(f => filterMuni === "All" || f.municipality === filterMuni)
     .sort((a, b) => {
@@ -87,92 +100,27 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
     else { setSortField(field); setSortDir("asc"); }
   };
 
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault(); setIsDragging(false);
-    const files = Array.from(e.dataTransfer.files);
-    processFiles(files);
-  };
 
-  const processFiles = (files: File[]) => {
-    files.forEach(file => {
-      const ext = file.name.split(".").pop()?.toLowerCase();
-      if (ext !== "csv" && ext !== "gpx") {
-        setShowWarning(`"${file.name}" is not a supported format. Please upload .csv or .gpx files.`);
-        return;
-      }
-      const newFile: UploadedFile = {
-        name: file.name,
-        size: `${(file.size / 1024).toFixed(0)} KB`,
-        type: ext as "csv" | "gpx",
-        status: "processing",
-      };
-      setUploadedFiles(prev => [...prev, newFile]);
+  const handleCsvFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // allow re-selecting the same filename later
+    if (!file) return;
 
-      if (ext === "csv") {
-        uploadCsv(file)
-          .then(result => {
-            setUploadedFiles(prev => prev.map(f => f.name === newFile.name ? { ...f, status: "done" } : f));
-            const failedSuffix = result.rows_failed > 0 ? `, ${result.rows_failed} failed` : "";
-            setUploadStatus({
-              type: "success",
-              message: `${result.message} (${result.rows_inserted} inserted, ${result.rows_skipped} skipped${failedSuffix})`,
-            });
-            refreshFarms();
-          })
-          .catch(error => {
-            setUploadedFiles(prev => prev.map(f => f.name === newFile.name ? { ...f, status: "error" } : f));
-            setUploadStatus({
-              type: "error",
-              message: error instanceof Error ? error.message : "CSV upload failed.",
-            });
-          });
-      } else {
-        // A pre-selected table row (manual override) takes priority; otherwise let
-        // the backend auto-detect the farmer/farm from the GPX filename.
-        const targetFarm = farms.find(f => f.farm_id === selectedFarmId);
-        const uploadPromise = targetFarm?.farmer_id != null
-          ? uploadGpx(file, targetFarm.farmer_id, targetFarm.farm_id)
-          : uploadGpx(file);
-
-        uploadPromise
-          .then(result => {
-            setUploadedFiles(prev => prev.map(f => f.name === newFile.name ? { ...f, status: "done" } : f));
-            setUploadStatus({
-              type: "success",
-              message: result.farmer_name
-                ? `GPX boundary matched to ${result.farmer_name} (Farm #${result.farm_id}, via ${result.matched_by}).`
-                : `GPX boundary uploaded for Farm #${result.farm_id}.`,
-            });
-            setSelectedFarmId(result.farm_id);
-            refreshFarms();
-          })
-          .catch(error => {
-            setUploadedFiles(prev => prev.map(f => f.name === newFile.name ? { ...f, status: "error" } : f));
-            setUploadStatus({
-              type: "error",
-              message: error instanceof Error ? error.message : "GPX upload failed.",
-            });
-          });
-      }
-    });
-  };
-
-  const handleExportPeriodOfExposure = () => {
-    const headers = ["FARM_ID","FARMER","MUNICIPALITY","BARANGAY","AREA_HA","HAS_GPX_BOUNDARY","CROP_STAGE","WIND_SIGNAL","PERIOD_OF_EXPOSURE_HRS","FINAL_INDEMNITY_PAYMENT"];
-    const rows = filteredFarms.map(f => [
-      f.farm_id, f.farmer_name ?? "", f.municipality ?? "", f.barangay ?? "",
-      f.area_size ?? "", f.location_geom ? "Yes" : "No",
-      f.assessment?.crop_stage ?? "", f.assessment?.wind_velocity ?? "",
-      f.assessment?.period_of_exposure ?? "", f.assessment?.final_indemnity_payment ?? "",
-    ]);
-    const csv = [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
-    const uri = "data:text/csv;charset=utf-8," + encodeURIComponent(csv);
-    const a = document.createElement("a");
-    a.setAttribute("href", uri);
-    a.setAttribute("download", "period_of_exposure_report.csv");
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    uploadCsv(file)
+      .then(result => {
+        const failedSuffix = result.rows_failed > 0 ? `, ${result.rows_failed} failed` : "";
+        setUploadStatus({
+          type: "success",
+          message: `${result.message} (${result.rows_inserted} inserted, ${result.rows_skipped} skipped${failedSuffix})`,
+        });
+        refreshFarms();
+      })
+      .catch(error => {
+        setUploadStatus({
+          type: "error",
+          message: error instanceof Error ? error.message : "CSV upload failed.",
+        });
+      });
   };
 
   const SortIcon = ({ field }: { field: SortField }) =>
@@ -186,25 +134,6 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
-      {/* Warning Modal */}
-      {showWarning && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-card border border-amber-300 rounded-xl shadow-2xl p-5 max-w-sm">
-            <div className="flex items-center gap-2 mb-2">
-              <AlertTriangle size={16} className="text-amber-500" />
-              <span className="text-sm font-semibold">Upload Warning</span>
-            </div>
-            <p className="text-xs text-muted-foreground mb-3">{showWarning}</p>
-            <button
-              onClick={() => setShowWarning(null)}
-              className="w-full py-1.5 rounded-lg bg-[#166534] text-white text-xs font-semibold hover:bg-[#14532d] transition-colors"
-            >
-              OK
-            </button>
-          </div>
-        </div>
-      )}
-
       {/* Top Panel – GIS Map */}
       <div style={{ height: `${topPanelH}%` }} className="flex flex-col overflow-hidden">
         {/* Map toolbar */}
@@ -218,19 +147,48 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
           <div className="flex items-center gap-2 ml-auto">
             <Filter size={11} className="text-muted-foreground" />
             <span className="text-[11px] text-muted-foreground">Filter map:</span>
-            <select
-              value={filterMuni}
-              onChange={e => setFilterMuni(e.target.value)}
-              className="text-[11px] border border-border rounded px-2 py-1 bg-background"
-            >
-              {municipalities.map(m => <option key={m}>{m}</option>)}
-            </select>
+            <div className="relative">
+              <input
+                type="text"
+                value={muniQuery}
+                placeholder={filterMuni === "All" ? "All municipalities" : filterMuni}
+                onChange={e => {
+                  const value = e.target.value;
+                  setMuniQuery(value);
+                  setShowMuniSuggestions(true);
+                  if (value.trim() === "") setFilterMuni("All");
+                }}
+                onFocus={() => setShowMuniSuggestions(true)}
+                onBlur={() => setShowMuniSuggestions(false)}
+                className="text-[11px] border border-border rounded px-2 py-1 bg-background w-40"
+              />
+              {showMuniSuggestions && muniSuggestions.length > 0 && (
+                <div className="absolute top-full left-0 mt-1 w-40 max-h-48 overflow-auto bg-card border border-border rounded-lg shadow-lg z-20">
+                  {muniSuggestions.map(m => (
+                    <button
+                      key={m}
+                      onMouseDown={() => selectMunicipality(m)}
+                      className={`w-full text-left px-2 py-1.5 text-[11px] hover:bg-muted transition-colors ${m === filterMuni ? "bg-[#166534]/10 font-semibold text-[#166534]" : ""}`}
+                    >
+                      {m}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
             <button
-              onClick={handleExportPeriodOfExposure}
+              onClick={() => csvInputRef.current?.click()}
               className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#1e3a5f] text-white text-[11px] font-medium hover:bg-[#172f4d] transition-colors"
             >
-              <Download size={11} /> Export Period of Exposure
+              <UploadCloud size={11} /> Upload CSV
             </button>
+            <input
+              ref={csvInputRef}
+              type="file"
+              accept=".csv"
+              hidden
+              onChange={handleCsvFileSelected}
+            />
             <button
               onClick={() => setShowSARPanel(v => !v)}
               className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors border ${showSARPanel ? "bg-[#166534] text-white border-[#166534]" : "border-[#166534] text-[#166534] hover:bg-[#166534]/10"}`}
@@ -240,6 +198,18 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
           </div>
         </div>
 
+        {uploadStatus && (
+          <div
+            className="mx-4 mt-2 text-[10px] p-2 rounded-lg shrink-0"
+            style={{
+              backgroundColor: uploadStatus.type === "success" ? "var(--sidebar-accent)" : "var(--destructive)",
+              color: uploadStatus.type === "success" ? "var(--sidebar-accent-foreground)" : "white",
+            }}
+          >
+            {uploadStatus.message}
+          </div>
+        )}
+
         {/* Map canvas + SAR panel overlay */}
         <div className="flex-1 overflow-hidden p-2 relative">
           <GISLeafletMap
@@ -248,6 +218,7 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
             onSelectFarm={setSelectedFarmId}
             selectedBulletin={selectedBulletin}
             darkMode={darkMode}
+            focusMunicipality={filterMuni === "All" ? null : filterMuni}
           />
           {/* SAR AOI Panel — slides in over the map */}
           {showSARPanel && (
@@ -277,69 +248,8 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
         <div className="w-8 h-0.5 rounded bg-muted-foreground/40" />
       </div>
 
-      {/* Bottom Panel – Data Import + Table */}
+      {/* Bottom Panel – Farm Records Table */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Left: Drag-Drop + Uploaded Files */}
-        <div className="w-64 shrink-0 flex flex-col border-r border-border overflow-hidden">
-          <div className="px-3 py-2 border-b border-border bg-card shrink-0">
-            <div className="flex items-center gap-1.5">
-              <UploadCloud size={13} className="text-[#166534]" />
-              <span className="text-[11px] font-semibold">Data Import</span>
-            </div>
-          </div>
-
-          {/* Drop Zone */}
-          <div
-            className={`m-2 border-2 border-dashed rounded-xl p-3 text-center cursor-pointer transition-all ${isDragging ? "border-[#166534] bg-[#166534]/10" : "border-border hover:border-[#166534]/60 hover:bg-muted/30"}`}
-            onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
-            onDragLeave={() => setIsDragging(false)}
-            onDrop={handleDrop}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            <UploadCloud size={20} className={`mx-auto mb-1.5 ${isDragging ? "text-[#166534]" : "text-muted-foreground"}`} />
-            <p className="text-[10px] font-medium">Drop files here or click to browse</p>
-            <p className="text-[9px] text-muted-foreground mt-0.5">
-              .CSV farmer records &middot; .GPX farm polygon (auto-matched by filename, or select a row first)
-            </p>
-            <input
-              ref={fileInputRef}
-              type="file" accept=".csv,.gpx" multiple hidden
-              onChange={e => { if (e.target.files) processFiles(Array.from(e.target.files)); }}
-            />
-          </div>
-
-          {uploadStatus && (
-            <div
-              className="mx-2 mb-2 text-[10px] p-2 rounded-lg"
-              style={{
-                backgroundColor: uploadStatus.type === "success" ? "var(--sidebar-accent)" : "var(--destructive)",
-                color: uploadStatus.type === "success" ? "var(--sidebar-accent-foreground)" : "white",
-              }}
-            >
-              {uploadStatus.message}
-            </div>
-          )}
-
-          {/* Uploaded / imported file indicators */}
-          <div className="px-2 space-y-1.5 flex-1 overflow-auto">
-            {uploadedFiles.map((f, i) => (
-              <div key={i} className="flex items-center gap-2 bg-card border border-border rounded-lg px-2.5 py-2">
-                <FileText size={12} className={f.type === "csv" ? "text-blue-500" : "text-amber-500"} />
-                <div className="flex-1 min-w-0">
-                  <p className="text-[10px] font-medium truncate">{f.name}</p>
-                  <p className="text-[9px] text-muted-foreground">{f.size} · {f.type.toUpperCase()}</p>
-                </div>
-                {f.status === "done" && <CheckCircle2 size={12} className="text-emerald-500 shrink-0" />}
-                {f.status === "error" && <AlertTriangle size={12} className="text-red-500 shrink-0" />}
-                {f.status === "processing" && (
-                  <div className="w-3 h-3 rounded-full border-2 border-[#166534] border-t-transparent animate-spin shrink-0" />
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Right: Farm Records Table */}
         <div className="flex-1 flex flex-col overflow-hidden">
           <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-card shrink-0 flex-wrap gap-y-1">
             <div className="flex items-center gap-1.5">
@@ -351,7 +261,7 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
               {loadError && <span className="text-[10px] text-red-500">{loadError}</span>}
             </div>
             <div className="ml-auto text-[9px] text-muted-foreground">
-              Click a row to select it as the GPX upload target &amp; highlight it on the map
+              Click a row to zoom the map to that farm
             </div>
           </div>
 
@@ -377,6 +287,8 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
                     </th>
                   ))}
                   <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">GPX Boundary</th>
+                  <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Effective Date</th>
+                  <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Expiry Date</th>
                   <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Crop Stage</th>
                   <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Signal</th>
                   <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Exp (h)</th>
@@ -401,6 +313,8 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
                         : <span className="text-muted-foreground">No</span>
                       }
                     </td>
+                    <td className="px-2.5 py-2 text-muted-foreground whitespace-nowrap">{f.effectivity_date ?? "—"}</td>
+                    <td className="px-2.5 py-2 text-muted-foreground whitespace-nowrap">{f.expiry_date ?? "—"}</td>
                     <td className="px-2.5 py-2">{f.assessment?.crop_stage ?? "Not yet assessed"}</td>
                     <td className={`px-2.5 py-2 ${f.assessment?.wind_velocity ? signalColors[f.assessment.wind_velocity] ?? "" : "text-muted-foreground"}`}>
                       {f.assessment?.wind_velocity ? `No. ${f.assessment.wind_velocity}` : "—"}
