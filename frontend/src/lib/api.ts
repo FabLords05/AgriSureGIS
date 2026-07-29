@@ -123,6 +123,27 @@ export interface ComputeExposureResult {
   summaries: AreaExposureSummary[];
 }
 
+export interface TyphoonSummaryArea {
+  province: string;
+  municipality: string;
+  max_signal_level: number;
+  start_time: string;
+  end_time: string;
+  total_exposure_hours: number;
+}
+
+export interface TyphoonSummary {
+  status: string;
+  typhoon_id: number;
+  typhoon_name: string;
+  areas_hit: TyphoonSummaryArea[];
+  max_signal_level: number | null;
+  start_time: string | null;
+  end_time: string | null;
+  exposure_duration_hours: number | null;
+  people_hit: number;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}${path}`, init);
   if (!response.ok) {
@@ -155,6 +176,13 @@ export function getBulletinSignals(tcbId: number): Promise<TcbSignal[]> {
 
 export function computeExposure(tcbId: number): Promise<ComputeExposureResult> {
   return request<ComputeExposureResult>(`/api/bulletins/${tcbId}/compute-exposure`, { method: 'POST' });
+}
+
+// Reads the already-computed per-typhoon exposure summary (tbl_area_exposure_summary
+// is populated once the typhoon's bulletins are done, not per-TCB) -- does not trigger
+// a recompute.
+export function getTyphoonSummary(typhoonId: number): Promise<TyphoonSummary> {
+  return request<TyphoonSummary>(`/api/bulletins/typhoon/${typhoonId}/summary`);
 }
 
 export function getParserSettings(): Promise<ParserSettings> {

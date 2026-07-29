@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from geoalchemy2.shape import to_shape
 from pydantic import BaseModel, Field
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 import os
 import shutil
@@ -9,7 +10,14 @@ from app.core.database import get_db
 from app.core.scheduler import reschedule_bulletin_job
 from app.services.bulletin_parser import BulletinParserService, PagasaScrapeError
 from app.services.exposure_calculator import ExposureCalculatorService
-from app.models.models import ParserSettings, TropicalCycloneBulletin, TcbSignal, Typhoon
+from app.models.models import (
+    AreaExposureSummary,
+    Farm,
+    ParserSettings,
+    TropicalCycloneBulletin,
+    TcbSignal,
+    Typhoon,
+)
 
 router = APIRouter(prefix="/bulletins", tags=["bulletins"])
 
@@ -194,3 +202,74 @@ def get_bulletin_signals(tcb_id: int, db: Session = Depends(get_db)):
             "area_name": s.area_name
         })
     return results
+
+
+@router.get("/typhoon/{typhoon_id}/summary")
+def get_typhoon_summary(typhoon_id: int, db: Session = Depends(get_db)):
+    """
+    Per-typhoon exposure summary for the Assessment & Reporting module's
+    typhoon panel: areas hit, overall max signal, overall exposure start/end
+    and duration, and a count of farmers within the affected boundaries.
+
+    Reads tbl_area_exposure_summary as-is -- that table is already computed
+    once per typhoon (after its bulletins stop, not per-TCB), so this endpoint
+    does not trigger a recompute. "People hit" is anyone whose farm falls in
+    an affected boundary, regardless of whether a payout was assessed yet.
+    """
+    typhoon = db.query(Typhoon).filter(Typhoon.typhoon_id == typhoon_id).first()
+    if typhoon is None:
+        raise HTTPException(status_code=404, detail="Typhoon not found.")
+
+    summaries = (
+        db.query(AreaExposureSummary)
+        .filter(AreaExposureSummary.typhoon_id == typhoon_id)
+        .order_by(AreaExposureSummary.municipality)
+        .all()
+    )
+
+    if not summaries:
+        return {
+            "status": "success",
+            "typhoon_id": typhoon_id,
+            "typhoon_name": typhoon.name,
+            "areas_hit": [],
+            "max_signal_level": None,
+            "start_time": None,
+            "end_time": None,
+            "exposure_duration_hours": None,
+            "people_hit": 0,
+        }
+
+    boundary_ids = {s.boundary_id for s in summaries if s.boundary_id is not None}
+    people_hit = 0
+    if boundary_ids:
+        people_hit = (
+            db.query(func.count(func.distinct(Farm.farmer_id)))
+            .filter(Farm.boundary_id.in_(boundary_ids))
+            .scalar()
+        )
+
+    overall_start = min(s.start_time for s in summaries)
+    overall_end = max(s.end_time for s in summaries)
+
+    return {
+        "status": "success",
+        "typhoon_id": typhoon_id,
+        "typhoon_name": typhoon.name,
+        "areas_hit": [
+            {
+                "province": s.province,
+                "municipality": s.municipality,
+                "max_signal_level": s.max_signal_level,
+                "start_time": s.start_time,
+                "end_time": s.end_time,
+                "total_exposure_hours": float(s.total_exposure_hours),
+            }
+            for s in summaries
+        ],
+        "max_signal_level": max(s.max_signal_level for s in summaries),
+        "start_time": overall_start,
+        "end_time": overall_end,
+        "exposure_duration_hours": round((overall_end - overall_start).total_seconds() / 3600, 2),
+        "people_hit": people_hit,
+    }

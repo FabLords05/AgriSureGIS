@@ -4,29 +4,17 @@ import {
   FileSpreadsheet, RefreshCw, AlertCircle, Calculator,
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip as RTooltip, ResponsiveContainer, CartesianGrid } from "recharts";
-import { getAssessmentsPabsSummary, getAssessmentsExportPabsUrl, getBulletins, PabsAssessmentRow, Bulletin } from "@/lib/api";
+import {
+  getAssessmentsPabsSummary, getAssessmentsExportPabsUrl, getBulletins, getTyphoonSummary, calculateAssessments,
+  PabsAssessmentRow, Bulletin, TyphoonSummary,
+} from "@/lib/api";
 
-interface ExposureSummaryRow {
-  typhoon: string;
-  area: string;
-  signal: number;
-  exposure_hours: number;
-  start_time: string;
-  end_time: string;
+function formatDateTime(iso: string | null): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString(undefined, { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
-
-// TEMPORARY -- per Fabio: computation combines every typhoon's whole TCB
-// range (1-25, etc.) into ONE result, same as the farmer-level PABS table
-// below already does ("all typhoons combined") -- not per-bulletin, and not
-// per-typhoon either. He's wiring the real combined backend endpoint himself;
-// this is a frontend-only mock of that result shape in the meantime. Remove
-// once his endpoint exists.
-const MOCK_EXPOSURE_ROWS: ExposureSummaryRow[] = [
-  { typhoon: "FRANCISCO", area: "Talakag, Bukidnon", signal: 3, exposure_hours: 18, start_time: "2026-06-25 07:00", end_time: "2026-06-26 01:00" },
-  { typhoon: "FRANCISCO", area: "Claveria, Misamis Oriental", signal: 2, exposure_hours: 9, start_time: "2026-06-25 13:00", end_time: "2026-06-25 22:00" },
-  { typhoon: "KIYAPO", area: "Baungon, Bukidnon", signal: 2, exposure_hours: 6, start_time: "2026-06-25 19:00", end_time: "2026-06-26 01:00" },
-  { typhoon: "INDAY", area: "Manolo Fortich, Bukidnon", signal: 1, exposure_hours: 4, start_time: "2026-06-20 10:00", end_time: "2026-06-20 14:00" },
-];
 
 type SortField = "FARMER_NAME" | "municipality" | "TYPHOON_NAME" | "AREA" | "PERIOD_OF_EXPOSURE" | "WIND_VELOCITY" | "AC";
 type SortDir = "asc" | "desc";
@@ -150,17 +138,57 @@ export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
 
   const [showCsvPreview, setShowCsvPreview] = useState(false);
 
-  // Browsable typhoon list -- reference only, doesn't filter/select anything.
-  // Compute Exposure Summary always combines every typhoon into one result,
-  // same as the farmer-level PABS table below.
   const [bulletins, setBulletins] = useState<Bulletin[]>([]);
-  const [hasComputedExposure, setHasComputedExposure] = useState(false);
-  const [exposureRows, setExposureRows] = useState<ExposureSummaryRow[]>([]);
+  const [selectedTyphoonId, setSelectedTyphoonId] = useState<number | null>(null);
+  const [typhoonSummary, setTyphoonSummary] = useState<TyphoonSummary | null>(null);
+  const [isLoadingTyphoonSummary, setIsLoadingTyphoonSummary] = useState(false);
+  const [typhoonSummaryError, setTyphoonSummaryError] = useState<string | null>(null);
 
-  const handleComputeExposure = () => {
-    // TEMPORARY -- see MOCK_EXPOSURE_ROWS above.
-    setHasComputedExposure(true);
-    setExposureRows(MOCK_EXPOSURE_ROWS);
+  const [isComputingAssessments, setIsComputingAssessments] = useState(false);
+  const [computeAssessmentsError, setComputeAssessmentsError] = useState<string | null>(null);
+  const [computeAssessmentsMessage, setComputeAssessmentsMessage] = useState<string | null>(null);
+
+  const handleSelectTyphoon = (typhoonId: number) => {
+    if (selectedTyphoonId === typhoonId) {
+      setSelectedTyphoonId(null);
+      setTyphoonSummary(null);
+      setTyphoonSummaryError(null);
+      return;
+    }
+    setSelectedTyphoonId(typhoonId);
+    setTyphoonSummary(null);
+    setTyphoonSummaryError(null);
+    setComputeAssessmentsError(null);
+    setComputeAssessmentsMessage(null);
+    setIsLoadingTyphoonSummary(true);
+    getTyphoonSummary(typhoonId)
+      .then(setTyphoonSummary)
+      .catch(error => setTyphoonSummaryError(error instanceof Error ? error.message : "Failed to load typhoon summary."))
+      .finally(() => setIsLoadingTyphoonSummary(false));
+  };
+
+  // ParametricAssessment.calculate_final_payout() combines the typhoon's whole
+  // TCB range into one result internally (via ExposureCalculatorService), so any
+  // one of its bulletins works here -- the latest is used only as the "as of"
+  // date for insurance-effectivity eligibility.
+  const handleComputeAssessments = () => {
+    if (selectedTyphoonId === null) return;
+    const typhoonBulletins = bulletins.filter(b => b.typhoon_id === selectedTyphoonId);
+    const latest = typhoonBulletins.reduce<Bulletin | null>(
+      (a, b) => (a === null || b.bulletin_count > a.bulletin_count ? b : a), null
+    );
+    if (!latest) return;
+
+    setIsComputingAssessments(true);
+    setComputeAssessmentsError(null);
+    setComputeAssessmentsMessage(null);
+    calculateAssessments(selectedTyphoonId, latest.tcb_id)
+      .then(res => {
+        setComputeAssessmentsMessage(`Computed ${res.assessments_computed} assessment(s) for this typhoon.`);
+        loadSummary();
+      })
+      .catch(error => setComputeAssessmentsError(error instanceof Error ? error.message : "Failed to compute assessments."))
+      .finally(() => setIsComputingAssessments(false));
   };
 
   const loadSummary = () => {
@@ -180,13 +208,16 @@ export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
   // One row per typhoon NAME (not typhoon_id) -- a bulletin-title parsing bug
   // on the backend has created multiple typhoon_id rows sharing the same real
   // typhoon name (e.g. "KIYAPO" and "KIYAPO Issued at"); merge those here so
-  // the same typhoon doesn't show up twice in the list.
+  // the same typhoon doesn't show up twice in the list. The first-seen
+  // typhoon_id is kept as the one used to query the exposure summary --
+  // inherits the same known limitation if a typhoon's bulletins got split
+  // across more than one typhoon_id.
   const typhoons = useMemo(() => {
-    const byName = new Map<string, { typhoon_name: string; bulletin_count: number }>();
+    const byName = new Map<string, { typhoon_name: string; typhoon_id: number; bulletin_count: number }>();
     for (const b of bulletins) {
       const existing = byName.get(b.typhoon_name);
       if (existing) existing.bulletin_count += 1;
-      else byName.set(b.typhoon_name, { typhoon_name: b.typhoon_name, bulletin_count: 1 });
+      else byName.set(b.typhoon_name, { typhoon_name: b.typhoon_name, typhoon_id: b.typhoon_id, bulletin_count: 1 });
     }
     return Array.from(byName.values());
   }, [bulletins]);
@@ -249,18 +280,26 @@ export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
         <CSVPreviewModal rows={filtered} onClose={() => setShowCsvPreview(false)} />
       )}
 
-      {/* Left: Typhoons — browsable reference list only, doesn't select/filter anything */}
+      {/* Left: Typhoons — click one to view its exposure summary */}
       <div className="w-56 shrink-0 flex flex-col border-r border-border bg-card overflow-hidden">
         <div className="px-3 py-2.5 border-b border-border">
           <p className="text-[11px] font-bold">Typhoons</p>
-          <p className="text-[9px] text-muted-foreground mt-0.5">Reference only — Compute Exposure Summary always combines every typhoon</p>
+          <p className="text-[9px] text-muted-foreground mt-0.5">Click a typhoon to view its exposure summary</p>
         </div>
         <div className="flex-1 overflow-auto py-1 space-y-1 px-2">
           {typhoons.map(t => (
-            <div key={t.typhoon_name} className="rounded-lg px-2.5 py-2 border bg-background border-border">
+            <button
+              key={t.typhoon_name}
+              onClick={() => handleSelectTyphoon(t.typhoon_id)}
+              className={`w-full text-left rounded-lg px-2.5 py-2 border transition-colors ${
+                selectedTyphoonId === t.typhoon_id
+                  ? "bg-[#166534]/10 border-[#166534]/40"
+                  : "bg-background border-border hover:bg-muted/50"
+              }`}
+            >
               <p className="text-[10px] font-bold">Typhoon {t.typhoon_name}</p>
               <p className="text-[9px] text-muted-foreground">{t.bulletin_count} bulletins (TCB 1-{t.bulletin_count})</p>
-            </div>
+            </button>
           ))}
         </div>
       </div>
@@ -276,12 +315,6 @@ export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
           <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">All typhoons combined</span>
         </div>
         <div className="flex items-center gap-2 ml-auto flex-wrap gap-y-1">
-          <button
-            onClick={handleComputeExposure}
-            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-[#166534]/30 text-[#166534] text-[11px] font-medium hover:bg-[#166534]/10 transition-colors"
-          >
-            <Calculator size={11} /> Compute Exposure Summary
-          </button>
           <button
             onClick={loadSummary}
             disabled={isLoading}
@@ -317,39 +350,85 @@ export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
         <div className="px-4 py-2 text-[11px] text-white bg-red-600 shrink-0">{loadError}</div>
       )}
 
-      {hasComputedExposure && (
-        <div className="mx-3 mt-3 border border-amber-300 dark:border-amber-800 rounded-xl overflow-hidden shrink-0">
-          <div className="flex items-center gap-2 px-3 py-2 bg-amber-50 dark:bg-amber-950/30 border-b border-amber-200 dark:border-amber-900">
-            <AlertCircle size={11} className="text-amber-600 shrink-0" />
+      {selectedTyphoonId !== null && (
+        <div className="mx-3 mt-3 border border-border rounded-xl overflow-hidden shrink-0 bg-card">
+          <div className="flex items-center gap-2 px-3 py-2 bg-[#166534]/5 border-b border-border">
+            <Calculator size={11} className="text-[#166534] shrink-0" />
             <p className="text-[10px] font-semibold">
-              Exposure Summary — All Typhoons Combined
+              Typhoon {typhoonSummary?.typhoon_name ?? ""} — Exposure Summary
             </p>
-            <span className="text-[9px] text-amber-700 dark:text-amber-400 ml-auto">Mock preview — pending backend wiring</span>
+            <div className="ml-auto flex items-center gap-2">
+              {typhoonSummary && typhoonSummary.areas_hit.length > 0 && (
+                <button
+                  onClick={handleComputeAssessments}
+                  disabled={isComputingAssessments}
+                  className="flex items-center gap-1 px-2 py-1 rounded border border-[#166534]/30 text-[#166534] text-[9px] font-medium hover:bg-[#166534]/10 disabled:opacity-50 transition-colors"
+                >
+                  <Calculator size={10} />
+                  {isComputingAssessments ? "Computing…" : "Compute Assessments"}
+                </button>
+              )}
+              {isLoadingTyphoonSummary && <RefreshCw size={11} className="animate-spin text-muted-foreground" />}
+            </div>
           </div>
-          <table className="w-full text-[10px]">
-            <thead>
-              <tr className="bg-[#1e3a5f] text-white">
-                <th className="px-2 py-1.5 text-left font-semibold">Typhoon</th>
-                <th className="px-2 py-1.5 text-left font-semibold">Areas</th>
-                <th className="px-2 py-1.5 text-left font-semibold">Signal Number</th>
-                <th className="px-2 py-1.5 text-left font-semibold">Exposure (h)</th>
-                <th className="px-2 py-1.5 text-left font-semibold">Start Time</th>
-                <th className="px-2 py-1.5 text-left font-semibold">End Time</th>
-              </tr>
-            </thead>
-            <tbody>
-              {exposureRows.map((r, i) => (
-                <tr key={i} className={`border-t border-border ${i % 2 === 0 ? "" : "bg-muted/10"}`}>
-                  <td className="px-2 py-1.5 font-semibold text-[#166534]">{r.typhoon}</td>
-                  <td className="px-2 py-1.5 font-medium">{r.area}</td>
-                  <td className="px-2 py-1.5">Signal No. {r.signal}</td>
-                  <td className="px-2 py-1.5">{r.exposure_hours}</td>
-                  <td className="px-2 py-1.5">{r.start_time}</td>
-                  <td className="px-2 py-1.5">{r.end_time}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+
+          {typhoonSummaryError && (
+            <p className="px-3 py-2.5 text-[10px] text-red-600">{typhoonSummaryError}</p>
+          )}
+          {computeAssessmentsError && (
+            <p className="px-3 py-2 text-[10px] text-red-600 border-b border-border">{computeAssessmentsError}</p>
+          )}
+          {computeAssessmentsMessage && (
+            <p className="px-3 py-2 text-[10px] text-[#166534] border-b border-border">{computeAssessmentsMessage}</p>
+          )}
+
+          {!isLoadingTyphoonSummary && !typhoonSummaryError && typhoonSummary && (
+            typhoonSummary.areas_hit.length === 0 ? (
+              <p className="px-3 py-2.5 text-[10px] text-muted-foreground">No exposure summary computed yet for this typhoon.</p>
+            ) : (
+              <>
+                <div className="grid grid-cols-3 gap-2.5 p-3">
+                  {[
+                    { label: "Areas Hit", value: String(typhoonSummary.areas_hit.length), color: "#1e3a5f" },
+                    { label: "People Hit", value: String(typhoonSummary.people_hit), color: "#166534" },
+                    { label: "Max Signal Number", value: `No. ${typhoonSummary.max_signal_level}`, color: "#ca8a04" },
+                    { label: "Exposure Time", value: `${typhoonSummary.exposure_duration_hours}h`, color: "#7c3aed" },
+                    { label: "Start", value: formatDateTime(typhoonSummary.start_time), color: "#0369a1" },
+                    { label: "End", value: formatDateTime(typhoonSummary.end_time), color: "#0369a1" },
+                  ].map((s, i) => (
+                    <div key={i} className="bg-background border border-border rounded-lg px-2.5 py-2">
+                      <p className="text-[9px] text-muted-foreground uppercase tracking-wide">{s.label}</p>
+                      <p className="text-sm font-bold mt-0.5" style={{ color: s.color }}>{s.value}</p>
+                    </div>
+                  ))}
+                </div>
+                <table className="w-full text-[10px]">
+                  <thead>
+                    <tr className="bg-[#1e3a5f] text-white">
+                      <th className="px-2 py-1.5 text-left font-semibold">Municipality</th>
+                      <th className="px-2 py-1.5 text-left font-semibold">Province</th>
+                      <th className="px-2 py-1.5 text-left font-semibold">Signal Number</th>
+                      <th className="px-2 py-1.5 text-left font-semibold">Exposure (h)</th>
+                      <th className="px-2 py-1.5 text-left font-semibold">Start Time</th>
+                      <th className="px-2 py-1.5 text-left font-semibold">End Time</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {typhoonSummary.areas_hit.map((a, i) => (
+                      <tr key={i} className={`border-t border-border ${i % 2 === 0 ? "" : "bg-muted/10"}`}>
+                        <td className="px-2 py-1.5 font-semibold text-[#166534]">{a.municipality}</td>
+                        <td className="px-2 py-1.5 text-muted-foreground">{a.province}</td>
+                        <td className="px-2 py-1.5">Signal No. {a.max_signal_level}</td>
+                        <td className="px-2 py-1.5">{a.total_exposure_hours}</td>
+                        <td className="px-2 py-1.5">{formatDateTime(a.start_time)}</td>
+                        <td className="px-2 py-1.5">{formatDateTime(a.end_time)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </>
+            )
+          )}
         </div>
       )}
 

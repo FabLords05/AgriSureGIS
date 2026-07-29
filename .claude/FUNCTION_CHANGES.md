@@ -1073,3 +1073,119 @@ the remote after this merge is pushed.
   in chronological order.
 * Not pushed yet.
 
+---
+
+## [2026-07-29] - Assessment & Reporting: Per-Typhoon Exposure Summary (replaces combined mock)
+
+Per Fabio's direction, replaced the mocked "Compute Exposure Summary — All Typhoons
+Combined" panel with a real, per-typhoon summary driven by clicking a typhoon in the
+sidebar, which was previously reference-only. Reuses the already-computed
+`tbl_area_exposure_summary` rows (populated once a typhoon's bulletins are done, not
+per-TCB) rather than triggering a new computation on click.
+
+### 1. File: `backend/app/api/bulletins.py`
+* Added **`GET /bulletins/typhoon/{typhoon_id}/summary`**: reads `AreaExposureSummary`
+  rows for a typhoon and returns `typhoon_name`, `areas_hit` (province/municipality/
+  max_signal_level/start_time/end_time/total_exposure_hours per boundary), overall
+  `max_signal_level`, overall `start_time`/`end_time` (min/max across areas), a derived
+  `exposure_duration_hours` (`end - start`, in hours), and `people_hit` — a count of
+  distinct farmers (`Farm.farmer_id`) whose `boundary_id` falls in one of the typhoon's
+  affected boundaries, regardless of whether a payout assessment has been computed for
+  them yet (per Fabio: "people hit" = spatial exposure, not assessment eligibility).
+  Does not trigger `ExposureCalculatorService.compute_for_typhoon()` — read-only.
+
+### 2. File: `frontend/src/lib/api.ts`
+* Added `TyphoonSummaryArea` and `TyphoonSummary` types, and `getTyphoonSummary()`
+  calling the new endpoint.
+
+### 3. File: `frontend/src/app/components/AssessmentModule.tsx`
+* Removed `MOCK_EXPOSURE_ROWS`, `ExposureSummaryRow`, `handleComputeExposure()`, and the
+  "Compute Exposure Summary" button/mock table (all frontend-only, per the 2026-07-29
+  PABS-format entry above).
+* Typhoon sidebar is no longer reference-only: cards are now buttons; clicking one
+  selects/deselects it (`selectedTyphoonId`) and fetches its summary via
+  `getTyphoonSummary()`. The `typhoons` memo now also carries a representative
+  `typhoon_id` per deduped name (first bulletin seen for that name), inheriting the
+  same known limitation as the existing name-based dedup if a typhoon's bulletins got
+  split across more than one `typhoon_id` by the bulletin-title parsing bug.
+* Added the new summary panel: stat tiles (Areas Hit, People Hit, Max Signal Number,
+  Exposure Time, Start, End) plus a per-area breakdown table, shown when a typhoon is
+  selected; states covered: loading, error, and "not computed yet" (empty
+  `areas_hit`). Added `formatDateTime()` helper for the ISO timestamps.
+* The farmer-level PABS combined table/badge/export below is unchanged — still
+  intentionally all-typhoons-combined, per Fabio's earlier direction; only the
+  typhoon-scoped exposure panel was in scope here.
+
+### Status / Next Steps
+* Not tested end-to-end yet (Fabio's local venv/frontend, per `CLAUDE.md`'s execution
+  rules) — needs `AreaExposureSummary` rows to actually exist for a typhoon (via
+  Monitoring's existing "Compute Exposure" action) to see a non-empty panel.
+* Not pushed yet.
+
+---
+
+## [2026-07-29] - Mock Data for Assessment & Reporting Usability Testing (Talakag + Claveria)
+
+Per Fabio's request, added standalone mock/test fixtures to exercise the Assessment &
+Reporting module (including the per-typhoon panel above) end-to-end without touching
+real data. `docs/Rice Risk Exposure Region X 04-15-2026.csv` was used only as the
+format reference for the CSV columns — none of its actual data was reused. Also
+re-added a "Compute Assessments" trigger (removed in the 2026-07-29 PABS-format entry
+above) since there was otherwise no way to turn the mock exposure data into real
+`RiskAssessment` payouts from the UI.
+
+### 1. New file: `backend/mock_data/mock_farmers_talakag_claveria.csv`
+* 12 fake farmer/policy rows (6 Talakag/San Isidro, 6 Claveria/Poblacion), matching
+  the CSV-upload column format read by `backend/app/api/upload.py`'s
+  `prepare_row_payload()` exactly (`Province, Municipality, Barangay, FarmersID,
+  RSBSA No., Surname, Firstname, Middlename, FARMID, Georef ID, AreaInsured,
+  Policy No., Program Type, Product Name, Effectivity Date, Expiry Date,
+  AmountofCover, Stage No., Stage, EstimatedDamage, RiskExposureAmount`).
+  `Effectivity Date`/`Expiry Date` (06/01/2026–12/31/2026) deliberately bracket the
+  mock typhoon's bulletin dates below. `Stage No.` cycles through 1/2/3
+  (Booting/Flowering/Maturity) so all three `RecsapMatrix` crop-stage rows are
+  reachable. Intended for upload via the existing Data Ingestion module's CSV
+  uploader (`POST /api/upload/csv`) — no code changes needed to use it.
+
+### 2. New files: `backend/mock_data/gpx/*.gpx` (12 files)
+* One small rectangular polygon boundary per mock farm, filenames following
+  `GpxFarmerMatcherService`'s `_TAIL_RE` pattern (`..._<FarmersID>_<FARMID>_<date>.gpx`)
+  so each auto-matches its corresponding CSV row's farmer/farm on upload via
+  `POST /api/upload/gpx`. Coordinates are approximate/illustrative points spread out
+  around Talakag and Claveria — not surveyed real boundaries.
+
+### 3. New file: `backend/mock_data/seed_mock_typhoon.py`
+* One-off script (raw `psycopg2`, same connection pattern as
+  `backend/backfill_admin_boundary_geom.py`) that inserts a fictional typhoon
+  ("MARISOL", 2026 — clearly not a real PAGASA name) with two
+  `TropicalCycloneBulletin` rows 12 hours apart and `TcbSignal` rows for Talakag
+  (signal 3) and Claveria (signal 2) on each, so
+  `ExposureCalculatorService.compute_for_typhoon()` has real bulletin/signal data to
+  aggregate into a 12-hour exposure window for both municipalities (matches
+  `tbl_recsap_matrix`'s 12h bucket). Deliberately does not insert
+  `AreaExposureSummary`/`RiskAssessment` rows itself — those come from running the
+  app's own "Compute Exposure Summary" (Monitoring) and new "Compute Assessments"
+  (Assessment & Reporting, see below) actions afterward, so the rest of the pipeline
+  is exercised for real. Safe to re-run (skips if the typhoon already exists).
+  Requires `tbl_admin_boundaries` rows for Talakag/Claveria to already exist (i.e.
+  `seed_database.py` already run).
+
+### 4. File: `frontend/src/lib/api.ts` / `frontend/src/app/components/AssessmentModule.tsx`
+* Re-added a **"Compute Assessments"** button (calls the existing `calculateAssessments()`
+  / `POST /assessments/calculate`), now inside the per-typhoon exposure panel added
+  above rather than the top bar — shown only once a typhoon's exposure summary has
+  at least one area hit. Picks that typhoon's latest bulletin (highest
+  `bulletin_count`) to pass as `bulletin_id`; per `AssessmentService.calculate_for_bulletin()`
+  this only affects the "as of" eligibility date, since the actual computation already
+  combines the whole typhoon's exposure data internally — unaffected by which bulletin
+  is passed, consistent with the original removal reason from the PABS-format entry
+  above. On success, refreshes the main PABS table via the existing `loadSummary()`.
+
+### Status / Next Steps
+* Not run/tested yet — per `CLAUDE.md`'s DB/venv/frontend execution rules, Fabio needs
+  to run the seed script and upload the CSV/GPX files himself; see chat for the exact
+  step-by-step handoff.
+* Mock data is intentionally isolated (fake IDs `900001–900012`, fictional typhoon name)
+  so it can be identified and deleted later without touching real records.
+* Not pushed yet.
+

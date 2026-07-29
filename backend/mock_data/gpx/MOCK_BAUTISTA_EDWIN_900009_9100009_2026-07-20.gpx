@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="AgriSureGIS-mock-data" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk>
+    <name>MOCK FARM BOUNDARY - 900009/9100009 - Claveria, Misamis Oriental</name>
+    <trkseg>
+      <trkpt lat="8.6352" lon="124.8852"/>
+      <trkpt lat="8.6352" lon="124.8882"/>
+      <trkpt lat="8.6382" lon="124.8882"/>
+      <trkpt lat="8.6382" lon="124.8852"/>
+      <trkpt lat="8.6352" lon="124.8852"/>
+    </trkseg>
+  </trk>
+</gpx>
