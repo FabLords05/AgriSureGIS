@@ -1,10 +1,55 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { MapContainer, TileLayer, GeoJSON, CircleMarker, Marker, Popup } from "react-leaflet";
+import { MapContainer, TileLayer, GeoJSON, CircleMarker, Marker, Popup, useMap } from "react-leaflet";
 import type { Layer } from "leaflet";
 import type { Feature, FeatureCollection } from "geojson";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
+import "leaflet.gridlayer.googlemutant";
 import { Farm, Assessment, Bulletin, TcbSignal, getBulletinSignals } from "@/lib/api";
+
+const GOOGLE_MAPS_API_KEY: string | undefined = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
+
+// Bridges the real Google Maps JavaScript API into Leaflet via the googlemutant
+// plugin, per Fabio's request for real satellite imagery instead of street tiles.
+// The API key is added later by the team that owns it (Fabio's side) -- falls
+// back to the existing OpenStreetMap TileLayer whenever no key is set, so the
+// map never breaks in the meantime.
+function GoogleSatelliteLayer({ apiKey }: { apiKey: string }) {
+  const map = useMap();
+
+  useEffect(() => {
+    let cancelled = false;
+    let layer: L.Layer | null = null;
+
+    const addLayer = () => {
+      if (cancelled) return;
+      layer = (L as any).gridLayer.googleMutant({ type: "satellite" }).addTo(map);
+    };
+
+    if (window.google?.maps) {
+      addLayer();
+    } else {
+      const existing = document.getElementById("google-maps-script") as HTMLScriptElement | null;
+      if (existing) {
+        existing.addEventListener("load", addLayer);
+      } else {
+        const script = document.createElement("script");
+        script.id = "google-maps-script";
+        script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}`;
+        script.async = true;
+        script.addEventListener("load", addLayer);
+        document.head.appendChild(script);
+      }
+    }
+
+    return () => {
+      cancelled = true;
+      if (layer) map.removeLayer(layer);
+    };
+  }, [map, apiKey]);
+
+  return null;
+}
 
 interface FarmRow extends Farm {
   assessment: Assessment | null;
@@ -16,6 +61,7 @@ interface GISLeafletMapProps {
   onSelectFarm: (id: number | null) => void;
   selectedBulletin: Bulletin | null;
   darkMode: boolean;
+  focusMunicipality?: string | null;
 }
 
 // Real, approximate town-center coordinates for the two municipalities actually
@@ -61,6 +107,47 @@ function labelBoundary(feature: Feature, layer: Layer) {
   }
 }
 
+// Flies the map to whichever farm is selected -- its real GPX polygon bounds
+// if surveyed, otherwise its approximate marker position. Runs inside
+// MapContainer since useMap() only works there.
+function FlyToSelectedFarm({ farm, approxPos }: { farm: FarmRow | null; approxPos: [number, number] | null }) {
+  const map = useMap();
+  useEffect(() => {
+    if (!farm) return;
+    if (farm.location_geom) {
+      const bounds = L.geoJSON(farm.location_geom as any).getBounds();
+      if (bounds.isValid()) map.flyToBounds(bounds, { maxZoom: 16, padding: [40, 40] });
+    } else if (approxPos) {
+      map.flyTo(approxPos, 14);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [farm?.farm_id]);
+  return null;
+}
+
+// Flies the map to a searched/selected municipality's real boundary outline
+// (from the same regionXBoundaries GeoJSON used for the dashed context layer),
+// same idea as FlyToSelectedFarm but at municipality scale instead of farm scale.
+function FlyToMunicipality({ municipality, boundaries }: { municipality: string | null; boundaries: FeatureCollection | null }) {
+  const map = useMap();
+  useEffect(() => {
+    if (!municipality || !boundaries) return;
+    const matches = boundaries.features.filter(
+      f => (f.properties?.municipality ?? "").toLowerCase() === municipality.toLowerCase()
+    );
+    if (matches.length === 0) return;
+    const bounds = L.geoJSON({ type: "FeatureCollection", features: matches } as FeatureCollection).getBounds();
+    if (!bounds.isValid()) return;
+    // fitBounds' natural zoom (whatever fits the whole municipality shape) can be
+    // quite far out for a large/sprawling municipality -- floor it at 12 so the
+    // view never pulls back further than that, even if the shape doesn't fully fit.
+    const fitZoom = map.getBoundsZoom(bounds, false, [20, 20]);
+    map.flyTo(bounds.getCenter(), Math.max(fitZoom, 12));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [municipality, boundaries]);
+  return null;
+}
+
 // Spreads farms without real geometry into a small grid around their
 // municipality's real town center, so they don't overlap on the map.
 function approximateFarmPosition(municipality: string | null, indexInMunicipality: number): [number, number] {
@@ -71,7 +158,7 @@ function approximateFarmPosition(municipality: string | null, indexInMunicipalit
   return [base[0] + row * step, base[1] + (col - 1) * step];
 }
 
-export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBulletin, darkMode }: GISLeafletMapProps) {
+export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBulletin, darkMode, focusMunicipality }: GISLeafletMapProps) {
   const [affectedAreas, setAffectedAreas] = useState<TcbSignal[]>([]);
   const [regionXBoundaries, setRegionXBoundaries] = useState<FeatureCollection | null>(null);
 
@@ -139,10 +226,20 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
         zoom={9}
         style={{ height: "100%", width: "100%" }}
       >
-        <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a>'
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+        <FlyToSelectedFarm
+          farm={selectedFarm}
+          approxPos={selectedFarm ? approxPlacements.get(selectedFarm.farm_id) ?? null : null}
         />
+        <FlyToMunicipality municipality={focusMunicipality ?? null} boundaries={regionXBoundaries} />
+
+        {GOOGLE_MAPS_API_KEY ? (
+          <GoogleSatelliteLayer apiKey={GOOGLE_MAPS_API_KEY} />
+        ) : (
+          <TileLayer
+            attribution='&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a>'
+            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          />
+        )}
 
         {regionXBoundaries && (
           <GeoJSON data={regionXBoundaries} style={styleBoundary} onEachFeature={labelBoundary} />
@@ -168,7 +265,10 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
           </Marker>
         )}
 
-        {/* Real GPX-surveyed farm boundaries */}
+        {/* Real GPX-surveyed farm boundaries. No click-popup here -- the Selected
+            Farm Info Panel overlay already shows this same (and more) detail,
+            so clicking just selects/highlights instead of also popping up a
+            duplicate info box. */}
         {surveyedFarms.map(farm => {
           const isSelected = farm.farm_id === selectedFarmId;
           return (
@@ -177,23 +277,14 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
               data={farm.location_geom as any}
               style={{
                 color: isSelected ? "#ffffff" : "#1e3a5f",
-                fillColor: "#1e3a5f",
-                fillOpacity: 0.4,
+                fillColor: isSelected ? "#f59e0b" : "#1e3a5f",
+                fillOpacity: isSelected ? 0.65 : 0.4,
                 weight: isSelected ? 3 : 1.5,
               }}
               eventHandlers={{
                 click: () => onSelectFarm(farm.farm_id === selectedFarmId ? null : farm.farm_id),
               }}
-            >
-              <Popup>
-                <div className="text-xs space-y-0.5">
-                  <p className="font-semibold">{farm.farmer_name ?? "Unknown farmer"}</p>
-                  <p className="text-muted-foreground">Farm #{farm.farm_id} · {farm.barangay}, {farm.municipality}</p>
-                  <p>Area: <strong>{farm.area_size ?? "—"} ha</strong></p>
-                  <p className="text-[10px] text-[#1e3a5f] font-medium mt-1">Surveyed Boundary (GPX)</p>
-                </div>
-              </Popup>
-            </GeoJSON>
+            />
           );
         })}
 
@@ -209,22 +300,14 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
               radius={isSelected ? 8 : 6}
               pathOptions={{
                 color: isSelected ? "#ffffff" : "#9ca3af",
-                fillColor: "#9ca3af",
-                fillOpacity: 0.6,
+                fillColor: isSelected ? "#f59e0b" : "#9ca3af",
+                fillOpacity: isSelected ? 0.9 : 0.6,
                 weight: isSelected ? 3 : 1.5,
               }}
               eventHandlers={{
                 click: () => onSelectFarm(farm.farm_id === selectedFarmId ? null : farm.farm_id),
               }}
-            >
-              <Popup>
-                <div className="text-xs space-y-0.5">
-                  <p className="font-semibold">{farm.farmer_name ?? "Unknown farmer"}</p>
-                  <p className="text-muted-foreground">Farm #{farm.farm_id} · {farm.barangay}, {farm.municipality}</p>
-                  <p className="text-[10px] text-muted-foreground mt-1">No GPX boundary uploaded yet — approximate location shown</p>
-                </div>
-              </Popup>
-            </CircleMarker>
+            />
           );
         })}
       </MapContainer>

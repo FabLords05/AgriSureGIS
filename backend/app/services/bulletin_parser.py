@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.models.models import Typhoon, TropicalCycloneBulletin, TcbSignal, AdminBoundary
 from app.services.exposure_calculator import ExposureCalculatorService
+from app.services.assessment_service import AssessmentService
 
 # Base URL for PAGASA tropical cyclone bulletins (mock or real index page)
 PAGASA_INDEX_URL = "https://pubfiles.pagasa.dost.gov.ph/tamss/weather/bulletin/"
@@ -238,13 +239,19 @@ class BulletinParserService:
                 if os.path.exists(pdf_path):
                     os.remove(pdf_path)
 
-                # A final bulletin ("NR. 21F") means no more TCBs will follow for
-                # this typhoon — auto-run the exposure summary now instead of
-                # waiting on a manual POST /api/bulletins/{tcb_id}/compute-exposure
-                # click. Per Fabio's decision, this stops at the exposure summary;
-                # the assessment/payout calculation stays a separate manual step.
-                if parsed_data.get("is_final"):
-                    ExposureCalculatorService.compute_for_typhoon(bulletin.typhoon_id, db)
+                # Auto-run assessment computation (which internally also recomputes
+                # the exposure summary — see AssessmentService.calculate_for_bulletin)
+                # after every successfully parsed bulletin, not just the final one.
+                # UPDATED DECISION (overrides the earlier "keep assessment
+                # calculation manual" call, per explicit request during Sprint 5
+                # testing): results should now appear in Assessment & Reporting
+                # right after "Parse Latest Bulletin" without a separate manual
+                # POST /api/assessments/calculate step. Flagging for Fabio's
+                # awareness since he made the original manual-only call.
+                try:
+                    AssessmentService.calculate_for_bulletin(bulletin.typhoon_id, bulletin.tcb_id, db)
+                except ValueError:
+                    pass  # shouldn't happen (bulletin/typhoon just saved together), but don't crash the scrape loop over it
 
                 bulletins_created.append({
                     "tcb_id": bulletin.tcb_id,
@@ -282,7 +289,19 @@ class BulletinParserService:
             if typhoon.name.upper() not in currently_active_names:
                 typhoon.is_active = False
                 db.commit()
-                ExposureCalculatorService.compute_for_typhoon(typhoon.typhoon_id, db)
+                latest_bulletin = (
+                    db.query(TropicalCycloneBulletin)
+                    .filter(TropicalCycloneBulletin.typhoon_id == typhoon.typhoon_id)
+                    .order_by(TropicalCycloneBulletin.issued_at.desc())
+                    .first()
+                )
+                if latest_bulletin:
+                    try:
+                        AssessmentService.calculate_for_bulletin(typhoon.typhoon_id, latest_bulletin.tcb_id, db)
+                    except ValueError:
+                        pass
+                else:
+                    ExposureCalculatorService.compute_for_typhoon(typhoon.typhoon_id, db)
                 closed.append(typhoon)
         return closed
 
