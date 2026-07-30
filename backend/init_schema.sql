@@ -102,18 +102,24 @@ CREATE TABLE tbl_farms (
 );
 
 -- 5. Build the Transactional Tables (Children of Farms)
+-- policy_no is NOT globally unique: real PABS exports have one Policy No. (a
+-- batch/program policy) covering many different farmers/farms. The real
+-- per-row unique identity is (policy_no, farm_id) -- confirmed with Fabio
+-- 2026-07-30, after docs/Rice Risk Exposure Region X 04-15-2026.csv showed a
+-- single Policy No. spanning 10-14 distinct farmers.
 CREATE TABLE tbl_insurance_records (
     insurance_records_id SERIAL PRIMARY KEY,
     farmer_id INT REFERENCES tbl_farmers_profile(farmer_id) ON DELETE SET NULL,
     farm_id INT REFERENCES tbl_farms(farm_id) ON DELETE CASCADE,
-    policy_no VARCHAR(50) UNIQUE NOT NULL,
+    policy_no VARCHAR(50) NOT NULL,
     program_type VARCHAR(100),
     product_name VARCHAR(150),
     effectivity_date DATE,
     expiry_date DATE,
     amount_cover NUMERIC(15,2) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_insurance_records_policy_no_farm_id UNIQUE (policy_no, farm_id)
 );
 
 CREATE TABLE tbl_risk_assessment (

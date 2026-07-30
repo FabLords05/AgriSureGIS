@@ -89,7 +89,7 @@ def run_setup():
         insured_cover = str(row['InsuredAmountofCover']).replace(',', '') if row['InsuredAmountofCover'] else '0'
         cur.execute("""
             INSERT INTO tbl_insurance_records (farmer_id, farm_id, policy_no, program_type, effectivity_date, expiry_date, amount_cover)
-            VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (policy_no) DO NOTHING RETURNING insurance_records_id
+            VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (policy_no, farm_id) DO NOTHING RETURNING insurance_records_id
         """, (farmer_id, farm_id, row['Policy No.'], row['Program Type'], row['Effectivity Date'], row['Expiry Date'], insured_cover))
         
         ins_result = cur.fetchone()

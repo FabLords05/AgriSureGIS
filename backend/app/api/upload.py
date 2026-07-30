@@ -296,9 +296,15 @@ def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> 
             farm=farm,
         )
 
+    # Duplicate check is (policy_no, farm_id), not policy_no alone -- real PABS
+    # exports have one Policy No. (a batch/program policy) legitimately covering
+    # many different farmers/farms, each of which needs its own InsuranceRecord.
     insurance = (
         db.query(models.InsuranceRecord)
-        .filter(models.InsuranceRecord.policy_no == payload["insurance"]["policy_no"])
+        .filter(
+            models.InsuranceRecord.policy_no == payload["insurance"]["policy_no"],
+            models.InsuranceRecord.farm_id == farm.farm_id,
+        )
         .first()
     )
     if insurance is not None:

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Date, DateTime, ForeignKey, Integer, Numeric, String, Boolean, func
+from sqlalchemy import Column, Date, DateTime, ForeignKey, Integer, Numeric, String, Boolean, UniqueConstraint, func
 from sqlalchemy.orm import relationship
 from geoalchemy2 import Geometry
 
@@ -63,10 +63,19 @@ class Farm(Base):
 class InsuranceRecord(Base):
     __tablename__ = "tbl_insurance_records"
 
+    # policy_no is NOT globally unique: real PABS exports have one Policy No.
+    # (a batch/program policy) covering many different farmers/farms. The real
+    # per-row unique identity is (policy_no, farm_id) -- confirmed with Fabio
+    # 2026-07-30, after docs/Rice Risk Exposure Region X 04-15-2026.csv showed
+    # a single Policy No. spanning 10-14 distinct farmers.
+    __table_args__ = (
+        UniqueConstraint("policy_no", "farm_id", name="uq_insurance_records_policy_no_farm_id"),
+    )
+
     insurance_records_id = Column(Integer, primary_key=True, index=True)
     farmer_id = Column(Integer, ForeignKey("tbl_farmers_profile.farmer_id", ondelete="SET NULL"))
     farm_id = Column(Integer, ForeignKey("tbl_farms.farm_id", ondelete="CASCADE"))
-    policy_no = Column(String(50), unique=True, nullable=False)
+    policy_no = Column(String(50), nullable=False)
     program_type = Column(String(100))
     product_name = Column(String(150))
     effectivity_date = Column(Date)

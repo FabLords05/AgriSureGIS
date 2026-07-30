@@ -1246,3 +1246,81 @@ above) since there was otherwise no way to turn the mock exposure data into real
 * Auto-assessment-on-parse (item 4 above) needs Fabio's explicit sign-off — implemented per direct user request during testing, not per his own decision.
 * Not pushed yet — awaiting the user's own push per `CLAUDE.md`'s git-handoff rules.
 
+---
+
+## [2026-07-30] - Wire Up GPX Upload UI (Spatial Analysis module)
+
+Fabio found only CSV upload in the live UI when trying to load the mock GPX boundary
+files from the Talakag/Claveria test data. Investigation found `uploadGpx()` in
+`frontend/src/lib/api.ts` had zero callers anywhere in the frontend — the only GPX
+file input that ever existed was a `<input type="file" accept=".gpx">` in the unused,
+never-imported `frontend/src/app/components/SpatialModule.tsx` (superseded by
+`SpatialAnalysisModule.tsx`, which `App.tsx` actually mounts), and even that dead
+input had no `onChange` handler wired to anything.
+
+### 1. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* Added an **"Upload GPX"** button in the map toolbar, right next to the existing
+  "Upload CSV" one, with its own hidden `<input type="file" accept=".gpx" multiple>`.
+* Added **`handleGpxFilesSelected()`**: uploads each selected file sequentially (not
+  in parallel, so a large batch doesn't hammer the backend at once) via the existing
+  `uploadGpx()` — farmer/farm auto-detected from filename by
+  `GpxFarmerMatcherService`, same as before. Reuses the existing `uploadStatus`
+  banner, reporting a combined success/failure count across the batch, and calls
+  `refreshFarms()` afterward so the "GPX Boundary" column reflects newly-attached
+  geometry immediately.
+
+### Status / Next Steps
+* Not tested end-to-end yet (Fabio's local frontend, per `CLAUDE.md`'s execution
+  rules) — next step is uploading the 12 mock GPX files from
+  `backend/mock_data/gpx/` through this new button.
+* Not pushed yet.
+
+---
+
+## [2026-07-30] - Fix: policy_no Unique Constraint Wrongly Excluded Batch-Policy Farmers
+
+Fabio noticed some farmers from `docs/Rice Risk Exposure Region X 04-15-2026.csv`
+showed a blank crop stage in the app UI. Traced to `tbl_insurance_records.policy_no`
+being `UNIQUE` — but that CSV has one Policy No. legitimately covering many different
+farmers (e.g. Policy No. `1761604` spans 10 distinct farmers across rows 4-13,
+`1761606` spans 14 across rows 82-95): a batch/program policy, not one-farmer-one-policy.
+Confirmed with Fabio: this is real, not a source-data error. The old
+`_ingest_row()` duplicate check treated "policy_no already exists" as "already
+ingested, skip" — so only the *first* farmer under each shared Policy No. ever got an
+`InsuranceRecord` (and therefore the crop-stage-seeding `RiskAssessment` right after
+it); every other farmer sharing that Policy No. silently got a Farm/Farmer row with no
+Insurance/RiskAssessment at all, reported only as a `rows_skipped` count with no
+indication why.
+
+### 1. File: `backend/app/models/models.py`
+* `InsuranceRecord.policy_no`: removed `unique=True`. Added
+  `__table_args__ = (UniqueConstraint("policy_no", "farm_id", name="uq_insurance_records_policy_no_farm_id"),)`
+  — the real per-row unique identity is (policy_no, farm_id), not policy_no alone.
+
+### 2. File: `backend/init_schema.sql`
+* `tbl_insurance_records.policy_no`: `VARCHAR(50) UNIQUE NOT NULL` → `VARCHAR(50) NOT NULL`,
+  with a new table-level `CONSTRAINT uq_insurance_records_policy_no_farm_id UNIQUE (policy_no, farm_id)`.
+
+### 3. File: `backend/app/api/upload.py`
+* `_ingest_row()`'s duplicate-detection query now filters on both `policy_no` AND
+  `farm_id == farm.farm_id`, not `policy_no` alone — different farmers sharing a
+  policy number now each get their own `InsuranceRecord`/`RiskAssessment` instead of
+  being silently skipped after the first.
+
+### 4. File: `backend/seed_database.py`
+* `ON CONFLICT (policy_no) DO NOTHING` → `ON CONFLICT (policy_no, farm_id) DO NOTHING`
+  — required to match the new composite constraint; the old target no longer exists
+  once the schema changes, and `ON CONFLICT` errors if its target doesn't match an
+  actual constraint.
+
+### Status / Next Steps
+* Fabio applying a non-destructive `ALTER TABLE` himself (per `CLAUDE.md`'s DB-command
+  handoff rule) rather than a full `init_schema.sql` rewipe, to preserve existing data
+  (MARISOL typhoon, mock CSV/GPX farmers already loaded) — see chat for the exact
+  command handed to him.
+* After the ALTER TABLE, re-uploading `docs/Rice Risk Exposure Region X...csv` should
+  backfill `InsuranceRecord`/`RiskAssessment` (crop stage) for every farmer who was
+  previously silently skipped — their Farm/Farmer rows already exist from the earlier
+  upload, so nothing needs deleting first.
+* Not pushed yet.
+

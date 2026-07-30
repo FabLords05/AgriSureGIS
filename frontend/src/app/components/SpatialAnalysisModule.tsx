@@ -5,7 +5,7 @@ import {
 } from "lucide-react";
 import { GISLeafletMap } from "./GISLeafletMap";
 import { AOISARPanel } from "./AOISARPanel";
-import { getFarms, getAssessments, uploadCsv, Farm, Assessment, Bulletin } from "@/lib/api";
+import { getFarms, getAssessments, uploadCsv, uploadGpx, Farm, Assessment, Bulletin } from "@/lib/api";
 
 interface FarmRow extends Farm {
   assessment: Assessment | null;
@@ -34,6 +34,7 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
   const [topPanelH, setTopPanelH] = useState(55);
   const [uploadStatus, setUploadStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const csvInputRef = useRef<HTMLInputElement>(null);
+  const gpxInputRef = useRef<HTMLInputElement>(null);
 
   const refreshFarms = () => {
     setIsLoadingFarms(true);
@@ -123,6 +124,33 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
       });
   };
 
+  // Farmer/farm for each file is auto-detected from its filename (see
+  // GpxFarmerMatcherService) -- uploaded one at a time, not in parallel, so a
+  // large batch doesn't hammer the backend all at once.
+  const handleGpxFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = ""; // allow re-selecting the same filename(s) later
+    if (files.length === 0) return;
+
+    let succeeded = 0;
+    const failures: string[] = [];
+    for (const file of files) {
+      try {
+        await uploadGpx(file);
+        succeeded++;
+      } catch (error) {
+        failures.push(`${file.name}: ${error instanceof Error ? error.message : "upload failed"}`);
+      }
+    }
+
+    setUploadStatus(
+      failures.length === 0
+        ? { type: "success", message: `Uploaded ${succeeded} GPX file(s) successfully.` }
+        : { type: "error", message: `${succeeded} succeeded, ${failures.length} failed — ${failures.join("; ")}` }
+    );
+    refreshFarms();
+  };
+
   const SortIcon = ({ field }: { field: SortField }) =>
     sortField === field
       ? sortDir === "asc" ? <ChevronUp size={11} /> : <ChevronDown size={11} />
@@ -188,6 +216,20 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
               accept=".csv"
               hidden
               onChange={handleCsvFileSelected}
+            />
+            <button
+              onClick={() => gpxInputRef.current?.click()}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#1e3a5f] text-white text-[11px] font-medium hover:bg-[#172f4d] transition-colors"
+            >
+              <UploadCloud size={11} /> Upload GPX
+            </button>
+            <input
+              ref={gpxInputRef}
+              type="file"
+              accept=".gpx"
+              multiple
+              hidden
+              onChange={handleGpxFilesSelected}
             />
             <button
               onClick={() => setShowSARPanel(v => !v)}
