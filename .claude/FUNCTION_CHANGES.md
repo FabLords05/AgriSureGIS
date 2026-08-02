@@ -1324,6 +1324,16 @@ indication why.
   upload, so nothing needs deleting first.
 * Not pushed yet.
 
+---
+
+## [2026-08-03] - Login Page Static Layout
+
+### 1. File: `frontend/src/app/components/LoginScreen.tsx`
+* Root container (`LoginScreen`) changed from `min-h-screen` to `h-screen overflow-hidden` — the login page no longer grows taller than the viewport and scrolls; it's now fixed to viewport height.
+
+### Status / Next Steps
+* Cherry-picked directly onto `develop` from `fabio/db/pabs-ingestion-gpx-matching` at the user's request.
+
 
 ## [2026-08-03] - Typhoon-Wide TCB Summarization Gated on "F" Marker + is_active Decoupled from TCB Parsing
 
