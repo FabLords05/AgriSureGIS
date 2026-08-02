@@ -312,7 +312,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
 
   return (
     <div
-      className="min-h-screen flex flex-col"
+      className="h-screen overflow-hidden flex flex-col"
       style={{
         background: "linear-gradient(145deg, #0f4023 0%, #166534 40%, #1e3a5f 100%)",
       }}
