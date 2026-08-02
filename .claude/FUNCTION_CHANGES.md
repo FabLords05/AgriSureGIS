@@ -1324,3 +1324,272 @@ indication why.
   upload, so nothing needs deleting first.
 * Not pushed yet.
 
+
+## [2026-08-03] - Typhoon-Wide TCB Summarization Gated on "F" Marker + is_active Decoupled from TCB Parsing
+
+Two related decisions from Fabio: (1) farms must be cross-referenced against one
+typhoon-wide summary once a typhoon's bulletins are confirmed complete, not
+re-cross-referenced after every single TCB — reverting the 2026-07-30 "Auto-
+Assessment on Parse" entry's "run on every bulletin" behavior back to the
+original 2026-07-27 "only on the final bulletin" design, this time all the way
+through to the farm/payout assessment step, not just the exposure summary.
+(2) `Typhoon.is_active` ("is there a current typhoon") must no longer be decided
+by TCB parsing at all (neither the "F" marker nor reconciliation against
+PAGASA's bulletin-PDF index) — it's now driven exclusively by a new scraper
+reading PAGASA's public severe-weather-bulletin status page
+(https://www.pagasa.dost.gov.ph/tropical-cyclone/severe-weather-bulletin) for a
+recognized cyclone-category word. The "F" marker's only remaining job is
+gating when the exposure summary/assessment computation runs.
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* `scrape_and_save_all()`: the auto-run of `AssessmentService.calculate_for_bulletin()`
+  is now gated on `parsed_data.get("is_final")` — only a trailing-"F" bulletin
+  triggers it, not every parsed bulletin. Removed the `cls._reconcile_active_typhoons(links, db)`
+  call at the end of the method entirely (see below).
+* Removed `_reconcile_active_typhoons()` and its `ACTIVE_LINK_NAME_RE` filename
+  regex — both fully superseded by `PagasaStatusService` (new file, below), which
+  reads PAGASA's own status page instead of inferring activity from which TCB
+  PDFs happen to be listed.
+* `save_bulletin_to_db()`: no longer flips `Typhoon.is_active` on a final ("F")
+  bulletin. The "Get or Create Typhoon" block is extracted into a new
+  `get_or_create_typhoon(name, reference_time, db)` classmethod (same 30-day-
+  window name-matching logic, unchanged), reused by `PagasaStatusService` so
+  both the TCB side and the status-page side of PAGASA agree on which `Typhoon`
+  row a given name refers to. A newly-created `Typhoon` now defaults to
+  `is_active=False` (was `True`) — `PagasaStatusService` is the sole source of
+  truth for that flag now and typically confirms/sets it `True` moments later
+  in the same scrape cycle.
+* `PagasaScrapeError`'s docstring generalized (it's now raised by, and shared
+  with, `PagasaStatusService` too) — no behavior change.
+
+### 2. File: `backend/app/services/pagasa_status_scraper.py` (new)
+* Added **`PagasaStatusService`**: `fetch_active_storm_names()` fetches
+  PAGASA's severe-weather-bulletin status page and returns the uppercased
+  name of every cyclone currently listed there. Scoped specifically to
+  `<a class="swb">` tab-label elements (confirmed against the live page —
+  each active cyclone is a tab, e.g. `<a class="swb">Tropical Depression
+  &quot;Luis&quot;</a>`) rather than scanning the whole page text, so a stray
+  "typhoon" mention elsewhere (nav/footer/unrelated article) can't cause a
+  false positive — the same failure mode `bulletin_parser.py`'s own category
+  regex was previously rewritten to avoid. Category word list includes
+  "Super Typhoon" (bulletin_parser.py's TCB-title regex doesn't have this
+  case — no real sample bulletin carrying it was available when that regex
+  was written). Raises `PagasaScrapeError` on an unreachable page, same
+  distinction `fetch_active_bulletin_links()` already makes.
+  `sync_active_typhoons(active_names, db)` sets `Typhoon.is_active = True`
+  for each resolved name (via the shared `get_or_create_typhoon`) and `False`
+  for every other currently-active `Typhoon` — an empty list is a real signal
+  that correctly closes everything.
+
+### 3. File: `backend/app/api/bulletins.py`
+* `POST /parse`: after `scrape_and_save_all()`, now also calls
+  `PagasaStatusService.fetch_active_storm_names()` +
+  `.sync_active_typhoons()` in its own try/except (a status-page failure
+  doesn't hide a successful bulletin parse, or vice versa).
+
+### 4. File: `backend/app/core/scheduler.py`
+* `run_scheduled_scrape()`: now also runs the `PagasaStatusService` status
+  sync after the TCB scrape, in its own try/except block, so a failure in
+  either step doesn't skip or hide the other.
+
+### 5. File: `backend/app/api/typhoons.py` (new)
+* Added **`GET /typhoons/active`**: returns every `Typhoon` currently
+  `is_active=True` (per `PagasaStatusService`) as
+  `{typhoon_id, name, year}`. No `typhoons` router existed before this.
+  Registered in `backend/app/main.py`.
+
+### 6. File: `frontend/src/lib/api.ts`
+* Added `ActiveTyphoon`/`ActiveTyphoonsResult` types and `getActiveTyphoons()`
+  calling the new endpoint.
+
+### 7. File: `frontend/src/app/components/MonitoringModule.tsx`
+* The "Active Typhoon" stat card previously showed `bulletins[0]?.typhoon_name`
+  (the typhoon owning whichever bulletin row had the highest `bulletin_count`
+  ever ingested — not actually "active" in any meaningful sense, and unrelated
+  to `Typhoon.is_active`, which nothing in the frontend read at all). Now
+  fetches `getActiveTyphoons()` on load and after "Parse Latest Bulletin",
+  and shows the real active-typhoon name(s) (joined by ", ", or "—" if none).
+
+### 8. Files: `backend/tests/test_bulletin_parser.py`, `backend/tests/test_pagasa_status_scraper.py` (new)
+* `test_bulletin_parser.py`: updated `test_creates_new_typhoon_when_no_bulletin_within_30_days`
+  to assert `is_active=False` on the freshly-created row. Replaced
+  `test_save_bulletin_to_db_marks_typhoon_inactive_when_final` with
+  `test_save_bulletin_to_db_does_not_touch_is_active_even_when_final` (asserts
+  the opposite of the old behavior). Renamed/repointed
+  `test_final_bulletin_triggers_exposure_summary` →
+  `test_final_bulletin_triggers_assessment_calculation` and
+  `test_non_final_bulletin_does_not_trigger_exposure_summary` →
+  `test_non_final_bulletin_does_not_trigger_assessment_calculation` to patch
+  `AssessmentService.calculate_for_bulletin` (what the code now actually
+  gates) instead of `ExposureCalculatorService.compute_for_typhoon`. Removed
+  `ReconcileActiveTyphoonsTests` entirely (tested the now-deleted
+  `_reconcile_active_typhoons`). These three renamed/patched tests were
+  asserting pre-2026-07-30 behavior that the code had already stopped
+  matching (the unconditional-call change never updated them) — they were
+  almost certainly red before this entry; this both fixes and repurposes them.
+* `test_pagasa_status_scraper.py` (new): covers `fetch_active_storm_names()`
+  (HTTP/network error handling, `.swb`-tab extraction, multiple concurrent
+  tabs, "Super Typhoon", and the false-positive guard for a category word
+  appearing outside a `.swb` tab) and `sync_active_typhoons()` (activates a
+  matched name, closes unmatched typhoons, leaves an already-active match
+  untouched and excluded from the closing pass, closes everything on an
+  empty list).
+
+### Status / Next Steps
+* Not run against Fabio's venv yet — needs `pytest` for
+  `test_bulletin_parser.py` and the new `test_pagasa_status_scraper.py`, and
+  `npm run build`/`npm run dev` to confirm the frontend changes compile and
+  the Active Typhoon card renders correctly against a live backend.
+* The severe-weather-bulletin page's exact markup when **no** cyclone is
+  active is unconfirmed — a live fetch during this work only showed the
+  active-storm case (Tropical Depression "Luis" was genuinely active at the
+  time). `fetch_active_storm_names()`'s keyword-presence design is robust to
+  this (no `.swb` tabs / no recognized category word → `[]`, same as "nothing
+  active"), but it's worth Fabio double-checking the card shows "—" correctly
+  the next time PAR has no active system.
+* Not pushed yet.
+
+
+## [2026-08-03] - Mock Farm Data: Realistic Polygons + Spread Across More of Region X
+
+Fabio flagged the 12 mock farm GPX boundaries as inaccurate: each was a perfect
+uniform 0.0030°×0.0030° axis-aligned square (~11 ha, identical for all 12,
+marching in a diagonal grid) rather than an irregular real-world plot shape, and
+all 12 sat in just two municipalities (Talakag, Claveria). Cross-checking against
+the real boundary polygons in `frontend/public/data/region10-boundaries.geojson`
+also surfaced that farms 900001-900006's old square centers weren't even inside
+the real Talakag polygon at all -- a second, independent inaccuracy beyond shape.
+
+### 1. Files: `backend/mock_data/gpx/*.gpx` (all 12 rewritten)
+* Every farm's boundary is now an irregular quadrilateral (randomly jittered
+  corners, trapezoid-like -- not a uniform square) instead of the old identical
+  squares. Each polygon's area now roughly matches that farm's real
+  `AreaInsured` value from the CSV (1.2-3.0 ha) instead of the old uniform
+  ~11 ha. Every polygon's centroid is verified (via Shapely, against the real
+  municipality polygons in `region10-boundaries.geojson`) to actually fall
+  inside its claimed municipality -- confirmed the old Talakag placements did
+  not. Farms `900004`/`900005`/`900006` relocated from Talakag to Manolo
+  Fortich (Bukidnon), and `900010`/`900011`/`900012` from Claveria to City of
+  Gingoog (Misamis Oriental), per Fabio's request to spread the mock dataset
+  across more of Region X rather than just the original two municipalities --
+  both are real, already-seeded municipalities (`psgc_region10_boundaries.csv`).
+  Coordinates were computed via a one-off scratch script (not committed --
+  pure geometry/area-matching math, no app or DB dependency) and hand-verified
+  valid/simple/in-boundary before being written; not run through the actual
+  upload pipeline yet.
+
+### 2. File: `backend/mock_data/mock_farmers_talakag_claveria.csv`
+* Rows for FarmersID `900004`-`900006` and `900010`-`900012`: `Municipality`/
+  `Barangay` updated to match the GPX relocation above (`Talakag`/`San Isidro`
+  → `Manolo Fortich`/`Alae`; `Claveria`/`Poblacion` → `City of Gingoog`/
+  `Agay-ayan`); `Province` unchanged (both new municipalities are in the same
+  province as their old one). `Georef ID`'s embedded location code updated to
+  match (`R10-BUK-TAL-*` → `R10-BUK-MFO-*`, `R10-MIS-CLV-*` → `R10-MIS-GIN-*`)
+  so it doesn't keep referencing the old municipality. All other columns
+  (AreaInsured, AmountofCover, Stage, policy/RSBSA/farm IDs, etc.) untouched.
+  Filename kept as-is despite no longer being Talakag/Claveria-only, to avoid
+  a disruptive rename across every reference to it.
+
+### 3. File: `backend/mock_data/seed_mock_typhoon.py`
+* `BULLETINS[0]["signals"]` and `BULLETINS[1]["signals"]`: added a
+  `"Manolo Fortich"` entry alongside each existing `"Talakag"` entry (same
+  signal_level=3) and a `"City of Gingoog"` entry alongside each `"Claveria"`
+  entry (same signal_level=2), so farms relocated in #1/#2 above still get
+  exposure/assessment test coverage. Docstring and closing print statements
+  updated to mention both new municipalities instead of just the original two.
+
+### Status / Next Steps
+* Not run against Fabio's venv/DB yet. To pick this up: reset the DB (see
+  `.claude/BACKEND_DATABASE_WORKFLOW.md` §4), re-run `seed_database.py` +
+  `backfill_admin_boundary_geom.py`, re-upload the CSV + all 12 GPX files
+  (Data Ingestion module), run `mock_data/seed_mock_typhoon.py`, then
+  Monitoring → Compute Exposure Summary and Assessment & Reporting → Compute
+  Assessments for typhoon MARISOL -- same sequence as before, just now
+  spanning 4 municipalities instead of 2.
+* Not pushed yet.
+
+---
+
+## [2026-08-03] - Fix: PAGASA Bulletin "Issued At" Timestamp Mislabeled as UTC
+
+Fabio flagged that bulletin issue times were showing wrong values in the
+Monitoring module. Root cause: PAGASA states every bulletin's "Issued at"
+time in Philippine Standard Time (PHT/UTC+8), but `parse_bulletin_text()`
+labeled the parsed wall-clock value as `timezone.utc`, shifting the stored
+absolute instant 8 hours away from the real one. `TropicalCycloneBulletin`'s
+`issued_at`/`expires_at` columns were also mapped as timezone-naive
+`DateTime` in the ORM despite the DB schema (`init_schema.sql`) defining them
+as `TIMESTAMPTZ`. Separately, the frontend was rendering the raw ISO string
+(with its `+08:00` offset) directly instead of a formatted local time.
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* Added module-level `PHT = timezone(timedelta(hours=8))` constant (the
+  Philippines observes no DST, so a fixed offset is correct).
+* `parse_bulletin_text()`: the "Issued at" datetime is now tagged
+  `tzinfo=PHT` instead of `tzinfo=timezone.utc`, so the stored `issued_at`
+  represents the correct absolute instant.
+
+### 2. File: `backend/app/models/models.py`
+* `TropicalCycloneBulletin.issued_at` / `.expires_at`: changed from
+  `Column(DateTime, ...)` to `Column(DateTime(timezone=True), ...)` to match
+  the actual `TIMESTAMPTZ` columns in `init_schema.sql`.
+
+### 3. File: `backend/tests/test_bulletin_parser.py`
+* Imports `PHT` from `bulletin_parser` instead of using bare `timezone.utc`.
+* `test_parse_bulletin_text_against_real_sample_pdf()`: updated the expected
+  `issued_at` value's tzinfo from `timezone.utc` to `PHT` to match the fix.
+
+### 4. File: `frontend/src/app/components/MonitoringModule.tsx`
+* Added `formatIssuedAt()`: formats an `issued_at` ISO string via
+  `Intl.DateTimeFormat` (`timeZone: "Asia/Manila"`) into a readable local
+  date/time string, returning `"Unknown"` for null/invalid input.
+* Replaced all 6 raw `bulletin.issued_at` / `b.issued_at` /
+  `selectedBulletin.issued_at` render sites (TCB viewer modal header/detail
+  grid, bulletin list table row, selected-bulletin detail panel, and both
+  `.txt` export builders) with `formatIssuedAt(...)` calls. Left the
+  timeline-bucketing logic (`bulletinTimelineData`, which slices the raw ISO
+  string by day) untouched -- that's data grouping, not display.
+
+### Status / Next Steps
+* Verified: `python -m pytest tests/test_bulletin_parser.py -v` -- 23 passed.
+* Frontend visual check still pending (needs `npm run dev`).
+* Not pushed yet.
+
+---
+
+## [2026-08-03] - Bulletin List: Chronological Ordering + Sortable Columns
+
+Fabio flagged that the PAGASA TCB Bulletins table was ordered by "download
+stack" (insertion/bulletin_count order) rather than chronologically, and
+asked for it to be sortable.
+
+### 1. File: `backend/app/api/bulletins.py`
+* `list_bulletins()`: changed `ORDER BY` from `bulletin_count.desc()` to
+  `issued_at.desc()`. `bulletin_count` resets to 1 per typhoon, so ordering
+  by it interleaved typhoons out of true chronological order (e.g. an old
+  typhoon's bulletin #21 would outrank a newer typhoon's #3 issued more
+  recently). Newest-issued-first remains the default direction.
+
+### 2. File: `frontend/src/app/components/MonitoringModule.tsx`
+* Added `BulletinSortField` / `SortDir` types and `bulletinSortField`
+  (default `"issued_at"`) / `bulletinSortDir` (default `"desc"`) state,
+  matching the default chronological order now returned by the backend.
+* Added `sortedBulletins` (`useMemo`): client-side stable sort over
+  `bulletin_count`, `typhoon_name`, `issued_at` (parsed via `Date.parse`,
+  not string comparison), `category`, `max_sustained_winds`, or `gustiness`.
+  Kept separate from the raw `bulletins` array so sorting the table doesn't
+  change what `latestBulletin = bulletins[0]` refers to.
+* Added `handleBulletinSort()`, `BulletinSortIcon`, and `bulletinSortableCols`,
+  and made the bulletin table's column headers (`Bulletin`, `Typhoon`,
+  `Issued`, `Category`, `Max Winds`, `Gust`) clickable to toggle sort
+  field/direction -- mirrors the existing clickable-header +
+  `ChevronUp`/`ChevronDown` pattern already used in `AssessmentModule.tsx`
+  and `SpatialAnalysisModule.tsx`, not a new UI pattern. The bulletin table
+  body now renders `sortedBulletins` instead of `bulletins`.
+
+### Status / Next Steps
+* Not run against Fabio's venv/frontend dev server yet -- needs a visual
+  check in the Monitoring module (click each column header, confirm asc/desc
+  toggle and icon state).
+* Not pushed yet.
+

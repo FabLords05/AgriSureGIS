@@ -2,7 +2,7 @@ import os
 import unittest
 from datetime import datetime, timezone
 from unittest.mock import patch, AsyncMock, MagicMock
-from app.services.bulletin_parser import BulletinParserService, PagasaScrapeError
+from app.services.bulletin_parser import PHT, BulletinParserService, PagasaScrapeError
 from app.models.models import Typhoon, TropicalCycloneBulletin, TcbSignal, AdminBoundary
 
 REAL_SAMPLE_PDF = os.path.join(os.path.dirname(__file__), "..", "..", "docs", "TCB#11_kiyapo.pdf")
@@ -181,7 +181,7 @@ class BulletinParserTests(unittest.TestCase):
         self.assertEqual(result["gustiness"], 90)
         self.assertEqual(result["latitude"], 18.8)
         self.assertEqual(result["longitude"], 122.0)
-        self.assertEqual(result["issued_at"], datetime(2026, 7, 24, 14, 0, tzinfo=timezone.utc))
+        self.assertEqual(result["issued_at"], datetime(2026, 7, 24, 14, 0, tzinfo=PHT))
         self.assertEqual(result["signals"], {})
 
 
@@ -314,10 +314,17 @@ class BulletinParserSaveToDbTests(unittest.TestCase):
         self.assertEqual(len(created_typhoons), 1)
         self.assertEqual(created_typhoons[0].name, "GARDO")
         self.assertEqual(created_typhoons[0].year, 2024)
+        # is_active is no longer decided at creation time -- PagasaStatusService's
+        # status-page check is the sole source of truth for it now.
+        self.assertFalse(created_typhoons[0].is_active)
 
-    def test_save_bulletin_to_db_marks_typhoon_inactive_when_final(self):
-        # A bulletin number with a trailing "F" (e.g. "NR. 21F") is PAGASA's own
-        # signal that no more bulletins will follow for this typhoon.
+    def test_save_bulletin_to_db_does_not_touch_is_active_even_when_final(self):
+        # A bulletin number with a trailing "F" (e.g. "NR. 21F") is still PAGASA's
+        # signal that no more bulletins will follow -- but that now only gates
+        # whether the exposure summary/assessment gets computed (see
+        # ScrapeAndSaveAllTests below), not is_active. PagasaStatusService's
+        # severe-weather-bulletin page check is the sole source of truth for
+        # is_active now; TCB parsing must leave it alone regardless of is_final.
         existing_typhoon = Typhoon(name="FRANCISCO", year=2026, is_active=True)
         existing_typhoon.typhoon_id = 9
         mock_db = self._build_mock_db(boundaries=[], existing_typhoon=existing_typhoon)
@@ -338,7 +345,7 @@ class BulletinParserSaveToDbTests(unittest.TestCase):
 
         BulletinParserService.save_bulletin_to_db(parsed_data, mock_db)
 
-        self.assertFalse(existing_typhoon.is_active)
+        self.assertTrue(existing_typhoon.is_active)
 
 
 class ScrapeAndSaveAllTests(unittest.IsolatedAsyncioTestCase):
@@ -394,12 +401,12 @@ class ScrapeAndSaveAllTests(unittest.IsolatedAsyncioTestCase):
             [{"tcb_id": 100, "title": "Bulletin No. 5 for LEON", "bulletin_count": 5, "is_final": False}],
         )
 
-    async def test_final_bulletin_triggers_exposure_summary(self):
+    async def test_final_bulletin_triggers_assessment_calculation(self):
         with patch.object(BulletinParserService, "fetch_active_bulletin_links", new_callable=AsyncMock) as mock_fetch, \
              patch.object(BulletinParserService, "download_bulletin_pdf", new_callable=AsyncMock) as mock_download, \
              patch.object(BulletinParserService, "parse_bulletin_text") as mock_parse, \
              patch.object(BulletinParserService, "save_bulletin_to_db") as mock_save, \
-             patch("app.services.bulletin_parser.ExposureCalculatorService.compute_for_typhoon") as mock_compute, \
+             patch("app.services.bulletin_parser.AssessmentService.calculate_for_bulletin") as mock_calc, \
              patch("os.path.exists", return_value=False):
             mock_fetch.return_value = ["https://pagasa.example/tcb21f.pdf"]
             mock_download.return_value = "temp_bulletins/tcb21f.pdf"
@@ -409,15 +416,15 @@ class ScrapeAndSaveAllTests(unittest.IsolatedAsyncioTestCase):
 
             result = await BulletinParserService.scrape_and_save_all(mock_db)
 
-        mock_compute.assert_called_once_with(9, mock_db)
+        mock_calc.assert_called_once_with(9, 200, mock_db)
         self.assertTrue(result[0]["is_final"])
 
-    async def test_non_final_bulletin_does_not_trigger_exposure_summary(self):
+    async def test_non_final_bulletin_does_not_trigger_assessment_calculation(self):
         with patch.object(BulletinParserService, "fetch_active_bulletin_links", new_callable=AsyncMock) as mock_fetch, \
              patch.object(BulletinParserService, "download_bulletin_pdf", new_callable=AsyncMock) as mock_download, \
              patch.object(BulletinParserService, "parse_bulletin_text") as mock_parse, \
              patch.object(BulletinParserService, "save_bulletin_to_db") as mock_save, \
-             patch("app.services.bulletin_parser.ExposureCalculatorService.compute_for_typhoon") as mock_compute, \
+             patch("app.services.bulletin_parser.AssessmentService.calculate_for_bulletin") as mock_calc, \
              patch("os.path.exists", return_value=False):
             mock_fetch.return_value = ["https://pagasa.example/tcb11.pdf"]
             mock_download.return_value = "temp_bulletins/tcb11.pdf"
@@ -426,20 +433,20 @@ class ScrapeAndSaveAllTests(unittest.IsolatedAsyncioTestCase):
 
             await BulletinParserService.scrape_and_save_all(MagicMock())
 
-        mock_compute.assert_not_called()
+        mock_calc.assert_not_called()
 
-    async def test_propagates_pagasa_scrape_error_and_skips_reconciliation(self):
+    async def test_propagates_pagasa_scrape_error(self):
         # A real fetch failure must not be treated as "confirmed nothing active" —
         # it should propagate (the scheduler job's own try/except handles it) and
-        # never reach the reconciliation step.
+        # never reach the assessment-calculation step.
         with patch.object(BulletinParserService, "fetch_active_bulletin_links", new_callable=AsyncMock) as mock_fetch, \
-             patch("app.services.bulletin_parser.ExposureCalculatorService.compute_for_typhoon") as mock_compute:
+             patch("app.services.bulletin_parser.AssessmentService.calculate_for_bulletin") as mock_calc:
             mock_fetch.side_effect = PagasaScrapeError("network down")
 
             with self.assertRaises(PagasaScrapeError):
                 await BulletinParserService.scrape_and_save_all(MagicMock())
 
-        mock_compute.assert_not_called()
+        mock_calc.assert_not_called()
 
 
 def _fake_httpx_client(response=None, get_side_effect=None):
@@ -474,76 +481,6 @@ class FetchActiveBulletinLinksTests(unittest.IsolatedAsyncioTestCase):
             result = await BulletinParserService.fetch_active_bulletin_links()
 
         self.assertEqual(result, [])
-
-
-class ReconcileActiveTyphoonsTests(unittest.TestCase):
-    """
-    Covers `_reconcile_active_typhoons`: cross-checks Typhoon rows still marked
-    is_active=True against PAGASA's current active-bulletin listing (by storm
-    name parsed from each link's real filename convention,
-    "TCB#<n>[F]_<name>.pdf"), closing any typhoon no longer represented there.
-    """
-
-    def _build_mock_db(self, active_typhoons):
-        mock_db = MagicMock()
-        mock_db.query.return_value.filter.return_value.all.return_value = active_typhoons
-        return mock_db
-
-    @patch("app.services.bulletin_parser.ExposureCalculatorService.compute_for_typhoon")
-    def test_closes_typhoon_no_longer_in_active_links(self, mock_compute):
-        stale = Typhoon(name="GARDO", year=2026, is_active=True)
-        stale.typhoon_id = 5
-        mock_db = self._build_mock_db([stale])
-
-        closed = BulletinParserService._reconcile_active_typhoons(
-            ["https://pagasa.example/TCB#3_francisco.pdf"], mock_db
-        )
-
-        self.assertEqual(closed, [stale])
-        self.assertFalse(stale.is_active)
-        mock_compute.assert_called_once_with(5, mock_db)
-
-    @patch("app.services.bulletin_parser.ExposureCalculatorService.compute_for_typhoon")
-    def test_keeps_typhoon_still_in_active_links(self, mock_compute):
-        active = Typhoon(name="FRANCISCO", year=2026, is_active=True)
-        active.typhoon_id = 6
-        mock_db = self._build_mock_db([active])
-
-        closed = BulletinParserService._reconcile_active_typhoons(
-            ["https://pagasa.example/TCB#3_francisco.pdf"], mock_db
-        )
-
-        self.assertEqual(closed, [])
-        self.assertTrue(active.is_active)
-        mock_compute.assert_not_called()
-
-    @patch("app.services.bulletin_parser.ExposureCalculatorService.compute_for_typhoon")
-    def test_matches_name_despite_final_suffix_in_filename(self, mock_compute):
-        # "TCB#21F_francisco.pdf" — the numeric part carries the same trailing
-        # "F" final-bulletin marker used inside the PDF text.
-        active = Typhoon(name="FRANCISCO", year=2026, is_active=True)
-        active.typhoon_id = 7
-        mock_db = self._build_mock_db([active])
-
-        closed = BulletinParserService._reconcile_active_typhoons(
-            ["https://pagasa.example/TCB#21F_francisco.pdf"], mock_db
-        )
-
-        self.assertEqual(closed, [])
-        mock_compute.assert_not_called()
-
-    @patch("app.services.bulletin_parser.ExposureCalculatorService.compute_for_typhoon")
-    def test_closes_everything_when_active_links_is_empty(self, mock_compute):
-        # A successful check that found zero active bulletins is a real signal —
-        # every currently is_active=True typhoon should close.
-        stale = Typhoon(name="GARDO", year=2026, is_active=True)
-        stale.typhoon_id = 8
-        mock_db = self._build_mock_db([stale])
-
-        closed = BulletinParserService._reconcile_active_typhoons([], mock_db)
-
-        self.assertEqual(closed, [stale])
-        self.assertFalse(stale.is_active)
 
 
 if __name__ == "__main__":

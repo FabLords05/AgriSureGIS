@@ -3,11 +3,11 @@
   <trk>
     <name>MOCK FARM BOUNDARY - 900001/9100001 - Talakag, Bukidnon</name>
     <trkseg>
-      <trkpt lat="8.2152" lon="124.7485"/>
-      <trkpt lat="8.2152" lon="124.7515"/>
-      <trkpt lat="8.2182" lon="124.7515"/>
-      <trkpt lat="8.2182" lon="124.7485"/>
-      <trkpt lat="8.2152" lon="124.7485"/>
+      <trkpt lat="7.9798" lon="124.7385"/>
+      <trkpt lat="7.9797" lon="124.7399"/>
+      <trkpt lat="7.9811" lon="124.7396"/>
+      <trkpt lat="7.9810" lon="124.7386"/>
+      <trkpt lat="7.9798" lon="124.7385"/>
     </trkseg>
   </trk>
 </gpx>

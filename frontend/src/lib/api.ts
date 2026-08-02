@@ -188,6 +188,23 @@ export function getTyphoonSummary(typhoonId: number): Promise<TyphoonSummary> {
   return request<TyphoonSummary>(`/api/bulletins/typhoon/${typhoonId}/summary`);
 }
 
+export interface ActiveTyphoon {
+  typhoon_id: number;
+  name: string;
+  year: number;
+}
+
+export interface ActiveTyphoonsResult {
+  status: string;
+  active_typhoons: ActiveTyphoon[];
+}
+
+// Reflects PAGASA's severe-weather-bulletin status page (PagasaStatusService),
+// not TCB bulletin parsing -- see FUNCTION_CHANGES.md.
+export function getActiveTyphoons(): Promise<ActiveTyphoonsResult> {
+  return request<ActiveTyphoonsResult>('/api/typhoons/active');
+}
+
 export function getParserSettings(): Promise<ParserSettings> {
   return request<ParserSettings>('/api/bulletins/settings');
 }

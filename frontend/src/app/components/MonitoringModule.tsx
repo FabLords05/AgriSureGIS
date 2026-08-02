@@ -2,21 +2,26 @@ import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import {
   Activity, Download, FileDown,
   RefreshCw, Eye, BarChart2, TrendingUp, Zap,
-  Satellite, X, MapPin, User, MapPinned, ShieldCheck
+  Satellite, X, MapPin, User, MapPinned, ShieldCheck,
+  ChevronUp, ChevronDown, ArrowUpDown
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip as RTooltip, ResponsiveContainer,
   PieChart, Pie, Cell, LineChart, Line, CartesianGrid, Legend
 } from "recharts";
 import {
-  Bulletin, TcbSignal, Farm, Assessment, InsuranceSummary,
+  Bulletin, TcbSignal, Farm, Assessment, InsuranceSummary, ActiveTyphoon,
   getBulletins, parseBulletins, getBulletinSignals,
   computeExposure, ComputeExposureResult, getFarms, getAssessments, getInsuranceSummary,
+  getActiveTyphoons,
 } from "@/lib/api";
 
 interface FarmRow extends Farm {
   assessment: Assessment | null;
 }
+
+type BulletinSortField = "bulletin_count" | "typhoon_name" | "issued_at" | "category" | "max_sustained_winds" | "gustiness";
+type SortDir = "asc" | "desc";
 
 const GROWTH_STAGE_COLORS = ["#22c55e", "#eab308", "#f59e0b", "#86efac", "#a3a3a3"];
 const SIGNAL_BAR_COLOR = "#166534";
@@ -27,6 +32,17 @@ function uniqueAreas(signals: TcbSignal[]): string[] {
 
 function maxSignalLevel(signals: TcbSignal[]): number {
   return signals.length ? Math.max(...signals.map(s => s.signal_level)) : 0;
+}
+
+function formatIssuedAt(isoString: string | null | undefined): string {
+  if (!isoString) return "Unknown";
+  const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) return "Unknown";
+  return new Intl.DateTimeFormat("en-PH", {
+    timeZone: "Asia/Manila",
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
 }
 
 // ─── TCB Detail Viewer Modal ─────────────────────────────────────────────────
@@ -45,7 +61,7 @@ function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bull
       `TROPICAL CYCLONE: ${bulletin.typhoon_name.toUpperCase()}`,
       `BULLETIN NO.: ${bulletin.bulletin_count}`,
       `CATEGORY: ${bulletin.category ?? "Unknown"}`,
-      `ISSUED: ${bulletin.issued_at ?? "Unknown"}`,
+      `ISSUED: ${formatIssuedAt(bulletin.issued_at)}`,
       `MAX SUSTAINED WINDS: ${bulletin.max_sustained_winds ?? "—"} km/h`,
       `GUSTINESS: ${bulletin.gustiness ?? "—"} km/h`,
       "",
@@ -75,7 +91,7 @@ function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bull
             <FileDown size={15} className="text-emerald-400" />
             <div>
               <p className="text-[12px] font-bold text-white">TCB No. {bulletin.bulletin_count} — Tropical Cyclone {bulletin.typhoon_name}</p>
-              <p className="text-[10px] text-white/60">{bulletin.issued_at ?? "Unknown date"}</p>
+              <p className="text-[10px] text-white/60">{formatIssuedAt(bulletin.issued_at)}</p>
             </div>
           </div>
           <button onClick={onClose} className="w-6 h-6 flex items-center justify-center rounded hover:bg-white/10 text-white/60 hover:text-white transition-colors">
@@ -110,7 +126,7 @@ function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bull
                 ["Cyclone Name", bulletin.typhoon_name],
                 ["Bulletin No.", String(bulletin.bulletin_count)],
                 ["Category", bulletin.category ?? "Unknown"],
-                ["Issued", bulletin.issued_at ?? "Unknown"],
+                ["Issued", formatIssuedAt(bulletin.issued_at)],
                 ["Max Winds", `${bulletin.max_sustained_winds ?? "—"} km/h`],
               ].map(([k, v]) => (
                 <div key={k} className="flex gap-2">
@@ -414,6 +430,12 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
   const [isParsing, setIsParsing] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  // Default matches the backend's own ordering (newest issued first) --
+  // chronological by issued_at, not by bulletin_count (which resets per
+  // typhoon and so isn't a true chronological key across typhoons).
+  const [bulletinSortField, setBulletinSortField] = useState<BulletinSortField>("issued_at");
+  const [bulletinSortDir, setBulletinSortDir] = useState<SortDir>("desc");
+
   const [selectedSignals, setSelectedSignals] = useState<TcbSignal[]>([]);
   const [isLoadingSelectedSignals, setIsLoadingSelectedSignals] = useState(false);
 
@@ -431,12 +453,23 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
   const [farms, setFarms] = useState<Farm[]>([]);
   const [assessments, setAssessments] = useState<Assessment[]>([]);
   const [insuranceSummary, setInsuranceSummary] = useState<InsuranceSummary | null>(null);
+  const [activeTyphoons, setActiveTyphoons] = useState<ActiveTyphoon[]>([]);
+
+  const loadActiveTyphoons = useCallback(async () => {
+    try {
+      const res = await getActiveTyphoons();
+      setActiveTyphoons(res.active_typhoons);
+    } catch {
+      setActiveTyphoons([]);
+    }
+  }, []);
 
   useEffect(() => {
     getFarms().then(res => setFarms(res.data)).catch(() => setFarms([]));
     getAssessments().then(res => setAssessments(res.data)).catch(() => setAssessments([]));
     getInsuranceSummary().then(setInsuranceSummary).catch(() => setInsuranceSummary(null));
-  }, []);
+    loadActiveTyphoons();
+  }, [loadActiveTyphoons]);
 
   // Most recent assessment per farm_id (list_assessments() is ordered by assessment_date desc).
   const assessmentByFarmId = useMemo(() => {
@@ -525,6 +558,7 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
     try {
       await parseBulletins();
       await loadBulletins();
+      await loadActiveTyphoons();
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : "Failed to parse latest bulletin.");
     } finally {
@@ -581,7 +615,7 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
       `Cyclone: ${b.typhoon_name}`,
       `Bulletin No.: ${b.bulletin_count}`,
       `Category: ${b.category ?? "Unknown"}`,
-      `Issued: ${b.issued_at ?? "Unknown"}`,
+      `Issued: ${formatIssuedAt(b.issued_at)}`,
       `Max Sustained Winds: ${b.max_sustained_winds ?? "—"} km/h`,
       `Gustiness: ${b.gustiness ?? "—"} km/h`,
     ].join("\n");
@@ -595,10 +629,58 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
   };
 
   const latestBulletin = bulletins[0];
+
+  // Client-side sort for the bulletins table -- separate from the raw
+  // `bulletins` array (which stays in API order, newest-issued-first, for
+  // `latestBulletin` above) so sorting the table doesn't change what counts
+  // as "latest."
+  const sortedBulletins = useMemo(() => {
+    const indexed = bulletins.map((b, i) => ({ b, i }));
+    indexed.sort((x, y) => {
+      let cmp: number;
+      if (bulletinSortField === "issued_at") {
+        cmp = (x.b.issued_at ? Date.parse(x.b.issued_at) : 0) - (y.b.issued_at ? Date.parse(y.b.issued_at) : 0);
+      } else {
+        const av = x.b[bulletinSortField];
+        const cv = y.b[bulletinSortField];
+        cmp = typeof av === "number" && typeof cv === "number"
+          ? av - cv
+          : String(av ?? "").localeCompare(String(cv ?? ""));
+      }
+      if (cmp === 0) cmp = x.i - y.i; // stable tiebreak
+      return bulletinSortDir === "asc" ? cmp : -cmp;
+    });
+    return indexed.map(({ b }) => b);
+  }, [bulletins, bulletinSortField, bulletinSortDir]);
+
+  const handleBulletinSort = (field: BulletinSortField) => {
+    if (bulletinSortField === field) {
+      setBulletinSortDir(d => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setBulletinSortField(field);
+      setBulletinSortDir(field === "issued_at" ? "desc" : "asc");
+    }
+  };
+
+  const BulletinSortIcon = ({ field }: { field: BulletinSortField }) =>
+    bulletinSortField === field
+      ? bulletinSortDir === "asc" ? <ChevronUp size={11} /> : <ChevronDown size={11} />
+      : <ArrowUpDown size={11} className="opacity-30" />;
+
+  const bulletinSortableCols: { label: string; field: BulletinSortField }[] = [
+    { label: "Bulletin", field: "bulletin_count" },
+    { label: "Typhoon", field: "typhoon_name" },
+    { label: "Issued", field: "issued_at" },
+    { label: "Category", field: "category" },
+    { label: "Max Winds", field: "max_sustained_winds" },
+    { label: "Gust", field: "gustiness" },
+  ];
+
   const selectedMaxSignal = maxSignalLevel(selectedSignals);
+  const activeTyphoonNames = activeTyphoons.map(t => t.name).join(", ");
 
   const statCards = [
-    { label:"Active Typhoon",       value: latestBulletin?.typhoon_name ?? "—", sub: latestBulletin?.category ?? "No bulletins yet", icon:<Zap size={18} />,        color:"#ef4444", bg:"bg-red-50 dark:bg-red-950/30",     border:"border-red-200 dark:border-red-900" },
+    { label:"Active Typhoon",       value: activeTyphoonNames || "—", sub:"From PAGASA status page", icon:<Zap size={18} />,        color:"#ef4444", bg:"bg-red-50 dark:bg-red-950/30",     border:"border-red-200 dark:border-red-900" },
     { label:"TCBs Downloaded",      value: bulletins.length, sub:"from PAGASA parser",  icon:<Download size={18} />,   color:"#1e3a5f", bg:"bg-blue-50 dark:bg-blue-950/30",   border:"border-blue-200 dark:border-blue-900" },
     { label:"Affected Farms",       value:`${affectedFarms}/${totalFarms}`,  sub:`${totalArea.toFixed(1)} ha`,icon:<Activity size={18} />, color:"#166534", bg:"bg-green-50 dark:bg-green-950/30", border:"border-green-200 dark:border-green-900" },
     { label:"Est. Total Indemnity", value:`₱${(totalIndemnity/1000).toFixed(0)}K`, sub:"From real computed assessments", icon:<BarChart2 size={18} />, color:"#ca8a04", bg:"bg-amber-50 dark:bg-amber-950/30", border:"border-amber-200 dark:border-amber-900" },
@@ -677,17 +759,20 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
               <table className="w-full text-[11px]">
                 <thead className="sticky top-0 z-10 bg-card">
                   <tr className="bg-muted/50 text-muted-foreground">
-                    <th className="px-3 py-2 text-left font-semibold">Bulletin</th>
-                    <th className="px-3 py-2 text-left font-semibold">Typhoon</th>
-                    <th className="px-3 py-2 text-left font-semibold">Issued</th>
-                    <th className="px-3 py-2 text-left font-semibold">Category</th>
-                    <th className="px-3 py-2 text-left font-semibold">Max Winds</th>
-                    <th className="px-3 py-2 text-left font-semibold">Gust</th>
+                    {bulletinSortableCols.map(col => (
+                      <th
+                        key={col.field}
+                        className="px-3 py-2 text-left font-semibold cursor-pointer hover:bg-muted/80 select-none"
+                        onClick={() => handleBulletinSort(col.field)}
+                      >
+                        <span className="flex items-center gap-1">{col.label}<BulletinSortIcon field={col.field} /></span>
+                      </th>
+                    ))}
                     <th className="px-3 py-2 text-left font-semibold">Action</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {bulletins.map(b => (
+                  {sortedBulletins.map(b => (
                     <tr
                       key={b.tcb_id}
                       className={`border-t border-border hover:bg-muted/30 cursor-pointer transition-colors ${selectedBulletin?.tcb_id === b.tcb_id ? "bg-[#166534]/10" : ""}`}
@@ -695,7 +780,7 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
                     >
                       <td className="px-3 py-2.5 font-semibold">TCB No. {b.bulletin_count}</td>
                       <td className="px-3 py-2.5">{b.typhoon_name}</td>
-                      <td className="px-3 py-2.5 text-muted-foreground">{b.issued_at ?? "—"}</td>
+                      <td className="px-3 py-2.5 text-muted-foreground">{formatIssuedAt(b.issued_at)}</td>
                       <td className="px-3 py-2.5">{b.category ?? "—"}</td>
                       <td className="px-3 py-2.5">{b.max_sustained_winds ?? "—"} km/h</td>
                       <td className="px-3 py-2.5">{b.gustiness ?? "—"} km/h</td>
@@ -737,7 +822,7 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
               <div className="flex items-start justify-between px-4 py-2.5">
                 <div>
                   <p className="text-[11px] font-bold text-[#166534]">TCB No. {selectedBulletin.bulletin_count} — {selectedBulletin.typhoon_name}</p>
-                  <p className="text-[10px] text-muted-foreground">{selectedBulletin.issued_at ?? "Unknown"} · {selectedBulletin.category ?? "Unknown category"}</p>
+                  <p className="text-[10px] text-muted-foreground">{formatIssuedAt(selectedBulletin.issued_at)} · {selectedBulletin.category ?? "Unknown category"}</p>
                   <p className="text-[10px] mt-0.5">Max winds: {selectedBulletin.max_sustained_winds ?? "—"} km/h · Gust: {selectedBulletin.gustiness ?? "—"} km/h</p>
                   <p className="text-[10px] text-muted-foreground">
                     Areas: {isLoadingSelectedSignals ? "Loading…" : (uniqueAreas(selectedSignals).join(" • ") || "No signal data recorded")}

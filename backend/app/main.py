@@ -11,6 +11,7 @@ from app.api.bulletins import router as bulletins_router
 from app.api.assessments import router as assessments_router
 from app.api.farms import router as farms_router
 from app.api.insurance import router as insurance_router
+from app.api.typhoons import router as typhoons_router
 from app.core.database import SessionLocal, get_db
 from app.core.scheduler import build_scheduler
 from app.models import models
@@ -45,6 +46,7 @@ app.include_router(bulletins_router, prefix="/api")
 app.include_router(assessments_router, prefix="/api")
 app.include_router(farms_router, prefix="/api")
 app.include_router(insurance_router, prefix="/api")
+app.include_router(typhoons_router, prefix="/api")
 
 @app.get("/")
 def root():

@@ -10,6 +10,7 @@ from app.core.database import get_db
 from app.core.scheduler import reschedule_bulletin_job
 from app.services.bulletin_parser import BulletinParserService, PagasaScrapeError
 from app.services.exposure_calculator import ExposureCalculatorService
+from app.services.pagasa_status_scraper import PagasaStatusService
 from app.models.models import (
     AreaExposureSummary,
     Farm,
@@ -68,9 +69,12 @@ def update_parser_settings(payload: ParserSettingsUpdate, request: Request, db: 
 @router.get("/")
 def list_bulletins(db: Session = Depends(get_db)):
     """
-    Lists all parsed bulletins.
+    Lists all parsed bulletins, newest issued first. Ordered by `issued_at`
+    rather than `bulletin_count` -- bulletin_count resets to 1 per typhoon, so
+    sorting by it interleaves typhoons out of true chronological order (an old
+    typhoon's bulletin #21 would otherwise outrank a newer typhoon's #3).
     """
-    bulletins = db.query(TropicalCycloneBulletin).order_by(TropicalCycloneBulletin.bulletin_count.desc()).all()
+    bulletins = db.query(TropicalCycloneBulletin).order_by(TropicalCycloneBulletin.issued_at.desc()).all()
     # Format response simply
     results = []
     for b in bulletins:
@@ -99,14 +103,23 @@ async def trigger_pagasa_scrape(db: Session = Depends(get_db)):
     try:
         links = await BulletinParserService.fetch_active_bulletin_links()
     except PagasaScrapeError:
-        # Same response as "confirmed nothing active" — a real fetch failure vs. a
-        # genuinely empty list is only distinguished internally, for reconciliation.
+        # Same HTTP response as "confirmed nothing active" -- a real fetch
+        # failure vs. a genuinely empty list only matters internally (see
+        # PagasaScrapeError's own docstring).
         raise HTTPException(status_code=404, detail="No active bulletin PDFs found on PAGASA portal.")
     if not links:
         # Fallback for testing: return empty success or check if there is an active file
         raise HTTPException(status_code=404, detail="No active bulletin PDFs found on PAGASA portal.")
 
     bulletins_created = await BulletinParserService.scrape_and_save_all(db, TEMP_DIR)
+
+    # Independent of the TCB scrape above -- a failure here shouldn't hide a
+    # successful bulletin parse, and vice versa (see PagasaStatusService).
+    try:
+        active_names = await PagasaStatusService.fetch_active_storm_names()
+        PagasaStatusService.sync_active_typhoons(active_names, db)
+    except PagasaScrapeError as e:
+        print(f"Error checking PAGASA severe weather bulletin status: {e}")
 
     return {
         "status": "success",

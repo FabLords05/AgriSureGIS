@@ -5,6 +5,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from app.core.database import SessionLocal
 from app.services.bulletin_parser import BulletinParserService
+from app.services.pagasa_status_scraper import PagasaStatusService
 
 logger = logging.getLogger("agrisuregis.scheduler")
 
@@ -13,10 +14,13 @@ BULLETIN_JOB_ID = "pagasa_bulletin_poll"
 
 def run_scheduled_scrape() -> None:
     """
-    APScheduler job target for automated PAGASA TCB ingestion. Opens and closes
-    its own DB session — there is no FastAPI request context in a background
-    job, so `Depends(get_db)` can't be used here. Never lets an exception
-    escape, so one bad scrape doesn't kill the scheduler thread.
+    APScheduler job target for automated PAGASA TCB ingestion, plus the
+    separate active-typhoon status sync (PagasaStatusService). Opens and
+    closes its own DB session — there is no FastAPI request context in a
+    background job, so `Depends(get_db)` can't be used here. Each step has its
+    own try/except so a failure in one doesn't skip or hide the other; neither
+    ever lets an exception escape this function, so one bad poll doesn't kill
+    the scheduler thread.
     """
     db = SessionLocal()
     try:
@@ -27,6 +31,13 @@ def run_scheduled_scrape() -> None:
             logger.info("Scheduled PAGASA scrape found no new bulletins.")
     except Exception:
         logger.exception("Scheduled PAGASA scrape failed.")
+
+    try:
+        active_names = asyncio.run(PagasaStatusService.fetch_active_storm_names())
+        PagasaStatusService.sync_active_typhoons(active_names, db)
+        logger.info("Synced active-typhoon status: %s", ", ".join(active_names) or "none active")
+    except Exception:
+        logger.exception("PAGASA active-typhoon status sync failed.")
     finally:
         db.close()
 

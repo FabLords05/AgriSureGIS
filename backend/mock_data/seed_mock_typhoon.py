@@ -1,17 +1,20 @@
 """One-off mock-data seeder: creates a fictional typhoon ("MARISOL", clearly not a
 real PAGASA name) with two Tropical Cyclone Bulletins ~12 hours apart, carrying wind
-signals over Talakag (Bukidnon) and Claveria (Misamis Oriental) only -- so the
-Assessment & Reporting module's per-typhoon exposure panel has real data to show
-while testing usability with mock_farmers_talakag_claveria.csv / gpx/*.gpx.
+signals over Talakag/Manolo Fortich (Bukidnon) and Claveria/City of Gingoog (Misamis
+Oriental) -- so the Assessment & Reporting module's per-typhoon exposure panel has
+real data to show while testing usability with mock_farmers_talakag_claveria.csv /
+gpx/*.gpx (2026-08-03: mock farms 900004-900006 and 900010-900012 relocated from
+Talakag/Claveria to Manolo Fortich/City of Gingoog respectively, to spread the mock
+dataset across more of Region X -- signals extended here to match).
 
 Does NOT touch tbl_area_exposure_summary or tbl_risk_assessment directly -- run the
 app's own "Compute Exposure Summary" (Monitoring) and "Compute Assessments"
 (Assessment & Reporting) actions afterward, so the rest of the pipeline is exercised
 for real rather than mocked further.
 
-Requires tbl_admin_boundaries rows for Talakag and Claveria to already exist
-(ExposureCalculatorService matches tbl_tcb_signals.area_name against
-tbl_admin_boundaries.municipality, case-insensitively) -- i.e. seed_database.py
+Requires tbl_admin_boundaries rows for Talakag, Claveria, Manolo Fortich, and City of
+Gingoog to already exist (ExposureCalculatorService matches tbl_tcb_signals.area_name
+against tbl_admin_boundaries.municipality, case-insensitively) -- i.e. seed_database.py
 must have been run already.
 
 Safe to re-run: skips creating the typhoon/bulletins again if a typhoon named
@@ -48,7 +51,9 @@ BULLETINS = [
         "center_lat": 8.45,
         "signals": [
             {"signal_level": 3, "island_group": 3, "area_name": "Talakag"},
+            {"signal_level": 3, "island_group": 3, "area_name": "Manolo Fortich"},
             {"signal_level": 2, "island_group": 3, "area_name": "Claveria"},
+            {"signal_level": 2, "island_group": 3, "area_name": "City of Gingoog"},
         ],
     },
     {
@@ -63,7 +68,9 @@ BULLETINS = [
         "center_lat": 8.55,
         "signals": [
             {"signal_level": 3, "island_group": 3, "area_name": "Talakag"},
+            {"signal_level": 3, "island_group": 3, "area_name": "Manolo Fortich"},
             {"signal_level": 2, "island_group": 3, "area_name": "Claveria"},
+            {"signal_level": 2, "island_group": 3, "area_name": "City of Gingoog"},
         ],
     },
 ]
@@ -129,7 +136,7 @@ def run_seed():
     print("Done. Next steps in the running app:")
     print(f"  1. Upload mock_farmers_talakag_claveria.csv and gpx/*.gpx via the Data Ingestion module.")
     print(f"  2. Monitoring module -> find typhoon {TYPHOON_NAME} -> Compute Exposure Summary")
-    print("     (populates tbl_area_exposure_summary for Talakag + Claveria)")
+    print("     (populates tbl_area_exposure_summary for Talakag/Manolo Fortich + Claveria/City of Gingoog)")
     print("  3. Assessment & Reporting module -> click typhoon "
           f"{TYPHOON_NAME} -> Compute Assessments")
     print("     (populates tbl_risk_assessment payouts for the mock CSV policies)")

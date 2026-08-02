@@ -152,8 +152,8 @@ class TropicalCycloneBulletin(Base):
     category = Column(String(100), nullable=False)
     max_sustained_winds = Column(Integer)
     gustiness = Column(Integer)
-    issued_at = Column(DateTime, nullable=False)
-    expires_at = Column(DateTime, nullable=False)
+    issued_at = Column(DateTime(timezone=True), nullable=False)
+    expires_at = Column(DateTime(timezone=True), nullable=False)
     center_geom = Column(Geometry(geometry_type="POINT", srid=4326))
 
     typhoon = relationship("Typhoon")

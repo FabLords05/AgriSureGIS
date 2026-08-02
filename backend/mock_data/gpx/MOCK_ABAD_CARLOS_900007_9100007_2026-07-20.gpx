@@ -3,11 +3,11 @@
   <trk>
     <name>MOCK FARM BOUNDARY - 900007/9100007 - Claveria, Misamis Oriental</name>
     <trkseg>
-      <trkpt lat="8.6152" lon="124.8652"/>
-      <trkpt lat="8.6152" lon="124.8682"/>
-      <trkpt lat="8.6182" lon="124.8682"/>
-      <trkpt lat="8.6182" lon="124.8652"/>
-      <trkpt lat="8.6152" lon="124.8652"/>
+      <trkpt lat="8.7110" lon="124.9822"/>
+      <trkpt lat="8.7108" lon="124.9832"/>
+      <trkpt lat="8.7125" lon="124.9832"/>
+      <trkpt lat="8.7124" lon="124.9820"/>
+      <trkpt lat="8.7110" lon="124.9822"/>
     </trkseg>
   </trk>
 </gpx>

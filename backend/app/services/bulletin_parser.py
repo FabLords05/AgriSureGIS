@@ -9,26 +9,27 @@ from geoalchemy2.elements import WKTElement
 from datetime import datetime, timedelta, timezone
 
 from app.models.models import Typhoon, TropicalCycloneBulletin, TcbSignal, AdminBoundary
-from app.services.exposure_calculator import ExposureCalculatorService
 from app.services.assessment_service import AssessmentService
 
 # Base URL for PAGASA tropical cyclone bulletins (mock or real index page)
 PAGASA_INDEX_URL = "https://pubfiles.pagasa.dost.gov.ph/tamss/weather/bulletin/"
 
-# Real PAGASA bulletin filenames follow this pattern (e.g. "TCB#11_kiyapo.pdf",
-# or "TCB#21F_francisco.pdf" for a typhoon's final bulletin — the same trailing
-# "F" convention used in the bulletin number inside the PDF text itself).
-ACTIVE_LINK_NAME_RE = re.compile(r"TCB#\d+[A-Za-z]?_([A-Za-z]+)\.pdf", re.IGNORECASE)
+# PAGASA states every bulletin's "Issued at" timestamp in Philippine Standard
+# Time, not UTC -- a fixed UTC+8 offset (the Philippines observes no DST).
+PHT = timezone(timedelta(hours=8))
 
 
 class PagasaScrapeError(Exception):
     """
-    Raised when the PAGASA bulletin index couldn't actually be checked (network
-    failure, non-200 response) — distinct from a successful check that found
-    zero active bulletins, which returns an empty list instead. This
-    distinction matters for reconciliation (see `_reconcile_active_typhoons`):
-    treating a failed check the same as "confirmed nothing active" would wrongly
-    auto-close every genuinely ongoing typhoon on a transient network hiccup.
+    Raised when a PAGASA page couldn't actually be checked (network failure,
+    non-200 response) — distinct from a successful check that found nothing
+    (e.g. zero active bulletins), which returns an empty list/result instead.
+    This distinction matters to callers like PagasaStatusService's active-
+    typhoon sync: treating a failed check the same as "confirmed nothing
+    active" would wrongly close every genuinely ongoing typhoon on a
+    transient network hiccup. Shared across PAGASA-facing scrapers in this
+    package (bulletin index, severe-weather-bulletin status page) rather than
+    duplicated per scraper.
     """
 
 
@@ -145,6 +146,7 @@ class BulletinParserService:
         # Standard PAGASA phrasing: "Issued at 5:00 PM, 15 October 2024" (wording around
         # the date varies between bulletins, so this is intentionally loose — falls back
         # to None, which callers treat as "use the current time" rather than guessing).
+        # The stated time is always Philippine Standard Time (PHT/UTC+8), never UTC.
         issued_at = None
         issued_match = re.search(
             r"Issued\s+at\s+(\d{1,2}):(\d{2})\s*(AM|PM)[^,\d]*,?\s*(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})",
@@ -157,7 +159,7 @@ class BulletinParserService:
                 issued_at = datetime.strptime(
                     f"{day} {month_name} {year} {hour}:{minute} {meridiem.upper()}",
                     "%d %B %Y %I:%M %p",
-                ).replace(tzinfo=timezone.utc)
+                ).replace(tzinfo=PHT)
             except ValueError:
                 issued_at = None
 
@@ -225,8 +227,8 @@ class BulletinParserService:
         /parse route, and the scheduled background job) each decide separately whether
         an empty result is worth surfacing as an error. Does propagate
         `PagasaScrapeError` if the PAGASA portal itself couldn't be reached at all —
-        deliberately not caught here, since that also skips the reconciliation step
-        below rather than risk treating "couldn't check" the same as "confirmed empty."
+        deliberately not caught here, so callers know a poll attempt didn't actually
+        happen rather than silently treating it as "nothing new."
         """
         links = await cls.fetch_active_bulletin_links()
         bulletins_created = []
@@ -239,19 +241,16 @@ class BulletinParserService:
                 if os.path.exists(pdf_path):
                     os.remove(pdf_path)
 
-                # Auto-run assessment computation (which internally also recomputes
-                # the exposure summary — see AssessmentService.calculate_for_bulletin)
-                # after every successfully parsed bulletin, not just the final one.
-                # UPDATED DECISION (overrides the earlier "keep assessment
-                # calculation manual" call, per explicit request during Sprint 5
-                # testing): results should now appear in Assessment & Reporting
-                # right after "Parse Latest Bulletin" without a separate manual
-                # POST /api/assessments/calculate step. Flagging for Fabio's
-                # awareness since he made the original manual-only call.
-                try:
-                    AssessmentService.calculate_for_bulletin(bulletin.typhoon_id, bulletin.tcb_id, db)
-                except ValueError:
-                    pass  # shouldn't happen (bulletin/typhoon just saved together), but don't crash the scrape loop over it
+                # Only cross-reference farms against the typhoon-wide exposure
+                # summary once this typhoon's bulletins are confirmed complete
+                # (a trailing "F" on the bulletin number) — not after every
+                # single bulletin. Reverts the earlier "run on every bulletin"
+                # behavior per Fabio's explicit decision; see FUNCTION_CHANGES.md.
+                if parsed_data.get("is_final"):
+                    try:
+                        AssessmentService.calculate_for_bulletin(bulletin.typhoon_id, bulletin.tcb_id, db)
+                    except ValueError:
+                        pass  # shouldn't happen (bulletin/typhoon just saved together), but don't crash the scrape loop over it
 
                 bulletins_created.append({
                     "tcb_id": bulletin.tcb_id,
@@ -262,71 +261,35 @@ class BulletinParserService:
             except Exception as e:
                 print(f"Error processing PDF link {link}: {e}")
 
-        cls._reconcile_active_typhoons(links, db)
         return bulletins_created
 
     @classmethod
-    def _reconcile_active_typhoons(cls, active_links: list[str], db: Session) -> list[Typhoon]:
+    def get_or_create_typhoon(cls, name: str, reference_time: datetime, db: Session) -> Typhoon:
         """
-        Cross-checks every Typhoon still marked is_active=True against PAGASA's
-        current active-bulletin listing (storm name parsed from each link's
-        filename — see ACTIVE_LINK_NAME_RE). Closes (is_active=False + auto-runs
-        the exposure summary) any typhoon no longer represented there, even if we
-        never saw an explicit final ("F") bulletin for it — PAGASA doesn't
-        guarantee one is always published before a storm drops off the active
-        list. Only ever called with a successfully-fetched `active_links` (see
-        `PagasaScrapeError` above) — an empty-but-successful list correctly
-        means "close everything still marked active."
-        """
-        currently_active_names = set()
-        for link in active_links:
-            match = ACTIVE_LINK_NAME_RE.search(link)
-            if match:
-                currently_active_names.add(match.group(1).upper())
+        Finds the Typhoon `name` belongs to, scoped to one with a bulletin within
+        the last 30 days of `reference_time` — not just a bare name match — since
+        PAGASA's local-name list rotates and reuses names across separate seasons,
+        so an unscoped match would wrongly merge unrelated storm events. Any
+        bulletin number (1, 2, ... 10, ...) for an active typhoon still lands well
+        inside this rolling window, since consecutive bulletins for the same event
+        are issued every few hours, not weeks apart.
 
-        closed = []
-        for typhoon in db.query(Typhoon).filter(Typhoon.is_active.is_(True)).all():
-            if typhoon.name.upper() not in currently_active_names:
-                typhoon.is_active = False
-                db.commit()
-                latest_bulletin = (
-                    db.query(TropicalCycloneBulletin)
-                    .filter(TropicalCycloneBulletin.typhoon_id == typhoon.typhoon_id)
-                    .order_by(TropicalCycloneBulletin.issued_at.desc())
-                    .first()
-                )
-                if latest_bulletin:
-                    try:
-                        AssessmentService.calculate_for_bulletin(typhoon.typhoon_id, latest_bulletin.tcb_id, db)
-                    except ValueError:
-                        pass
-                else:
-                    ExposureCalculatorService.compute_for_typhoon(typhoon.typhoon_id, db)
-                closed.append(typhoon)
-        return closed
+        Creates a new Typhoon row (is_active=False) if no such match exists —
+        is_active is no longer set here; PagasaStatusService's severe-weather-
+        bulletin page check is now the sole source of truth for it, and typically
+        confirms/sets it True moments later in the same scrape cycle.
 
-    @classmethod
-    def save_bulletin_to_db(cls, parsed_data: dict, db: Session) -> TropicalCycloneBulletin:
+        Shared by TCB ingestion (save_bulletin_to_db, below) and
+        PagasaStatusService's status-page sync, so both sides of the PAGASA site
+        agree on which Typhoon row a given name refers to.
         """
-        Saves parsed bulletin data to the PostGIS database.
-        """
-        # 1. Get or Create Typhoon
-        # Grouped by name (case-insensitive) AND recency, not just calendar year:
-        # a bulletin only joins an existing Typhoon if that typhoon has a bulletin
-        # within the last 30 days — PAGASA's local-name list rotates and reuses
-        # names across separate seasons, so a bare name match across arbitrary
-        # time spans would wrongly merge unrelated storm events. Any bulletin
-        # number (1, 2, ... 10, ...) for an active typhoon still lands well inside
-        # this rolling window, since consecutive bulletins for the same event are
-        # issued every few hours, not weeks apart.
-        reference_time = parsed_data.get("issued_at") or datetime.now(timezone.utc)
         window_start = reference_time - timedelta(days=30)
 
         typhoon = (
             db.query(Typhoon)
             .join(TropicalCycloneBulletin, TropicalCycloneBulletin.typhoon_id == Typhoon.typhoon_id)
             .filter(
-                func.lower(Typhoon.name) == parsed_data["typhoon_name"].lower(),
+                func.lower(Typhoon.name) == name.lower(),
                 TropicalCycloneBulletin.issued_at >= window_start,
             )
             .order_by(TropicalCycloneBulletin.issued_at.desc())
@@ -334,22 +297,22 @@ class BulletinParserService:
         )
 
         if not typhoon:
-            typhoon = Typhoon(
-                name=parsed_data["typhoon_name"],
-                year=reference_time.year,
-                is_active=True
-            )
+            typhoon = Typhoon(name=name, year=reference_time.year, is_active=False)
             db.add(typhoon)
             db.commit()
             db.refresh(typhoon)
 
-        # 1b. A bulletin number with a trailing "F" (e.g. "NR. 21F") is PAGASA's
-        # own signal that no more bulletins will follow for this typhoon.
-        if parsed_data.get("is_final") and typhoon.is_active:
-            typhoon.is_active = False
-            db.commit()
+        return typhoon
 
-        # 2. Check if this Bulletin count already exists for this typhoon
+    @classmethod
+    def save_bulletin_to_db(cls, parsed_data: dict, db: Session) -> TropicalCycloneBulletin:
+        """
+        Saves parsed bulletin data to the PostGIS database.
+        """
+        reference_time = parsed_data.get("issued_at") or datetime.now(timezone.utc)
+        typhoon = cls.get_or_create_typhoon(parsed_data["typhoon_name"], reference_time, db)
+
+        # 1. Check if this Bulletin count already exists for this typhoon
         bulletin = db.query(TropicalCycloneBulletin).filter(
             TropicalCycloneBulletin.typhoon_id == typhoon.typhoon_id,
             TropicalCycloneBulletin.bulletin_count == parsed_data["bulletin_count"]
@@ -358,7 +321,7 @@ class BulletinParserService:
         if not bulletin:
             # Create geometry Point
             center_geom = WKTElement(f"POINT({parsed_data['longitude']} {parsed_data['latitude']})", srid=4326)
-            
+
             bulletin = TropicalCycloneBulletin(
                 typhoon_id=typhoon.typhoon_id,
                 title=f"Bulletin No. {parsed_data['bulletin_count']} for {typhoon.name}",
@@ -374,7 +337,7 @@ class BulletinParserService:
             db.commit()
             db.refresh(bulletin)
 
-            # 3. Parse and seed tcb_signals
+            # 2. Parse and seed tcb_signals
             # Load boundaries to check for affected provinces & municipalities
             boundaries = db.query(AdminBoundary).all()
             
