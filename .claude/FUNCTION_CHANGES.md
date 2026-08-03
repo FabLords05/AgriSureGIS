@@ -1751,3 +1751,89 @@ resolutions).
   a separate future task.
 * Not yet pushed.
 
+---
+
+## [2026-08-03] - Nationwide TCB Signal Extraction & Per-Level Areas Display
+
+Fabio's follow-up to the "View Areas Affected" modal: the modal was correctly
+scoped to Region X only (per the original parser design), but Fabio wants a
+GIS specialist to see a typhoon's full national footprint regardless of
+whether it reaches Mindanao. Separately, testing this surfaced a real display
+bug in the existing TCB Viewer modal (Monitoring module) where areas under
+different signal levels were merged into one misleading list.
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* `parse_bulletin_text()`: TCWS table extraction (section 5) now reads all
+  three island columns (Luzon, Visayas, Mindanao), not just Mindanao. Return
+  shape of `signals` changed from `dict[level, str]` to
+  `dict[level, dict[island_group, str]]` (island_group 0=Luzon, 1=Visayas,
+  2=Mindanao).
+* Added `_split_named_areas()`: best-effort split of a TCWS cell's free-text
+  area list into province/region-level phrases for Luzon/Visayas (no
+  `AdminBoundary` data exists to validate matches outside Region X) — strips
+  parenthetical municipality detail and the fixed "Warning lead time: .../
+  Range of wind speeds: .../ Potential impacts of winds: ..." boilerplate
+  block that follows every cell (found via live-testing against a real
+  PAGASA scrape — it was leaking into the split as bogus "area" entries),
+  then splits on commas. Caps each phrase at 100 chars to fit
+  `TcbSignal.area_name`'s existing `varchar(100)` — no schema change needed.
+* `save_bulletin_to_db()`: Mindanao (`island_group=2`) matching against
+  `AdminBoundary` is unchanged (still feeds exposure/indemnity calculations,
+  stays precise). Luzon/Visayas now get `TcbSignal` rows too, via
+  `_split_named_areas()`, informational only.
+* Verified end-to-end against a live PAGASA scrape (after Fabio reset
+  `tbl_tcb_signals`/`tbl_tropical_cyclone_bulletins`/`tbl_typhoons` and
+  re-ran `POST /api/bulletins/parse` twice — once to catch the boilerplate
+  bug, once after the fix): KIYAPO Bulletin NR. 11 (`docs/TCB#11_kiyapo.pdf`,
+  tcb_id 167) produced clean Luzon area names matching the source PDF exactly
+  (e.g. "Batanes", "the northern portion of Cagayan including Babuyan
+  Islands", "Isabela", "Quirino", ...).
+
+### 2. File: `backend/tests/test_bulletin_parser.py`
+* Updated `test_parse_bulletin_text_extracts_mindanao_signals_from_table`
+  (renamed `..._extracts_signals_from_all_island_columns`) and
+  `test_parse_bulletin_text_against_real_sample_pdf` for the new nested
+  `signals` shape — KIYAPO's real Luzon text is now asserted present
+  (previously asserted as an empty dict, which was correct under the old
+  Mindanao-only scope but no longer reflects what the parser captures).
+  Updated `test_save_bulletin_to_db_creates_bulletin_and_signals` similarly.
+* Added `test_split_named_areas_strips_parens_and_splits_on_commas`,
+  `test_split_named_areas_strips_warning_lead_time_boilerplate` (regression
+  test for the boilerplate leak found via live testing), and
+  `test_save_bulletin_to_db_creates_best_effort_luzon_visayas_signals`.
+* Not yet run by Fabio against this exact final version — verified instead
+  via the live end-to-end scrape described above.
+
+### 3. File: `frontend/src/app/components/AssessmentModule.tsx`
+* `AreasAffectedModal`: merge key now includes `island_group` (not just
+  `area_name`) so same-named phrases on different islands can't collide.
+  Exposure-match lookup restricted to `island_group === 2` (Mindanao) only,
+  since exposure/indemnity data never exists for Luzon/Visayas. Added an
+  "Island Group" column to the table and an `ISLAND_GROUP_LABELS` lookup.
+  Info banner text updated to explain Luzon/Visayas areas are
+  situational-awareness only, not tied to insurance eligibility.
+
+### 4. File: `frontend/src/app/components/MonitoringModule.tsx`
+* `TCBViewerModal` previously computed one `highestSignal` (max across all
+  signal rows) and merged every area from every signal level into one flat
+  list shown under that single header — a Signal No. 1 area and a Signal
+  No. 3 area for the same bulletin looked identical. Found while showing
+  Fabio the FRANCISCO TCB No. 7 example (which genuinely only had Signal
+  No. 1 data — not a bug, just prompted the review that found this one).
+* Added `groupAreasBySignalLevel()` and `signalLevelColor()` helpers. Areas
+  are now grouped into one section per signal level actually present in the
+  data, sorted highest-to-lowest, each with its own "Signal No. X" header
+  and color. Also fixes a latent color bug where signal levels 4/5 fell
+  through to the default (green, "low severity") color since the old ternary
+  only special-cased levels 2 and 3.
+* `handleDownloadTCB()`'s exported `.txt` summary updated to the same
+  grouped-by-level structure for consistency.
+* The top headline box (category + highest signal + winds/gusts) is
+  unchanged — kept as an at-a-glance bulletin-level summary.
+
+### Status / Next Steps
+* Verified working directly with the user in the browser for both the
+  Assessment "View Areas Affected" modal (island group column) and the
+  Monitoring "TCB Viewer" modal (per-level grouping).
+* Not yet pushed.
+

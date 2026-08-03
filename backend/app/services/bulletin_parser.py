@@ -164,9 +164,12 @@ class BulletinParserService:
                 issued_at = None
 
         # 5. Extract wind-signal areas from PAGASA's actual TCWS table (per
-        # signal level, Mindanao column only — this project is scoped to PCIC
-        # Region X / Mindanao per PROJECT_CONTEXT.md, and every AdminBoundary
-        # row seeded here is Mindanao by definition). This replaces the old
+        # signal level, ALL THREE island columns — Luzon, Visayas, Mindanao).
+        # Only Mindanao is matched against AdminBoundary / feeds exposure and
+        # indemnity calculations (this project's insured farms are all PCIC
+        # Region X per PROJECT_CONTEXT.md); Luzon/Visayas are captured too, for
+        # a GIS specialist to see a typhoon's full national footprint, even
+        # though they're outside the insured area. This replaces the old
         # approach of regex-scanning the flattened prose for "Signal No. X"
         # markers, which had no way to distinguish the real TCWS table from a
         # narrative sentence merely *mentioning* a signal number (e.g. "The
@@ -174,17 +177,23 @@ class BulletinParserService:
         # intensify...") — confirmed against docs/TCB#11_kiyapo.pdf, whose real
         # TCWS table is `TCWS No. | Luzon | Visayas | Mindanao`, one row per
         # signal level, with "-" in a column when no areas apply there.
-        signals_data: dict[int, str] = {}
+        # signals_data: level -> {island_group: cell_text}, island_group
+        # 0=Luzon, 1=Visayas, 2=Mindanao (PAGASA's fixed column order).
+        signals_data: dict[int, dict[int, str]] = {}
         for table in tables:
-            mindanao_col = None
             header_row_idx = None
+            island_cols: dict[int, int] = {}  # island_group -> column index
             for row_idx, row in enumerate(table[:3]):  # header is within the first couple of rows
                 cells = [(cell or "").strip().lower() for cell in row]
                 if any("mindanao" in cell for cell in cells):
-                    mindanao_col = next(i for i, cell in enumerate(cells) if "mindanao" in cell)
                     header_row_idx = row_idx
+                    for name, group in (("luzon", 0), ("visayas", 1), ("mindanao", 2)):
+                        for i, cell in enumerate(cells):
+                            if name in cell:
+                                island_cols[group] = i
+                                break
                     break
-            if mindanao_col is None:
+            if header_row_idx is None:
                 continue  # not the TCWS table
 
             current_level = None
@@ -195,12 +204,16 @@ class BulletinParserService:
                 level_match = re.match(r"(\d)", first_cell)
                 if level_match:
                     current_level = int(level_match.group(1))
-                if current_level is None or mindanao_col >= len(row):
+                if current_level is None:
                     continue
-                cell_text = (row[mindanao_col] or "").strip()
-                if not cell_text or cell_text == "-":
-                    continue
-                signals_data[current_level] = (signals_data.get(current_level, "") + "\n" + cell_text).strip()
+                for group, col in island_cols.items():
+                    if col >= len(row):
+                        continue
+                    cell_text = (row[col] or "").strip()
+                    if not cell_text or cell_text == "-":
+                        continue
+                    level_signals = signals_data.setdefault(current_level, {})
+                    level_signals[group] = (level_signals.get(group, "") + "\n" + cell_text).strip()
 
         return {
             "typhoon_name": typhoon_name,
@@ -304,6 +317,39 @@ class BulletinParserService:
 
         return typhoon
 
+    @staticmethod
+    def _split_named_areas(cell_text: str) -> list[str]:
+        """
+        Best-effort split of a PAGASA TCWS cell's free-text area list into
+        individual province/region-level phrases — used for Luzon/Visayas,
+        which have no AdminBoundary data to validate matches against (unlike
+        Mindanao). Strips parenthetical municipality detail (e.g. "the
+        northern portion of Cagayan (Santa Ana, Gonzaga, ...)" becomes "the
+        northern portion of Cagayan") since keeping it can run well past
+        TcbSignal.area_name's varchar(100) limit, then splits the remainder
+        on commas. Real PAGASA phrasing confirmed against
+        docs/TCB#11_kiyapo.pdf.
+
+        Every cell also carries a fixed boilerplate block after the area list
+        itself ("Warning lead time: ...", "Range of wind speeds: ...",
+        "Potential impacts of winds: ...") which the Mindanao path never had
+        to worry about (it never string-matches a real municipality, so it
+        was silently dropped there) but must be cut off here before splitting,
+        or it shows up as bogus "area" entries — confirmed against a live
+        PAGASA scrape of this same sample bulletin.
+        """
+        cell_text = re.split(r"Warning lead time", cell_text, maxsplit=1, flags=re.IGNORECASE)[0]
+        no_parens = re.sub(r"\([^)]*\)", "", cell_text)
+        no_parens = re.sub(r"\s+", " ", no_parens).strip()
+        areas: list[str] = []
+        for part in no_parens.split(","):
+            area = part.strip()
+            area = re.sub(r"^(and|including)\s+", "", area, flags=re.IGNORECASE)
+            area = area.rstrip(".").strip()
+            if area and area not in areas:
+                areas.append(area[:100])
+        return areas
+
     @classmethod
     def save_bulletin_to_db(cls, parsed_data: dict, db: Session) -> TropicalCycloneBulletin:
         """
@@ -340,29 +386,46 @@ class BulletinParserService:
             # 2. Parse and seed tcb_signals
             # Load boundaries to check for affected provinces & municipalities
             boundaries = db.query(AdminBoundary).all()
-            
-            for level, signal_text in parsed_data["signals"].items():
-                seen_areas = set()
-                for b in boundaries:
-                    # If province and municipality appear in the signal block, it is under signal
-                    prov_match = b.province.lower() in signal_text.lower()
-                    mun_match = b.municipality.lower() in signal_text.lower()
-                    
-                    if prov_match and mun_match:
-                        # Determine island group (Luzon = 0, Visayas = 1, Mindanao = 2)
-                        # Bukidnon, Misamis Oriental, Lanao del Norte etc. belong to Mindanao (Region X)
-                        island_group = 2 
-                        
-                        area_key = (level, b.municipality)
-                        if area_key not in seen_areas:
-                            seen_areas.add(area_key)
-                            tcb_signal = TcbSignal(
-                                tcb_id=bulletin.tcb_id,
-                                signal_level=level,
-                                island_group=island_group,
-                                area_name=b.municipality
-                            )
-                            db.add(tcb_signal)
+
+            for level, island_texts in parsed_data["signals"].items():
+                # Mindanao (island_group=2): match against seeded Region X
+                # AdminBoundary rows -- unchanged from before, since this is
+                # what feeds exposure/indemnity calculations and must stay
+                # precise, not best-effort.
+                mindanao_text = island_texts.get(2, "")
+                if mindanao_text:
+                    seen_areas = set()
+                    for b in boundaries:
+                        prov_match = b.province.lower() in mindanao_text.lower()
+                        mun_match = b.municipality.lower() in mindanao_text.lower()
+
+                        if prov_match and mun_match:
+                            area_key = (level, b.municipality)
+                            if area_key not in seen_areas:
+                                seen_areas.add(area_key)
+                                db.add(TcbSignal(
+                                    tcb_id=bulletin.tcb_id,
+                                    signal_level=level,
+                                    island_group=2,
+                                    area_name=b.municipality,
+                                ))
+
+                # Luzon/Visayas: no AdminBoundary data exists to validate
+                # against outside Region X -- informational only (a GIS
+                # specialist seeing the storm's full national footprint), so
+                # this is a best-effort split into province/region-level
+                # phrases rather than a validated municipality match.
+                for group in (0, 1):
+                    cell_text = island_texts.get(group, "")
+                    if not cell_text:
+                        continue
+                    for area_name in cls._split_named_areas(cell_text):
+                        db.add(TcbSignal(
+                            tcb_id=bulletin.tcb_id,
+                            signal_level=level,
+                            island_group=group,
+                            area_name=area_name,
+                        ))
             db.commit()
             
         return bulletin

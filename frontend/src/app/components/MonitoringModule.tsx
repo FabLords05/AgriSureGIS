@@ -34,6 +34,24 @@ function maxSignalLevel(signals: TcbSignal[]): number {
   return signals.length ? Math.max(...signals.map(s => s.signal_level)) : 0;
 }
 
+// Groups signals by level (highest first) so each level's areas can be shown
+// under its own header, instead of merging every level's areas into one flat
+// list under a single "highest signal" banner.
+function groupAreasBySignalLevel(signals: TcbSignal[]): { level: number; areas: string[] }[] {
+  const byLevel = new Map<number, Set<string>>();
+  for (const s of signals) {
+    if (!byLevel.has(s.signal_level)) byLevel.set(s.signal_level, new Set());
+    byLevel.get(s.signal_level)!.add(s.area_name);
+  }
+  return Array.from(byLevel.entries())
+    .sort((a, b) => b[0] - a[0])
+    .map(([level, areas]) => ({ level, areas: Array.from(areas) }));
+}
+
+function signalLevelColor(level: number): string {
+  return level >= 3 ? "#ef4444" : level === 2 ? "#d97706" : "#166534";
+}
+
 function formatIssuedAt(isoString: string | null | undefined): string {
   if (!isoString) return "Unknown";
   const date = new Date(isoString);
@@ -48,8 +66,8 @@ function formatIssuedAt(isoString: string | null | undefined): string {
 // ─── TCB Detail Viewer Modal ─────────────────────────────────────────────────
 function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bulletin: Bulletin; signals: TcbSignal[]; isLoadingSignals: boolean; onClose: () => void }) {
   const highestSignal = maxSignalLevel(signals);
-  const signalColor = highestSignal === 3 ? "#ef4444" : highestSignal === 2 ? "#d97706" : "#166534";
-  const areas = uniqueAreas(signals);
+  const signalColor = signalLevelColor(highestSignal);
+  const areasByLevel = groupAreasBySignalLevel(signals);
 
   const handleDownloadTCB = () => {
     const content = [
@@ -66,7 +84,12 @@ function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bull
       `GUSTINESS: ${bulletin.gustiness ?? "—"} km/h`,
       "",
       "AREAS UNDER SIGNAL WARNING:",
-      ...(areas.length ? areas.map(a => `  • ${a}`) : ["  (no signal data recorded for this bulletin)"]),
+      ...(areasByLevel.length
+        ? areasByLevel.flatMap(({ level, areas }) => [
+            `  Signal No. ${level}:`,
+            ...areas.map(a => `    • ${a}`),
+          ])
+        : ["  (no signal data recorded for this bulletin)"]),
       "",
       "═══════════════════════════════════════════════════════════════════",
       "This bulletin is intended for PCIC risk assessment purposes.",
@@ -140,15 +163,24 @@ function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bull
               <p className="font-bold text-[11px] mb-2 uppercase tracking-wide">Areas Under Signal Warning</p>
               {isLoadingSignals ? (
                 <p className="text-[10px] text-muted-foreground">Loading affected areas…</p>
-              ) : areas.length ? (
-                <ul className="space-y-0.5">
-                  {areas.map((a, i) => (
-                    <li key={i} className="flex items-center gap-2 text-[10px]">
-                      <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: signalColor }} />
-                      {a}
-                    </li>
+              ) : areasByLevel.length ? (
+                <div className="space-y-2.5">
+                  {areasByLevel.map(({ level, areas: levelAreas }) => (
+                    <div key={level}>
+                      <p className="text-[10px] font-bold mb-1" style={{ color: signalLevelColor(level) }}>
+                        Signal No. {level}
+                      </p>
+                      <ul className="space-y-0.5 pl-1">
+                        {levelAreas.map((a, i) => (
+                          <li key={i} className="flex items-center gap-2 text-[10px]">
+                            <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: signalLevelColor(level) }} />
+                            {a}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
                   ))}
-                </ul>
+                </div>
               ) : (
                 <p className="text-[10px] text-muted-foreground">No signal/area data recorded for this bulletin.</p>
               )}

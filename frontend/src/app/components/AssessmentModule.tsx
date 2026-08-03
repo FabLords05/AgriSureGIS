@@ -136,6 +136,13 @@ interface MergedArea {
   exposure: TyphoonSummaryArea | null;
 }
 
+// PAGASA's fixed TCWS column order (backend/app/services/bulletin_parser.py).
+// Only Mindanao (2) is matched against AdminBoundary and feeds exposure/
+// indemnity calculations -- Luzon/Visayas are informational only, listed
+// as-named in the bulletin so a GIS specialist can see the storm's full
+// national footprint.
+const ISLAND_GROUP_LABELS: Record<number, string> = { 0: "Luzon", 1: "Visayas", 2: "Mindanao" };
+
 function AreasAffectedModal({
   typhoonName, tcbIds, typhoonSummary, onClose,
 }: {
@@ -156,24 +163,31 @@ function AreasAffectedModal({
         const merged = new Map<string, MergedArea>();
         for (const signals of signalLists) {
           for (const s of signals as TcbSignal[]) {
-            const key = s.area_name.trim().toLowerCase();
+            const key = `${s.island_group}:${s.area_name.trim().toLowerCase()}`;
             const existing = merged.get(key);
             if (existing) existing.max_signal_level = Math.max(existing.max_signal_level, s.signal_level);
             else merged.set(key, { area_name: s.area_name, island_group: s.island_group, max_signal_level: s.signal_level, exposure: null });
           }
         }
+        // Exposure/indemnity data only ever exists for Mindanao (island_group
+        // 2, this project's insured Region X area) -- match only within that
+        // group so a same-named Luzon/Visayas phrase can never wrongly pick up
+        // a Region X municipality's exposure numbers.
         for (const area of typhoonSummary?.areas_hit ?? []) {
-          const m = merged.get(area.municipality.trim().toLowerCase());
+          const m = merged.get(`2:${area.municipality.trim().toLowerCase()}`);
           if (m) m.exposure = area;
         }
         setAreas(Array.from(merged.values()).sort((a, b) =>
-          b.max_signal_level - a.max_signal_level || a.area_name.localeCompare(b.area_name)
+          a.island_group - b.island_group ||
+          b.max_signal_level - a.max_signal_level ||
+          a.area_name.localeCompare(b.area_name)
         ));
       })
       .catch(err => setError(err instanceof Error ? err.message : "Failed to load TCB signal areas."))
       .finally(() => setIsLoading(false));
   }, [tcbIds, typhoonSummary]);
 
+  const mindanaoCount = areas.filter(a => a.island_group === 2).length;
   const matchedCount = areas.filter(a => a.exposure !== null).length;
 
   return (
@@ -198,7 +212,7 @@ function AreasAffectedModal({
           <div className="flex items-center gap-2 px-5 py-2 bg-blue-50 dark:bg-blue-950/30 border-b border-blue-100 shrink-0">
             <AlertCircle size={11} className="text-blue-600 shrink-0" />
             <p className="text-[10px] text-blue-700 dark:text-blue-300">
-              {matchedCount} of {areas.length} area(s) have computed exposure data (Compute Assessments requires this); the rest are listed as-named in the TCB but haven't matched a known boundary yet.
+              {matchedCount} of {mindanaoCount} Mindanao (Region X) area(s) have computed exposure data (Compute Assessments requires this). Luzon/Visayas areas are listed as-named in the bulletin for situational awareness only — they're outside the insured area and never have exposure data.
             </p>
           </div>
         )}
@@ -214,6 +228,7 @@ function AreasAffectedModal({
             <table className="w-full text-[10px]">
               <thead className="sticky top-0 z-10">
                 <tr className="bg-[#1e3a5f] text-white">
+                  <th className="px-2.5 py-2 text-left font-semibold">Island Group</th>
                   <th className="px-2.5 py-2 text-left font-semibold">Area (as named in TCB)</th>
                   <th className="px-2.5 py-2 text-left font-semibold">Signal Number</th>
                   <th className="px-2.5 py-2 text-left font-semibold">Exposure (h)</th>
@@ -223,7 +238,8 @@ function AreasAffectedModal({
               </thead>
               <tbody>
                 {areas.map((a, i) => (
-                  <tr key={a.area_name} className={`border-t border-border ${i % 2 === 0 ? "" : "bg-muted/10"}`}>
+                  <tr key={`${a.island_group}:${a.area_name}`} className={`border-t border-border ${i % 2 === 0 ? "" : "bg-muted/10"}`}>
+                    <td className="px-2.5 py-1.5 text-muted-foreground">{ISLAND_GROUP_LABELS[a.island_group] ?? "—"}</td>
                     <td className="px-2.5 py-1.5 font-semibold text-[#166534]">{a.area_name}</td>
                     <td className="px-2.5 py-1.5">Signal No. {a.max_signal_level}</td>
                     <td className="px-2.5 py-1.5">{a.exposure?.total_exposure_hours ?? "—"}</td>
