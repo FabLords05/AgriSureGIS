@@ -1653,6 +1653,27 @@ returned different response shapes from different queries.
 * Verified working directly with the user -- full card (through Demo
   Credentials and the Register link) renders without clipping and without a
   page scrollbar.
-* Not pushed yet -- awaiting the user's own push per `CLAUDE.md`'s
-  git-handoff rules.
+* Pushed to `develop`.
+
+---
+
+## [2026-08-03] - Login Page: Viewport-Relative Spacing (Fabio Feedback Round 2)
+
+Fabio reported the previous fixed-spacing fix still showed a scrollbar on his
+screen ("e flexible kay lahi ug result sa lahi nga screen res" -- fixed
+pixel/rem spacing gives different results across different screen
+resolutions).
+
+### 1. File: `frontend/src/app/components/LoginScreen.tsx`
+* Replaced fixed padding/margin values throughout the login card (top bar,
+  title block, card header, role selector, form fields, submit button, demo
+  hint, register link, footer note) with `clamp(min, Nvh, max)` arbitrary
+  values -- spacing now scales with viewport height instead of being tuned
+  for one specific screen size, so it compresses automatically on shorter
+  screens rather than triggering the `overflow-y-auto` scroll fallback.
+
+### Status / Next Steps
+* Not yet re-verified on Fabio's actual screen -- needs his confirmation
+  after this change.
+* Pushed to `develop`.
 

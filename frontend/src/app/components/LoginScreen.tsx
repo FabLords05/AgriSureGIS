@@ -318,7 +318,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
       }}
     >
       {/* Top bar */}
-      <div className="flex items-center justify-between px-8 py-3 shrink-0">
+      <div className="flex items-center justify-between px-8 py-[clamp(0.4rem,1.5vh,0.75rem)] shrink-0">
         <div className="flex items-center gap-2.5">
           <div className="w-8 h-8 rounded-lg bg-white/15 flex items-center justify-center">
             <Leaf size={16} className="text-white" />
@@ -333,13 +333,13 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
 
       {/* Center -- overflow-y-auto is a safety net for very short viewports;
           the reduced spacing below means it normally fits without scrolling. */}
-      <div className="flex-1 min-h-0 overflow-y-auto flex items-center justify-center px-4 py-3">
+      <div className="flex-1 min-h-0 overflow-y-auto flex items-center justify-center px-4 py-[clamp(0.25rem,1vh,0.75rem)]">
         {view === "register" ? (
           <RegistrationPanel onBack={() => setView("login")} />
         ) : (
           <div className="w-full max-w-md">
             {/* App Title */}
-            <div className="text-center mb-4">
+            <div className="text-center mb-[clamp(0.5rem,1.5vh,1rem)]">
               <h1 className="text-white text-2xl font-black tracking-tight">AgriSureGIS</h1>
               <p className="text-white/60 text-xs mt-1">Automated Disaster Risk Assessment System</p>
               <p className="text-white/40 text-[10px] mt-0.5">Parametric Indemnification · PAGASA TCB Integration · Google Earth Engine</p>
@@ -348,13 +348,13 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
             {/* Login Card */}
             <div className="bg-white rounded-2xl shadow-2xl overflow-hidden">
               {/* Card Header */}
-              <div className="px-6 pt-6 pb-4 border-b border-gray-100">
+              <div className="px-6 pt-[clamp(0.75rem,2vh,1.5rem)] pb-[clamp(0.5rem,1.2vh,1rem)] border-b border-gray-100">
                 <p className="text-sm font-bold text-gray-800">Sign in to your account</p>
                 <p className="text-[11px] text-gray-400 mt-0.5">Select your role and enter your credentials</p>
               </div>
 
               {/* Role Selector */}
-              <div className="px-6 pt-4">
+              <div className="px-6 pt-[clamp(0.5rem,1.5vh,1rem)]">
                 <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Access Level</p>
                 <div className="grid grid-cols-2 gap-2">
                   {(["specialist", "admin"] as Role[]).map(r => {
@@ -391,9 +391,9 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
               </div>
 
               {/* Form */}
-              <form onSubmit={handleSubmit} className="px-6 pt-4 pb-6">
+              <form onSubmit={handleSubmit} className="px-6 pt-[clamp(0.5rem,1.5vh,1rem)] pb-[clamp(0.75rem,2vh,1.5rem)]">
                 {/* Email */}
-                <div className="mb-3">
+                <div className="mb-[clamp(0.4rem,1.2vh,0.75rem)]">
                   <label className="block text-[11px] font-semibold text-gray-600 mb-1.5">Institutional Email</label>
                   <input
                     type="email"
@@ -405,7 +405,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
                 </div>
 
                 {/* Password */}
-                <div className="mb-4">
+                <div className="mb-[clamp(0.5rem,1.5vh,1rem)]">
                   <label className="block text-[11px] font-semibold text-gray-600 mb-1.5">Password</label>
                   <div className="relative">
                     <input
@@ -437,7 +437,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
                 <button
                   type="submit"
                   disabled={loading}
-                  className="w-full flex items-center justify-center gap-2 py-3 rounded-xl bg-[#166534] hover:bg-[#14532d] text-white text-sm font-bold transition-all disabled:opacity-70 shadow-lg shadow-[#166534]/25"
+                  className="w-full flex items-center justify-center gap-2 py-[clamp(0.5rem,1.5vh,0.75rem)] rounded-xl bg-[#166534] hover:bg-[#14532d] text-white text-sm font-bold transition-all disabled:opacity-70 shadow-lg shadow-[#166534]/25"
                 >
                   {loading
                     ? <><div className="w-4 h-4 rounded-full border-2 border-white/30 border-t-white animate-spin" />Signing in…</>
@@ -446,7 +446,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
                 </button>
 
                 {/* Demo hint */}
-                <div className="mt-3 p-2.5 rounded-xl bg-amber-50 border border-amber-100">
+                <div className="mt-[clamp(0.4rem,1.2vh,0.75rem)] p-[clamp(0.4rem,1vh,0.625rem)] rounded-xl bg-amber-50 border border-amber-100">
                   <p className="text-[10px] font-semibold text-amber-700 mb-1">Demo Credentials ({DEMO_ACCOUNTS[role].label})</p>
                   <p className="text-[10px] text-amber-600 font-mono">{DEMO_ACCOUNTS[role].email}</p>
                   <p className="text-[10px] text-amber-600 font-mono">Password: pcic1234</p>
@@ -460,7 +460,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
                 </div>
 
                 {/* Register link */}
-                <div className="mt-2 text-center">
+                <div className="mt-[clamp(0.3rem,1vh,0.5rem)] text-center">
                   <button
                     type="button"
                     onClick={() => setView("register")}
@@ -473,7 +473,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
             </div>
 
             {/* Footer note */}
-            <p className="text-center text-white/30 text-[10px] mt-3">
+            <p className="text-center text-white/30 text-[10px] mt-[clamp(0.4rem,1vh,0.75rem)]">
               Authorized Personnel Only · PCIC-GIS AgriSureGIS System · For technical support contact the ICT Division
             </p>
           </div>
