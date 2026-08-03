@@ -1,12 +1,13 @@
 import { useState, useMemo, useEffect } from "react";
 import {
   Download, Eye, ChevronDown, ChevronUp, ArrowUpDown,
-  FileSpreadsheet, RefreshCw, AlertCircle, Calculator,
+  FileSpreadsheet, RefreshCw, AlertCircle, Calculator, MapPin,
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip as RTooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import {
   getAssessmentsPabsSummary, getAssessmentsExportPabsUrl, getBulletins, getTyphoonSummary, calculateAssessments,
-  PabsAssessmentRow, Bulletin, TyphoonSummary,
+  getBulletinSignals,
+  PabsAssessmentRow, Bulletin, TyphoonSummary, TyphoonSummaryArea, TcbSignal,
 } from "@/lib/api";
 
 function formatDateTime(iso: string | null): string {
@@ -121,6 +122,128 @@ function CSVPreviewModal({ rows, onClose }: { rows: PabsAssessmentRow[]; onClose
   );
 }
 
+// ─── Areas Affected Modal ────────────────────────────────────────────────────
+// Every area named in the typhoon's TCB signals, merged across all its
+// bulletins -- unlike `typhoonSummary.areas_hit` (tbl_area_exposure_summary),
+// this does not drop areas whose name failed to match an AdminBoundary row
+// in ExposureCalculatorService (backend/app/services/exposure_calculator.py),
+// so it stays the authoritative "all areas listed in the TCB" view even when
+// exposure hasn't been computed for some of them.
+interface MergedArea {
+  area_name: string;
+  island_group: number;
+  max_signal_level: number;
+  exposure: TyphoonSummaryArea | null;
+}
+
+function AreasAffectedModal({
+  typhoonName, tcbIds, typhoonSummary, onClose,
+}: {
+  typhoonName: string;
+  tcbIds: number[];
+  typhoonSummary: TyphoonSummary | null;
+  onClose: () => void;
+}) {
+  const [areas, setAreas] = useState<MergedArea[]>([]);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setIsLoading(true);
+    setError(null);
+    Promise.all(tcbIds.map(id => getBulletinSignals(id)))
+      .then(signalLists => {
+        const merged = new Map<string, MergedArea>();
+        for (const signals of signalLists) {
+          for (const s of signals as TcbSignal[]) {
+            const key = s.area_name.trim().toLowerCase();
+            const existing = merged.get(key);
+            if (existing) existing.max_signal_level = Math.max(existing.max_signal_level, s.signal_level);
+            else merged.set(key, { area_name: s.area_name, island_group: s.island_group, max_signal_level: s.signal_level, exposure: null });
+          }
+        }
+        for (const area of typhoonSummary?.areas_hit ?? []) {
+          const m = merged.get(area.municipality.trim().toLowerCase());
+          if (m) m.exposure = area;
+        }
+        setAreas(Array.from(merged.values()).sort((a, b) =>
+          b.max_signal_level - a.max_signal_level || a.area_name.localeCompare(b.area_name)
+        ));
+      })
+      .catch(err => setError(err instanceof Error ? err.message : "Failed to load TCB signal areas."))
+      .finally(() => setIsLoading(false));
+  }, [tcbIds, typhoonSummary]);
+
+  const matchedCount = areas.filter(a => a.exposure !== null).length;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+      <div className="bg-card border border-border rounded-2xl shadow-2xl w-[95vw] max-w-4xl max-h-[85vh] flex flex-col">
+        <div className="flex items-center justify-between px-5 py-3 border-b border-border shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-[#166534]/10 flex items-center justify-center">
+              <MapPin size={15} className="text-[#166534]" />
+            </div>
+            <div>
+              <p className="text-sm font-bold">Areas Affected — Typhoon {typhoonName}</p>
+              <p className="text-[10px] text-muted-foreground">
+                All areas listed across {tcbIds.length} TCB bulletin(s), merged by highest signal level
+              </p>
+            </div>
+          </div>
+          <button onClick={onClose} className="w-7 h-7 rounded flex items-center justify-center hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">✕</button>
+        </div>
+
+        {!isLoading && !error && areas.length > 0 && (
+          <div className="flex items-center gap-2 px-5 py-2 bg-blue-50 dark:bg-blue-950/30 border-b border-blue-100 shrink-0">
+            <AlertCircle size={11} className="text-blue-600 shrink-0" />
+            <p className="text-[10px] text-blue-700 dark:text-blue-300">
+              {matchedCount} of {areas.length} area(s) have computed exposure data (Compute Assessments requires this); the rest are listed as-named in the TCB but haven't matched a known boundary yet.
+            </p>
+          </div>
+        )}
+
+        <div className="overflow-auto flex-1 px-1">
+          {isLoading ? (
+            <p className="px-4 py-6 text-[11px] text-muted-foreground text-center">Loading TCB signal areas…</p>
+          ) : error ? (
+            <p className="px-4 py-6 text-[11px] text-red-600 text-center">{error}</p>
+          ) : areas.length === 0 ? (
+            <p className="px-4 py-6 text-[11px] text-muted-foreground text-center">No areas listed in this typhoon's TCB signals.</p>
+          ) : (
+            <table className="w-full text-[10px]">
+              <thead className="sticky top-0 z-10">
+                <tr className="bg-[#1e3a5f] text-white">
+                  <th className="px-2.5 py-2 text-left font-semibold">Area (as named in TCB)</th>
+                  <th className="px-2.5 py-2 text-left font-semibold">Signal Number</th>
+                  <th className="px-2.5 py-2 text-left font-semibold">Exposure (h)</th>
+                  <th className="px-2.5 py-2 text-left font-semibold">Start Time</th>
+                  <th className="px-2.5 py-2 text-left font-semibold">End Time</th>
+                </tr>
+              </thead>
+              <tbody>
+                {areas.map((a, i) => (
+                  <tr key={a.area_name} className={`border-t border-border ${i % 2 === 0 ? "" : "bg-muted/10"}`}>
+                    <td className="px-2.5 py-1.5 font-semibold text-[#166534]">{a.area_name}</td>
+                    <td className="px-2.5 py-1.5">Signal No. {a.max_signal_level}</td>
+                    <td className="px-2.5 py-1.5">{a.exposure?.total_exposure_hours ?? "—"}</td>
+                    <td className="px-2.5 py-1.5">{formatDateTime(a.exposure?.start_time ?? null)}</td>
+                    <td className="px-2.5 py-1.5">{formatDateTime(a.exposure?.end_time ?? null)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+
+        <div className="flex items-center justify-end px-5 py-3 border-t border-border bg-muted/20 shrink-0">
+          <button onClick={onClose} className="px-3 py-1.5 rounded-lg border border-border text-xs hover:bg-muted transition-colors">Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main Module ─────────────────────────────────────────────────────────────
 interface AssessmentModuleProps {
   darkMode: boolean;
@@ -143,12 +266,14 @@ export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
   const [typhoonSummary, setTyphoonSummary] = useState<TyphoonSummary | null>(null);
   const [isLoadingTyphoonSummary, setIsLoadingTyphoonSummary] = useState(false);
   const [typhoonSummaryError, setTyphoonSummaryError] = useState<string | null>(null);
+  const [showAreasModal, setShowAreasModal] = useState(false);
 
   const [isComputingAssessments, setIsComputingAssessments] = useState(false);
   const [computeAssessmentsError, setComputeAssessmentsError] = useState<string | null>(null);
   const [computeAssessmentsMessage, setComputeAssessmentsMessage] = useState<string | null>(null);
 
   const handleSelectTyphoon = (typhoonId: number) => {
+    setShowAreasModal(false);
     if (selectedTyphoonId === typhoonId) {
       setSelectedTyphoonId(null);
       setTyphoonSummary(null);
@@ -351,85 +476,50 @@ export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
       )}
 
       {selectedTyphoonId !== null && (
-        <div className="mx-3 mt-3 border border-border rounded-xl overflow-hidden shrink-0 bg-card">
-          <div className="flex items-center gap-2 px-3 py-2 bg-[#166534]/5 border-b border-border">
-            <Calculator size={11} className="text-[#166534] shrink-0" />
-            <p className="text-[10px] font-semibold">
-              Typhoon {typhoonSummary?.typhoon_name ?? ""} — Exposure Summary
-            </p>
-            <div className="ml-auto flex items-center gap-2">
-              {typhoonSummary && typhoonSummary.areas_hit.length > 0 && (
-                <button
-                  onClick={handleComputeAssessments}
-                  disabled={isComputingAssessments}
-                  className="flex items-center gap-1 px-2 py-1 rounded border border-[#166534]/30 text-[#166534] text-[9px] font-medium hover:bg-[#166534]/10 disabled:opacity-50 transition-colors"
-                >
-                  <Calculator size={10} />
-                  {isComputingAssessments ? "Computing…" : "Compute Assessments"}
-                </button>
-              )}
-              {isLoadingTyphoonSummary && <RefreshCw size={11} className="animate-spin text-muted-foreground" />}
-            </div>
+        <div className="mx-3 mt-3 flex items-center gap-2 px-3 py-2 border border-border rounded-xl shrink-0 bg-card">
+          <Calculator size={11} className="text-[#166534] shrink-0" />
+          <p className="text-[10px] font-semibold">
+            Typhoon {typhoonSummary?.typhoon_name ?? typhoons.find(t => t.typhoon_id === selectedTyphoonId)?.typhoon_name ?? ""} selected
+          </p>
+          {isLoadingTyphoonSummary && <RefreshCw size={11} className="animate-spin text-muted-foreground" />}
+          <div className="ml-auto flex items-center gap-2">
+            <button
+              onClick={() => setShowAreasModal(true)}
+              className="flex items-center gap-1 px-2 py-1 rounded border border-[#1e3a5f]/30 text-[#1e3a5f] text-[9px] font-medium hover:bg-[#1e3a5f]/10 transition-colors"
+            >
+              <MapPin size={10} /> View Areas Affected
+            </button>
+            {typhoonSummary && typhoonSummary.areas_hit.length > 0 && (
+              <button
+                onClick={handleComputeAssessments}
+                disabled={isComputingAssessments}
+                className="flex items-center gap-1 px-2 py-1 rounded border border-[#166534]/30 text-[#166534] text-[9px] font-medium hover:bg-[#166534]/10 disabled:opacity-50 transition-colors"
+              >
+                <Calculator size={10} />
+                {isComputingAssessments ? "Computing…" : "Compute Assessments"}
+              </button>
+            )}
           </div>
-
-          {typhoonSummaryError && (
-            <p className="px-3 py-2.5 text-[10px] text-red-600">{typhoonSummaryError}</p>
-          )}
-          {computeAssessmentsError && (
-            <p className="px-3 py-2 text-[10px] text-red-600 border-b border-border">{computeAssessmentsError}</p>
-          )}
-          {computeAssessmentsMessage && (
-            <p className="px-3 py-2 text-[10px] text-[#166534] border-b border-border">{computeAssessmentsMessage}</p>
-          )}
-
-          {!isLoadingTyphoonSummary && !typhoonSummaryError && typhoonSummary && (
-            typhoonSummary.areas_hit.length === 0 ? (
-              <p className="px-3 py-2.5 text-[10px] text-muted-foreground">No exposure summary computed yet for this typhoon.</p>
-            ) : (
-              <>
-                <div className="grid grid-cols-3 gap-2.5 p-3">
-                  {[
-                    { label: "Areas Hit", value: String(typhoonSummary.areas_hit.length), color: "#1e3a5f" },
-                    { label: "People Hit", value: String(typhoonSummary.people_hit), color: "#166534" },
-                    { label: "Max Signal Number", value: `No. ${typhoonSummary.max_signal_level}`, color: "#ca8a04" },
-                    { label: "Exposure Time", value: `${typhoonSummary.exposure_duration_hours}h`, color: "#7c3aed" },
-                    { label: "Start", value: formatDateTime(typhoonSummary.start_time), color: "#0369a1" },
-                    { label: "End", value: formatDateTime(typhoonSummary.end_time), color: "#0369a1" },
-                  ].map((s, i) => (
-                    <div key={i} className="bg-background border border-border rounded-lg px-2.5 py-2">
-                      <p className="text-[9px] text-muted-foreground uppercase tracking-wide">{s.label}</p>
-                      <p className="text-sm font-bold mt-0.5" style={{ color: s.color }}>{s.value}</p>
-                    </div>
-                  ))}
-                </div>
-                <table className="w-full text-[10px]">
-                  <thead>
-                    <tr className="bg-[#1e3a5f] text-white">
-                      <th className="px-2 py-1.5 text-left font-semibold">Municipality</th>
-                      <th className="px-2 py-1.5 text-left font-semibold">Province</th>
-                      <th className="px-2 py-1.5 text-left font-semibold">Signal Number</th>
-                      <th className="px-2 py-1.5 text-left font-semibold">Exposure (h)</th>
-                      <th className="px-2 py-1.5 text-left font-semibold">Start Time</th>
-                      <th className="px-2 py-1.5 text-left font-semibold">End Time</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {typhoonSummary.areas_hit.map((a, i) => (
-                      <tr key={i} className={`border-t border-border ${i % 2 === 0 ? "" : "bg-muted/10"}`}>
-                        <td className="px-2 py-1.5 font-semibold text-[#166534]">{a.municipality}</td>
-                        <td className="px-2 py-1.5 text-muted-foreground">{a.province}</td>
-                        <td className="px-2 py-1.5">Signal No. {a.max_signal_level}</td>
-                        <td className="px-2 py-1.5">{a.total_exposure_hours}</td>
-                        <td className="px-2 py-1.5">{formatDateTime(a.start_time)}</td>
-                        <td className="px-2 py-1.5">{formatDateTime(a.end_time)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </>
-            )
-          )}
         </div>
+      )}
+
+      {typhoonSummaryError && (
+        <p className="mx-3 mt-2 px-3 py-2 text-[10px] text-red-600 border border-border rounded-xl shrink-0">{typhoonSummaryError}</p>
+      )}
+      {computeAssessmentsError && (
+        <p className="mx-3 mt-2 px-3 py-2 text-[10px] text-red-600 border border-border rounded-xl shrink-0">{computeAssessmentsError}</p>
+      )}
+      {computeAssessmentsMessage && (
+        <p className="mx-3 mt-2 px-3 py-2 text-[10px] text-[#166534] border border-border rounded-xl shrink-0">{computeAssessmentsMessage}</p>
+      )}
+
+      {showAreasModal && selectedTyphoonId !== null && (
+        <AreasAffectedModal
+          typhoonName={typhoonSummary?.typhoon_name ?? typhoons.find(t => t.typhoon_id === selectedTyphoonId)?.typhoon_name ?? ""}
+          tcbIds={bulletins.filter(b => b.typhoon_id === selectedTyphoonId).map(b => b.tcb_id)}
+          typhoonSummary={typhoonSummary}
+          onClose={() => setShowAreasModal(false)}
+        />
       )}
 
       {isLoading && rows.length === 0 ? (

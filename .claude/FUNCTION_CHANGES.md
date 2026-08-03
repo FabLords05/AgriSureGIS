@@ -1709,3 +1709,45 @@ resolutions).
   Fabio deferred adding import validation to a separate future task.
 * Not yet pushed.
 
+---
+
+## [2026-08-03] - Assessment & Reporting: "View Areas Affected" Modal
+
+### 1. File: `frontend/src/app/components/AssessmentModule.tsx`
+* Added `AreasAffectedModal` component: fetches `getBulletinSignals(tcbId)` for
+  every TCB belonging to the selected typhoon and merges them into a unique,
+  all-areas list (by highest signal level) -- unlike the pre-existing
+  `typhoonSummary.areas_hit` (backed by `tbl_area_exposure_summary`), this
+  does not drop areas whose name failed to match an `AdminBoundary` row in
+  `ExposureCalculatorService` (`backend/app/services/exposure_calculator.py:44-47`
+  silently `continue`s on unmatched names). Where a computed exposure match
+  exists it's shown (hours/start/end); where not, the area still appears with
+  its signal level and `--` for exposure fields.
+* Replaced the always-inline typhoon exposure summary card
+  (previously `AssessmentModule.tsx:353-433`) with a compact bar shown on
+  typhoon selection, holding a new "View Areas Affected" button (opens the
+  modal) alongside the existing "Compute Assessments" button -- keeps the
+  main assessment table uncluttered by default per Fabio's request to
+  "isolate it to [a] window."
+* No backend or API changes -- reuses the existing
+  `GET /api/bulletins/{tcb_id}/signals` and
+  `GET /api/bulletins/typhoon/{typhoon_id}/summary` endpoints.
+
+### Status / Next Steps
+* Verified working directly with the user -- button and modal render and
+  open correctly.
+* Investigated (read-only, no changes made) why the modal shows "no areas
+  listed" for the typhoons Fabio tested: confirmed via live API that
+  `tbl_tcb_signals` has zero rows for all 80 bulletins currently in the dev
+  DB. Root cause: `AdminBoundary` (used for province+municipality substring
+  matching in `bulletin_parser.py:342-365`) is seeded for Bukidnon +
+  Misamis Oriental only, while the PAGASA scraper pulls bulletins
+  nationwide -- storms that never track through Region X correctly produce
+  zero signal rows (matches a checked-in real test case,
+  `docs/TCB#11_kiyapo.pdf`, a Luzon-only storm asserting `signals == {}`).
+  This is a pre-existing scope/matching limitation in the bulletin parser,
+  not a bug introduced by this modal. Fabio deferred further investigation
+  (e.g. checking a real bulletin's raw text for a genuine matching miss) to
+  a separate future task.
+* Not yet pushed.
+
