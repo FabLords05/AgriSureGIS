@@ -80,32 +80,3 @@ def test_database_connection(db: Session = Depends(get_db)):
         # If the database is off or the password is wrong, this catches the error safely
         raise HTTPException(status_code=500, detail=f"Database connection failed: {str(e)}")
 
-@app.get("/api/assessments")
-def get_all_assessments(db: Session = Depends(get_db)):
-    """
-    Provides the frontend developer with a complete list of risk assessments,
-    joining the damage calculations with the specific farm and policy.
-    """
-    # This acts like a massive SQL JOIN across three tables
-    results = db.query(
-        models.RiskAssessment.assessment_id,
-        models.RiskAssessment.crop_stage,
-        models.RiskAssessment.estimated_damage,
-        models.InsuranceRecord.policy_no,
-        models.InsuranceRecord.amount_cover,
-        models.Farm.georef_id,
-    ).join(models.RiskAssessment.insurance_record).join(models.InsuranceRecord.farm).all()
-
-    # Format the data cleanly for the frontend developer to consume
-    payload = []
-    for r in results:
-        payload.append({
-            "assessment_id": r.assessment_id,
-            "policy_no": r.policy_no,
-            "georef_id": r.georef_id,
-            "crop_stage": r.crop_stage,
-            "estimated_damage_percentage": float(r.estimated_damage) if r.estimated_damage else 0,
-            "financial_cover": float(r.amount_cover)
-        })
-
-    return {"status": "success", "data": payload}

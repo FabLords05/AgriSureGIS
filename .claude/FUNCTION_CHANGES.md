@@ -1603,3 +1603,29 @@ asked for it to be sortable.
   toggle and icon state).
 * Not pushed yet.
 
+---
+
+## [2026-08-03] - Remove Duplicate `GET /api/assessments` Route
+
+Long-flagged known issue (first noted in the Sprint 3/4 merge entries, "known
+duplication, not resolved here"): `backend/app/main.py` had an ad hoc
+`GET /api/assessments` (no trailing slash) alongside the real
+`GET /api/assessments/` route in `backend/app/api/assessments.py`. FastAPI
+treated them as distinct paths so both coexisted without erroring, but they
+returned different response shapes from different queries.
+
+### 1. File: `backend/app/main.py`
+* Removed `get_all_assessments()` and its `@app.get("/api/assessments")`
+  route. Confirmed dead code first: grepped `frontend/`, `backend/`, `docs/`,
+  and `.claude/` for any caller of the bare path or the function name --
+  `frontend/src/lib/api.ts` only ever calls the trailing-slash router route
+  (`/api/assessments/`, `/api/assessments/calculate`, etc.), and nothing else
+  in the repo referenced the ad hoc one. `models` import left in place --
+  still used elsewhere in the file (`models.ParserSettings`, `models.Farm`
+  in `test_database_connection()`).
+
+### Status / Next Steps
+* Pure deletion, no behavior change for any working code path -- no test
+  suite run needed to verify.
+* Not pushed yet.
+
