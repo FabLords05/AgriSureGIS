@@ -1629,3 +1629,30 @@ returned different response shapes from different queries.
   suite run needed to verify.
 * Not pushed yet.
 
+---
+
+## [2026-08-03] - Login Page Static Layout
+
+### 1. File: `frontend/src/app/components/LoginScreen.tsx`
+* Root container changed from `min-h-screen` to `h-screen overflow-hidden` --
+  the login page no longer grows taller than the viewport and scrolls; it's
+  fixed to viewport height.
+* Trimmed vertical spacing throughout (header padding, logo/title margins,
+  demo-credentials box, register link, footer note) so the full card fits
+  within typical viewport heights without clipping -- flagged by Fabio after
+  the initial `overflow-hidden` change cut off the bottom of the card on his
+  screen.
+* Removed the "A" logo square above the "AgriSureGIS" title entirely (kept
+  just the text) -- per Fabio's explicit request, both to match his intended
+  look and to free up more vertical space.
+* Center content wrapper (`flex-1 min-h-0 overflow-y-auto`) is a safety net
+  for unusually short viewports -- normally the trimmed spacing means it
+  fits without any scrolling at all.
+
+### Status / Next Steps
+* Verified working directly with the user -- full card (through Demo
+  Credentials and the Register link) renders without clipping and without a
+  page scrollbar.
+* Not pushed yet -- awaiting the user's own push per `CLAUDE.md`'s
+  git-handoff rules.
+

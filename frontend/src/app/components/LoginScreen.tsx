@@ -318,7 +318,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
       }}
     >
       {/* Top bar */}
-      <div className="flex items-center justify-between px-8 py-4">
+      <div className="flex items-center justify-between px-8 py-3 shrink-0">
         <div className="flex items-center gap-2.5">
           <div className="w-8 h-8 rounded-lg bg-white/15 flex items-center justify-center">
             <Leaf size={16} className="text-white" />
@@ -331,20 +331,18 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
         <span className="text-white/30 text-[10px]">v2.1.0-beta</span>
       </div>
 
-      {/* Center */}
-      <div className="flex-1 flex items-center justify-center px-4 py-8">
+      {/* Center -- overflow-y-auto is a safety net for very short viewports;
+          the reduced spacing below means it normally fits without scrolling. */}
+      <div className="flex-1 min-h-0 overflow-y-auto flex items-center justify-center px-4 py-3">
         {view === "register" ? (
           <RegistrationPanel onBack={() => setView("login")} />
         ) : (
           <div className="w-full max-w-md">
-            {/* App Logo / Title */}
-            <div className="text-center mb-8">
-              <div className="w-20 h-20 rounded-2xl bg-white/10 border border-white/20 flex items-center justify-center mx-auto mb-4 shadow-2xl">
-                <span className="text-white font-black text-3xl">A</span>
-              </div>
-              <h1 className="text-white text-3xl font-black tracking-tight">AgriSureGIS</h1>
-              <p className="text-white/60 text-sm mt-1">Automated Disaster Risk Assessment System</p>
-              <p className="text-white/40 text-[11px] mt-1">Parametric Indemnification · PAGASA TCB Integration · Google Earth Engine</p>
+            {/* App Title */}
+            <div className="text-center mb-4">
+              <h1 className="text-white text-2xl font-black tracking-tight">AgriSureGIS</h1>
+              <p className="text-white/60 text-xs mt-1">Automated Disaster Risk Assessment System</p>
+              <p className="text-white/40 text-[10px] mt-0.5">Parametric Indemnification · PAGASA TCB Integration · Google Earth Engine</p>
             </div>
 
             {/* Login Card */}
@@ -448,7 +446,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
                 </button>
 
                 {/* Demo hint */}
-                <div className="mt-4 p-3 rounded-xl bg-amber-50 border border-amber-100">
+                <div className="mt-3 p-2.5 rounded-xl bg-amber-50 border border-amber-100">
                   <p className="text-[10px] font-semibold text-amber-700 mb-1">Demo Credentials ({DEMO_ACCOUNTS[role].label})</p>
                   <p className="text-[10px] text-amber-600 font-mono">{DEMO_ACCOUNTS[role].email}</p>
                   <p className="text-[10px] text-amber-600 font-mono">Password: pcic1234</p>
@@ -462,7 +460,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
                 </div>
 
                 {/* Register link */}
-                <div className="mt-3 text-center">
+                <div className="mt-2 text-center">
                   <button
                     type="button"
                     onClick={() => setView("register")}
@@ -475,7 +473,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
             </div>
 
             {/* Footer note */}
-            <p className="text-center text-white/30 text-[10px] mt-5">
+            <p className="text-center text-white/30 text-[10px] mt-3">
               Authorized Personnel Only · PCIC-GIS AgriSureGIS System · For technical support contact the ICT Division
             </p>
           </div>
