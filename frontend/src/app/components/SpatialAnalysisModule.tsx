@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import {
   Map as MapIcon, ChevronUp, ChevronDown,
-  Filter, ArrowUpDown, UploadCloud, CheckCircle2, Table2, Satellite
+  Filter, ArrowUpDown, UploadCloud, CheckCircle2, Table2, Satellite, ShieldCheck
 } from "lucide-react";
 import { GISLeafletMap } from "./GISLeafletMap";
 import { AOISARPanel } from "./AOISARPanel";
@@ -27,6 +27,7 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
   const [selectedFarmId, setSelectedFarmId] = useState<number | null>(null);
   const [showSARPanel, setShowSARPanel]      = useState(false);
   const [filterMuni, setFilterMuni] = useState("All");
+  const [activeInsuranceOnly, setActiveInsuranceOnly] = useState(false);
   const [muniQuery, setMuniQuery] = useState("");
   const [showMuniSuggestions, setShowMuniSuggestions] = useState(false);
   const [sortField, setSortField] = useState<SortField>("farm_id");
@@ -85,8 +86,23 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
     setShowMuniSuggestions(false);
   };
 
+  // Mirrors the "active" definition used by GET /api/insurance/summary:
+  // today's date falls within effectivity_date-expiry_date, inclusive.
+  // The API formats these as "MM/DD/YYYY" (farms.py), so they must be
+  // parsed rather than compared as strings.
+  const parseMDY = (s: string) => {
+    const [month, day, year] = s.split("/").map(Number);
+    return new Date(year, month - 1, day);
+  };
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const isActiveInsurance = (f: Farm) =>
+    f.effectivity_date != null && f.expiry_date != null &&
+    parseMDY(f.effectivity_date) <= today && today <= parseMDY(f.expiry_date);
+
   const filteredFarms = farmRows
     .filter(f => filterMuni === "All" || f.municipality === filterMuni)
+    .filter(f => !activeInsuranceOnly || isActiveInsurance(f))
     .sort((a, b) => {
       const va = a[sortField] ?? "";
       const vb = b[sortField] ?? "";
@@ -302,6 +318,12 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
               </span>
               {loadError && <span className="text-[10px] text-red-500">{loadError}</span>}
             </div>
+            <button
+              onClick={() => setActiveInsuranceOnly(v => !v)}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors border ${activeInsuranceOnly ? "bg-[#166534] text-white border-[#166534]" : "border-[#166534] text-[#166534] hover:bg-[#166534]/10"}`}
+            >
+              <ShieldCheck size={11} /> Active Insurance Only
+            </button>
             <div className="ml-auto text-[9px] text-muted-foreground">
               Click a row to zoom the map to that farm
             </div>

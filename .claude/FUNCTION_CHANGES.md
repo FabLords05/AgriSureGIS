@@ -1677,3 +1677,35 @@ resolutions).
   after this change.
 * Pushed to `develop`.
 
+---
+
+## [2026-08-03] - Spatial/Data Import: "Active Insurance Only" Filter
+
+### 1. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* Added `activeInsuranceOnly` state and a toggle button ("Active Insurance
+  Only", `ShieldCheck` icon) in the Farm Records table header, styled to
+  match the existing SAR/GEE toggle button convention.
+* Added `isActiveInsurance()` helper: client-side filter mirroring the exact
+  "active" definition already used by `GET /api/insurance/summary`
+  (`backend/app/api/insurance.py`) -- today's date falls within
+  `effectivity_date`-`expiry_date`, inclusive, both non-null. No backend
+  change needed since `Farm` rows already carry both date fields.
+* `filteredFarms` now also filters on `activeInsuranceOnly` alongside the
+  existing municipality filter, before sorting.
+* Dates from the API are formatted as `MM/DD/YYYY` (`backend/app/api/farms.py`
+  lines 49-50), not ISO -- initial version of `isActiveInsurance()` wrongly
+  compared them as ISO strings and silently matched nothing. Fixed by adding
+  `parseMDY()` to parse into `Date` objects before comparing, catchable only
+  by testing against live data (flagged by Fabio).
+
+### Status / Next Steps
+* Verified working directly with the user against the live `/api/farms/`
+  data -- correctly isolates farms whose policy window covers today.
+* Investigated (read-only, no changes made) a ~15-month effectivity-to-expiry
+  span on farm_id 19's policy that looked suspicious for a per-season
+  typhoon product -- traced to unvalidated CSV import pass-through
+  (`backend/app/api/upload.py`, `_parse_date()`/`prepare_row_payload()` have
+  no duration sanity check), not a bug in this filter or in date parsing.
+  Fabio deferred adding import validation to a separate future task.
+* Not yet pushed.
+
