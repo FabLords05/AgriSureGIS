@@ -1896,3 +1896,53 @@ in the UI.
   this session to clean up (done).
 * Pushed to `develop`.
 
+---
+
+## [2026-08-04] - Mock Data: Typhoon ALBRITCH + Bukidnon Farmers
+
+Fabio asked for a self-contained mock dataset for testing: a fictional
+typhoon with 10 bulletins seeded directly (no PAGASA scraping), plus 3
+farmers/10 farms in real Bukidnon locations. Follows the existing
+`mock_farmers_talakag_claveria.csv` / `seed_mock_typhoon.py` precedent.
+
+### 1. File: `backend/mock_data/mock_farmers_albritch_bukidnon.csv`
+* 10 rows in the same PABS export column format as the existing mock CSV.
+  Real Bukidnon municipalities/barangays confirmed against
+  `app/data/psgc_region10_boundaries.csv`: Karylle Maagad (2 farms,
+  Lantapan), Fabio Tugonon (3 farms, Impasug-ong), James Gayla (5 farms,
+  2 in City of Malaybalay + 3 in Maramag). Policy numbers
+  `POL-MOCK-92001`-`92010`, farmers_id shared per farmer across their
+  multiple farm rows. Effectivity 06/01/2026-12/31/2026 (matches the
+  existing mock CSV's ~7-month window, deliberately not the ~15-month span
+  flagged as a data-quality issue earlier this session).
+* Uploaded via `POST /api/upload/csv` -- all 10 rows inserted successfully
+  (`farm_id` 580-589).
+
+### 2. File: `backend/mock_data/seed_mock_typhoon_albritch.py`
+* Same pattern as `seed_mock_typhoon.py` (direct psycopg2 insert, bypasses
+  `BulletinParserService`/the PAGASA scrape pipeline entirely per Fabio's
+  "skip the scraping" request). Creates Typhoon "ALBRITCH" (2026) + 10
+  bulletins at 6-hour intervals, tracking westward across Bukidnon with a
+  realistic TD -> TS -> STS -> Typhoon (peak, 155 km/h) -> STS -> TS -> TD
+  -> Low Pressure Area intensity arc -- the final bulletin's title/category
+  mirrors the real "Low Pressure Area (formerly ...)" pattern found in
+  `TCB#13_luis.pdf` earlier this session. Signals cover Lantapan,
+  Impasug-ong, City of Malaybalay, and Maramag (the same 4 municipalities
+  as the mock farmers CSV) with `island_group=2` (Mindanao) -- corrects a
+  placeholder value of `3` used in the older `seed_mock_typhoon.py`, which
+  predates the real island_group convention established in
+  `bulletin_parser.py` this session.
+* Run by Fabio in his venv (`python mock_data/seed_mock_typhoon_albritch.py`)
+  -- created typhoon_id 51, tcb_id 409-418.
+* Verified end-to-end: `POST /api/bulletins/{tcb_id}/compute-exposure` ->
+  all 4 municipalities show Signal 4, 42-48h exposure, `is_eligible_6hr`.
+  `POST /api/assessments/calculate` -> 4 of 10 policies got a computed
+  indemnity payout (assessment_id 590-593, ₱10,752-₱17,920); the other 6
+  hit a pre-existing gap in `tbl_recsap_matrix`/`tbl_indemnity_factor_matrix`
+  seed coverage (not every crop-stage x signal x 24h-bucket combination has
+  a matrix row) -- flagged to Fabio, not fixed, since it's a real data gap
+  unrelated to this mock scenario and out of scope for what was asked.
+
+### Status / Next Steps
+* Not yet pushed.
+
