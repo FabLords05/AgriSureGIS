@@ -373,7 +373,15 @@ export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
     return ["All", ...Array.from(set).sort((a, b) => a - b).map(String)];
   }, [rows]);
 
+  // Rows carry TYPHOON_NAME as a plain string (not a typhoon_id), which
+  // sidesteps the bulletin-title-parsing quirk noted above `typhoons` --
+  // matching by name is exactly how that list is already deduped/selected.
+  const selectedTyphoonName = selectedTyphoonId === null
+    ? null
+    : typhoons.find(t => t.typhoon_id === selectedTyphoonId)?.typhoon_name ?? null;
+
   const filtered = useMemo(() => rows
+    .filter(r => selectedTyphoonName === null || r.TYPHOON_NAME === selectedTyphoonName)
     .filter(r => filterMuni === "All" || r.municipality === filterMuni)
     .filter(r => filterSignal === "All" || r.WIND_VELOCITY === Number(filterSignal))
     .sort((a, b) => {
@@ -381,7 +389,7 @@ export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
       const vb = b[sortField] ?? (typeof b[sortField] === "number" ? 0 : "");
       const cmp = typeof va === "number" && typeof vb === "number" ? va - vb : String(va).localeCompare(String(vb));
       return sortDir === "asc" ? cmp : -cmp;
-    }), [rows, filterMuni, filterSignal, sortField, sortDir]);
+    }), [rows, selectedTyphoonName, filterMuni, filterSignal, sortField, sortDir]);
 
   const handleSort = (f: SortField) => {
     if (sortField === f) setSortDir(d => d === "asc" ? "desc" : "asc");
@@ -453,7 +461,9 @@ export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
         <div className="flex items-center gap-2">
           <FileSpreadsheet size={14} className="text-[#166534]" />
           <span className="text-sm font-semibold">Assessment & Reporting</span>
-          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">All typhoons combined</span>
+          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">
+            {selectedTyphoonName ? `Typhoon ${selectedTyphoonName} only` : "All typhoons combined"}
+          </span>
         </div>
         <div className="flex items-center gap-2 ml-auto flex-wrap gap-y-1">
           <button
@@ -546,6 +556,13 @@ export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
         <div className="flex-1 flex flex-col items-center justify-center gap-2 text-center px-8">
           <p className="text-sm font-semibold">No assessments computed yet</p>
           <p className="text-[11px] text-muted-foreground">Assessments will appear here once computed for any typhoon.</p>
+        </div>
+      ) : selectedTyphoonName && filtered.length === 0 ? (
+        <div className="flex-1 flex flex-col items-center justify-center gap-2 text-center px-8">
+          <p className="text-sm font-semibold">No assessments computed yet for Typhoon {selectedTyphoonName}</p>
+          <p className="text-[11px] text-muted-foreground">
+            These records belong to other typhoons. Use "Compute Assessments" above once this typhoon's exposure is ready, or click it again to deselect and see all typhoons.
+          </p>
         </div>
       ) : (
         <>

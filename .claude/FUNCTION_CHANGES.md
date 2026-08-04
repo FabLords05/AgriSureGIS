@@ -1946,3 +1946,38 @@ farmers/10 farms in real Bukidnon locations. Follows the existing
 ### Status / Next Steps
 * Not yet pushed.
 
+---
+
+## [2026-08-04] - Assessment Table Now Actually Filters by Selected Typhoon
+
+Fabio caught this using the new ALBRITCH mock data: selecting "Typhoon LUIS"
+in the left sidebar left ALBRITCH's already-computed rows showing in the
+main table, with no indication they belonged to a different typhoon --
+confusing for a GIS specialist trying to tell what's actually affected by
+which storm.
+
+### 1. File: `frontend/src/app/components/AssessmentModule.tsx`
+* Root cause: `filtered` (the main table's row source) was never filtered
+  by `selectedTyphoonId` at all -- the left sidebar's typhoon selection only
+  ever scoped the "View Areas Affected" modal and "Compute Assessments"
+  button, never the table itself, despite visually looking like a table
+  filter.
+* Added `selectedTyphoonName` (resolved from `typhoons` by id) and a new
+  `.filter(r => selectedTyphoonName === null || r.TYPHOON_NAME ===
+  selectedTyphoonName)` step in `filtered`. Matches by name (a plain string
+  field on `PabsAssessmentRow`) rather than typhoon_id, consistent with how
+  `typhoons` itself is already deduped by name to route around the known
+  bulletin-title-parsing quirk that can split one real typhoon across
+  multiple `typhoon_id` rows.
+* Top badge now reads "Typhoon {name} only" instead of always "All typhoons
+  combined" when a typhoon is selected.
+* Added a distinct empty-state message ("No assessments computed yet for
+  Typhoon {name}") for the case where a typhoon is selected but has zero
+  matching rows, instead of silently falling through to a zeroed-out table.
+* CSV export/preview (`CSVPreviewModal`) already consumes `filtered`, so it
+  automatically respects the same typhoon scoping now too.
+
+### Status / Next Steps
+* Verified working directly with the user in the browser.
+* Not yet pushed.
+
