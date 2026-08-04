@@ -81,6 +81,72 @@ class BulletinParserTests(unittest.TestCase):
         self.assertEqual(result["bulletin_count"], 21)
         self.assertTrue(result["is_final"])
 
+    def test_parse_bulletin_text_extracts_super_typhoon_category(self):
+        # "SUPER TYPHOON" is a real PAGASA category (above Typhoon) that was
+        # missing from the category alternation entirely -- would previously
+        # fall through to a literal "UNKNOWN" typhoon/category.
+        text = "Tropical Cyclone Bulletin NR. 8\nSUPER TYPHOON LUIS\n"
+        with patch("pdfplumber.open") as mock_pdf_open:
+            mock_pdf_open.return_value.__enter__.return_value = _mock_pdf(text)
+            result = BulletinParserService.parse_bulletin_text("dummy_path.pdf")
+
+        self.assertEqual(result["category"], "Super Typhoon")
+        self.assertEqual(result["typhoon_name"], "LUIS")
+
+    def test_parse_bulletin_text_recognizes_low_pressure_area_formerly_title(self):
+        # Regression test: a storm's final bulletin can be titled "Low
+        # Pressure Area (formerly "NAME")" once it weakens below tropical
+        # depression strength -- confirmed against a live PAGASA bulletin
+        # (TCB#13_luis.pdf, NR. 13F). This didn't match any of the
+        # TYPHOON/TROPICAL STORM/etc. categories at all, so it used to fall
+        # back to a literal "UNKNOWN" typhoon name, silently forking LUIS's
+        # final bulletin onto a fake shared "UNKNOWN" Typhoon row instead of
+        # reuniting with the real one.
+        #
+        # Uses real Unicode smart quotes (“/”), not straight ASCII
+        # quotes -- `pdftotext` on the actual PDF confirmed PAGASA renders
+        # curly quotes here, which an ["']? character class does not match at
+        # all (a first version of this fix used straight quotes and still
+        # silently failed against the real bulletin).
+        text = (
+            "Tropical Cyclone Bulletin NR. 13F\n"
+            "Low Pressure Area (formerly “LUIS”)\n"
+            "Issued at 11:00 PM, 03 August 2026\n"
+        )
+        with patch("pdfplumber.open") as mock_pdf_open:
+            mock_pdf_open.return_value.__enter__.return_value = _mock_pdf(text)
+            result = BulletinParserService.parse_bulletin_text("dummy_path.pdf")
+
+        self.assertEqual(result["typhoon_name"], "LUIS")
+        self.assertEqual(result["category"], "Low Pressure Area")
+        self.assertTrue(result["is_final"])
+
+    def test_parse_bulletin_text_recognizes_low_pressure_area_with_straight_quotes(self):
+        # Same as above but with straight ASCII quotes, in case a future PDF
+        # (or a different PAGASA export tool) uses them instead of curly ones.
+        text = (
+            'Tropical Cyclone Bulletin NR. 13F\n'
+            'Low Pressure Area (formerly "LUIS")\n'
+            "Issued at 11:00 PM, 03 August 2026\n"
+        )
+        with patch("pdfplumber.open") as mock_pdf_open:
+            mock_pdf_open.return_value.__enter__.return_value = _mock_pdf(text)
+            result = BulletinParserService.parse_bulletin_text("dummy_path.pdf")
+
+        self.assertEqual(result["typhoon_name"], "LUIS")
+        self.assertEqual(result["category"], "Low Pressure Area")
+
+    def test_parse_bulletin_text_unrecognized_title_still_falls_back_to_unknown(self):
+        # Neither a recognized category nor the LPA-formerly pattern -- the
+        # UNKNOWN fallback must still exist for genuinely unparseable titles.
+        text = "Tropical Cyclone Bulletin NR. 1\nSOMETHING ELSE ENTIRELY\n"
+        with patch("pdfplumber.open") as mock_pdf_open:
+            mock_pdf_open.return_value.__enter__.return_value = _mock_pdf(text)
+            result = BulletinParserService.parse_bulletin_text("dummy_path.pdf")
+
+        self.assertEqual(result["typhoon_name"], "UNKNOWN")
+        self.assertEqual(result["category"], "UNKNOWN")
+
     def test_parse_bulletin_text_category_is_not_fooled_by_the_word_elsewhere_in_the_text(self):
         # Regression test: the old category logic was `"Typhoon" if "typhoon" in
         # text.lower() else "Tropical Storm"` — a bare substring check that

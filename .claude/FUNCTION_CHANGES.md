@@ -1835,5 +1835,64 @@ different signal levels were merged into one misleading list.
 * Verified working directly with the user in the browser for both the
   Assessment "View Areas Affected" modal (island group column) and the
   Monitoring "TCB Viewer" modal (per-level grouping).
-* Not yet pushed.
+* Pushed to `develop`.
+
+---
+
+## [2026-08-04] - Bulletin Title Parsing: Missing Categories & Smart Quotes
+
+Fabio asked why the app "does not parse the latest bulletins." Root cause
+traced by fetching PAGASA's live bulletin index directly and inspecting the
+actual PDF behind the newest bulletin the app had misfiled: LUIS weakened
+into a Low Pressure Area, and its final bulletin's title
+("Low Pressure Area (formerly "LUIS")") didn't match any of the four
+category keywords `parse_bulletin_text()` recognized, so it silently fell
+back to a literal `"UNKNOWN"` typhoon name/category — forking that and any
+other similarly-titled bulletin onto one fake shared "UNKNOWN" Typhoon row
+instead of reuniting with the real one. The bulletin *was* being fetched and
+numbered correctly; it just became invisible under the real typhoon's name
+in the UI.
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* `parse_bulletin_text()`: added `SUPER TYPHOON` to the recognized category
+  alternation (a real PAGASA category above Typhoon, previously missing
+  entirely).
+* Added a fallback `lpa_match` regex (tried only when the main category
+  regex doesn't match) for the `Low Pressure Area (formerly "NAME")` title
+  format PAGASA uses on a storm's final bulletin once it weakens below
+  tropical depression strength — extracts `NAME` as the typhoon name so it
+  reunites with the storm's existing Typhoon row, with category set to
+  `"Low Pressure Area"`.
+* First version of this fix used a `["']?` quote character class and still
+  silently failed against the real bulletin -- confirmed via `pdftotext`
+  that PAGASA renders Unicode "smart quotes" (`“`/`”`), not straight ASCII
+  quotes, around the former name. Broadened the quote class (shared `QUOTES`
+  constant, used in both the main title regex and the new LPA fallback) to
+  cover straight and curly single/double quotes (straight `"`/`'` plus their
+  curly counterparts).
+* Verified end-to-end via a live PAGASA scrape (after Fabio reset
+  `tbl_tcb_signals`/`tbl_tropical_cyclone_bulletins`/`tbl_typhoons` twice —
+  once per fix iteration): all 83 bulletins now group under their real
+  typhoon names with zero `UNKNOWN`/garbled entries. LUIS went from stuck at
+  12 bulletins to the correct 13 (its real final "Low Pressure Area"
+  bulletin); JOSIE went from 2 to the correct 3; BAVI (previously entirely
+  missing) now appears correctly as "Super Typhoon".
+
+### 2. File: `backend/tests/test_bulletin_parser.py`
+* Added `test_parse_bulletin_text_extracts_super_typhoon_category`,
+  `test_parse_bulletin_text_recognizes_low_pressure_area_formerly_title`
+  (uses real Unicode smart quotes, matching the actual PDF — a straight-quote
+  version of this same test would have passed against the first, still-buggy
+  fix and missed the regression),
+  `test_parse_bulletin_text_recognizes_low_pressure_area_with_straight_quotes`,
+  and `test_parse_bulletin_text_unrecognized_title_still_falls_back_to_unknown`
+  (keeps the `UNKNOWN` fallback covered for genuinely unparseable titles).
+* Not yet run by Fabio against this exact final version — verified instead
+  via the live end-to-end scrape described above.
+
+### Status / Next Steps
+* Only affects newly parsed bulletins going forward; already-mis-filed
+  historical data required the two reset+rescrape cycles performed during
+  this session to clean up (done).
+* Pushed to `develop`.
 

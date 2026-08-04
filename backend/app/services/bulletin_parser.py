@@ -116,15 +116,43 @@ class BulletinParserService:
         # Philippine local storm names are always a single word — bounded to one
         # word (no \s) so a following word on the same line can't be swallowed
         # into the name (this used to capture e.g. "GARDO Issued at" as the name).
+        # Real PAGASA PDFs quote names with Unicode "smart quotes" (“/”),
+        # not straight ASCII quotes -- confirmed via `pdftotext` on a live
+        # bulletin, where a bare ["']? here silently failed to match at all
+        # (the curly quote isn't in that class, and since it directly precedes
+        # the name, the whole match fails rather than just skipping it).
+        QUOTES = "[\"'“”‘’]?"
         title_match = re.search(
-            r"^\s*(TYPHOON|TROPICAL STORM|SEVERE TROPICAL STORM|TROPICAL DEPRESSION)"
-            r"\s+[\"']?([A-Z][A-Z\-]*)[\"']?(?:\s*\(([A-Z][A-Z\-]*)\))?",
+            r"^\s*(SUPER TYPHOON|TYPHOON|TROPICAL STORM|SEVERE TROPICAL STORM|TROPICAL DEPRESSION)"
+            r"\s+" + QUOTES + r"([A-Z][A-Z\-]*)" + QUOTES + r"(?:\s*\(([A-Z][A-Z\-]*)\))?",
             text,
             re.IGNORECASE | re.MULTILINE,
         )
-        category = title_match.group(1).title() if title_match else "UNKNOWN"
-        typhoon_name = title_match.group(2).strip() if title_match else "UNKNOWN"
-        international_name = title_match.group(3) if title_match and title_match.group(3) else None
+        # A storm's final bulletin can instead be titled "Low Pressure Area
+        # (formerly "NAME")" once it's weakened below tropical depression
+        # strength — doesn't match any of the categories above at all, which
+        # used to fall through to a literal "UNKNOWN" typhoon/category,
+        # silently forking that storm's later bulletins onto a fake shared
+        # "UNKNOWN" Typhoon row instead of reuniting with its real one.
+        # Confirmed against a live PAGASA bulletin (TCB#13_luis.pdf, NR. 13F,
+        # "Low Pressure Area (formerly “LUIS”)").
+        lpa_match = None if title_match else re.search(
+            r"^\s*Low\s+Pressure\s+Area\s*\(formerly\s+" + QUOTES + r"([A-Z][A-Z\-]*)" + QUOTES + r"\)",
+            text,
+            re.IGNORECASE | re.MULTILINE,
+        )
+        if title_match:
+            category = title_match.group(1).title()
+            typhoon_name = title_match.group(2).strip()
+            international_name = title_match.group(3) if title_match.group(3) else None
+        elif lpa_match:
+            category = "Low Pressure Area"
+            typhoon_name = lpa_match.group(1).strip()
+            international_name = None
+        else:
+            category = "UNKNOWN"
+            typhoon_name = "UNKNOWN"
+            international_name = None
 
         # 3. Parse Max Winds and Gusts
         winds_match = re.search(r"maximum\s+sustained\s+winds\s+of\s+(\d+)\s+km/h", text, re.IGNORECASE)
