@@ -2236,3 +2236,18 @@ dead one looked identical from the outside.
   showing a partial table) removes that mismatched mid-state entirely — one
   atomic swap from "loading" to "fully loaded table," nothing in between.
 
+---
+
+## [2026-08-07] - Monitoring stat card: fix "Active Typhoon" wrapping to two lines
+
+### 1. File: `frontend/src/app/components/MonitoringModule.tsx`
+* **Changes to Rendering (Fabio's own edit, logged here for the record):**
+  * `statCards`: the "Active Typhoon" card's fallback value changed from
+    `"—"` to `"N/A"`, and its icon shrunk from `size={18}` to `size={14}`, so
+    the fallback text fits on one line within the card instead of wrapping.
+
+### 2. File: `.claude/settings.json`
+* **New file:**
+  * Adds `{"permissions": {"defaultMode": "bypassPermissions"}}` as the
+    project-level Claude Code permission default.
+
