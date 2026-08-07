@@ -5,16 +5,7 @@ import {
 } from "lucide-react";
 import { GISLeafletMap } from "./GISLeafletMap";
 import { AOISARPanel } from "./AOISARPanel";
-import { Skeleton } from "./ui/skeleton";
 import { getFarms, getAssessments, uploadCsv, uploadGpx, Farm, Assessment, Bulletin } from "@/lib/api";
-
-// Table rows are painted in batches (via requestAnimationFrame) instead of
-// all at once, so mounting hundreds of <tr> doesn't block/jank a single
-// frame -- the full dataset is already fetched and correct for the map and
-// filters the moment loading finishes, only the row *paint* is staggered.
-const ROW_BATCH_SIZE = 50;
-const SKELETON_ROW_COUNT = 10;
-const TABLE_COLUMN_COUNT = 12;
 
 interface FarmRow extends Farm {
   assessment: Assessment | null;
@@ -125,29 +116,6 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
     if (sortField === field) setSortDir(d => d === "asc" ? "desc" : "asc");
     else { setSortField(field); setSortDir("asc"); }
   };
-
-  // Grows the visible row count in batches after (re)filtering/sorting, so
-  // the table paints its first screenful immediately and fills in the rest
-  // across a few animation frames rather than all at once.
-  const [visibleRowCount, setVisibleRowCount] = useState(ROW_BATCH_SIZE);
-
-  useEffect(() => {
-    setVisibleRowCount(ROW_BATCH_SIZE);
-    if (filteredFarms.length <= ROW_BATCH_SIZE) return;
-
-    let cancelled = false;
-    let rafId: number;
-    const growBatch = () => {
-      if (cancelled) return;
-      setVisibleRowCount(prev => {
-        const next = Math.min(prev + ROW_BATCH_SIZE, filteredFarms.length);
-        if (next < filteredFarms.length) rafId = requestAnimationFrame(growBatch);
-        return next;
-      });
-    };
-    rafId = requestAnimationFrame(growBatch);
-    return () => { cancelled = true; cancelAnimationFrame(rafId); };
-  }, [filteredFarms.length]);
 
   const handleCsvFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -361,6 +329,11 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
           </div>
 
           <div className="flex-1 overflow-auto">
+            {isLoadingFarms ? (
+              <div className="flex items-center justify-center h-full text-[11px] text-muted-foreground">
+                Loading farm records…
+              </div>
+            ) : (
             <table className="w-full text-[11px]">
               <thead className="sticky top-0 z-10">
                 <tr className="bg-[#166534] text-white">
@@ -391,17 +364,7 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
                 </tr>
               </thead>
               <tbody>
-                {isLoadingFarms ? (
-                  Array.from({ length: SKELETON_ROW_COUNT }).map((_, i) => (
-                    <tr key={`skeleton-${i}`} className="border-t border-border">
-                      {Array.from({ length: TABLE_COLUMN_COUNT }).map((_, j) => (
-                        <td key={j} className="px-2.5 py-2">
-                          <Skeleton className="h-3 w-full" />
-                        </td>
-                      ))}
-                    </tr>
-                  ))
-                ) : filteredFarms.slice(0, visibleRowCount).map(f => (
+                {filteredFarms.map(f => (
                   <tr
                     key={f.farm_id}
                     onClick={() => setSelectedFarmId(f.farm_id === selectedFarmId ? null : f.farm_id)}
@@ -432,6 +395,7 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
                 ))}
               </tbody>
             </table>
+            )}
           </div>
         </div>
       </div>

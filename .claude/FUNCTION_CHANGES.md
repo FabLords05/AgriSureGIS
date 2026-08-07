@@ -2174,3 +2174,65 @@ dead one looked identical from the outside.
   until the user finished scrolling the table, since they all read the same
   in-memory farm list.
 
+---
+
+## [2026-08-07] - Farm Records table: revert row-reveal animation
+
+### 1. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* **Changes to Functions/Rendering:**
+  * Removed the `visibleRowCount` state and its `requestAnimationFrame`
+    growth effect added earlier the same day; the table body now renders
+    `filteredFarms` directly again (no `.slice(0, visibleRowCount)`), and
+    the now-unused `ROW_BATCH_SIZE` constant was removed with it.
+  * The `isLoadingFarms` skeleton placeholder rows (`SKELETON_ROW_COUNT`,
+    `TABLE_COLUMN_COUNT`, `ui/skeleton.tsx`) are unchanged and still shown
+    while the initial fetch is in flight.
+* **Why:** Fabio reported the batch-reveal animation itself was visible as
+  rows "moving" every time the screen opened. The animation was meant to
+  smooth out mounting hundreds of `<tr>`s at once, but for this dataset size
+  the visible motion it introduced was worse than the jank it was solving —
+  reverted to a single static render once data arrives, keeping only the
+  backend N+1 fix and the loading-state skeleton from the prior entry.
+
+---
+
+## [2026-08-07] - Farm Records table: remove loading skeleton too
+
+### 1. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* **Changes to Functions/Rendering:**
+  * Removed the `isLoadingFarms` skeleton `<tr>` block (`SKELETON_ROW_COUNT`,
+    `TABLE_COLUMN_COUNT`, the `Skeleton` import from `ui/skeleton.tsx`) added
+    two entries above. The table body now renders only `filteredFarms.map(...)`
+    — an empty `<tbody>` while loading (with the header pill reading
+    "Loading…", unchanged), then the full table in one static pass once data
+    arrives. This is now functionally identical to the file's pre-2026-08-07
+    rendering; the only surviving change from today is the backend N+1 fix
+    in `farms.py`.
+* **Why:** the right-aligned numeric columns (Area (ha), Exp (h), Est.
+  Payment) render a full-width skeleton bar while loading vs. short
+  right-anchored text once loaded, which read as text jumping from left to
+  right on every screen open — the same "I want it static" complaint as the
+  row-reveal animation. Rather than patch the skeleton's alignment per
+  column, removed the skeleton loading state entirely to guarantee no visual
+  motion between the loading and loaded states.
+
+---
+
+## [2026-08-07] - Farm Records table: no header-over-blank-body loading state
+
+### 1. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* **Changes to Rendering:**
+  * Wrapped the `<table>` (header + body) in `{isLoadingFarms ? (...) : (...)}`
+    inside the scrollable panel `<div>`. While loading, that panel now shows
+    a single centered "Loading farm records…" message instead of the table
+    shell; the `<table>` (with its `<thead>`/`<tbody>`) only mounts once
+    `isLoadingFarms` is false, fully populated.
+* **Why:** even with no skeleton or animation, the green `<thead>` was still
+  rendering immediately with an empty `<tbody>` beneath it while loading —
+  visually indistinguishable from a broken/empty table, and a different
+  "shape" than the loaded state. Fabio compared the before/after screenshots
+  directly and wanted them structurally consistent: no header sitting over
+  blank rows. Swapping the whole table for a loading message (rather than
+  showing a partial table) removes that mismatched mid-state entirely — one
+  atomic swap from "loading" to "fully loaded table," nothing in between.
+
