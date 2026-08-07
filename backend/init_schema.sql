@@ -197,6 +197,16 @@ CREATE INDEX idx_farms_location_geom ON tbl_farms USING GIST(location_geom);
 CREATE INDEX idx_tcb_center_geom ON tbl_tropical_cyclone_bulletins USING GIST(center_geom);
 CREATE INDEX idx_admin_boundaries_boundary_geom ON tbl_admin_boundaries USING GIST(boundary_geom);
 
+-- 6b. Optimize CSV ingestion lookups (backend/app/api/upload.py, upload_csv()).
+-- Without these, tbl_farms.csv_farm_reference and the boundary triplet below
+-- were scanned sequentially on every never-before-seen value -- on a large CSV
+-- (e.g. the real ~23,917-row PABS export) that turned a mostly-new-farms import
+-- into an effectively O(n^2) table scan as tbl_farms grew mid-upload, which is
+-- what actually made ingestion "hang" rather than just being generically slow.
+CREATE INDEX idx_farms_csv_farm_reference ON tbl_farms (csv_farm_reference);
+CREATE INDEX idx_admin_boundaries_province_municipality_barangay
+    ON tbl_admin_boundaries (province, municipality, barangay);
+
 -- 7. Real PCIC seed data for the two-step parametric lookup (replaces the old
 -- made-up placeholder block). Source: PCIC "Table 11" damage matrix and Rice
 -- Indemnity Factor Table, transcribed from the manuscript figures.
