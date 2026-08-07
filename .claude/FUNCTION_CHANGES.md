@@ -2131,3 +2131,46 @@ dead one looked identical from the outside.
   require redesigning the per-row-failure-isolation architecture the
   existing tests depend on -- left out of scope for this fix.
 
+---
+
+## [2026-08-07] - Farm Records table: fix N+1 query + smooth loading UX
+
+### 1. File: `backend/app/api/farms.py`
+* **Changes to Functions:**
+  * Rewrote **`list_farms()`**: replaced the per-farm `InsuranceRecord` query
+    (plus lazy-loaded `Farm.farmer`/`Farm.boundary`, which also default to
+    one query per row) with `joinedload(Farm.farmer)`/`joinedload(Farm.boundary)`
+    on the initial query and a single bulk `InsuranceRecord` fetch reduced to
+    "most recent per farm" in Python via `dict.setdefault()` on a
+    `farm_id, effectivity_date DESC`-ordered result set. Cuts the endpoint
+    from ~1 + up to 3-per-farm queries (~1,770 for the current 589 farms) to
+    2 queries total, regardless of farm count. Response shape (`{"status",
+    "data"}`) and every field are unchanged.
+
+### 2. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* **Changes to Functions/Rendering:**
+  * Added a `visibleRowCount` state + `useEffect` that grows the number of
+    rendered Farm Records rows in `ROW_BATCH_SIZE` (50) increments via
+    `requestAnimationFrame`, re-triggered on `filteredFarms.length` changes.
+    The table now paints its first ~50 rows immediately after data loads and
+    fills in the rest across a few frames instead of mounting all rows (589
+    currently) in one blocking paint. The full dataset is fetched in one
+    call as before (unchanged) — needed since the map (`GISLeafletMap`),
+    municipality filter, and sort all read from the same `farmRows`/
+    `filteredFarms` arrays and require the complete set to stay correct;
+    only the row *paint* is staggered, not the fetch.
+  * Replaced the empty `<tbody>` shown while `isLoadingFarms` is true with
+    `SKELETON_ROW_COUNT` (10) placeholder `<tr>` rows using the
+    previously-unused `Skeleton` primitive (`ui/skeleton.tsx`), one per
+    column (`TABLE_COLUMN_COUNT` = 12), instead of a blank table body with
+    only the header pill reading "Loading…".
+* **Why:** the "Active Typhoon"/"Farm Records" screen would sit blank/frozen
+  until the entire (previously N+1-slow) farms response arrived, then mount
+  all rows in a single React commit. Fixing the backend query removes the
+  actual wait; the frontend batching/skeleton changes smooth out the
+  remaining paint so the table doesn't visibly block even on a fast
+  response. Considered true pagination/infinite-scroll first, but rejected
+  it — it would've left the map and municipality/sort filters incomplete
+  until the user finished scrolling the table, since they all read the same
+  in-memory farm list.
+

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
 from geoalchemy2.shape import to_shape
 from shapely.geometry import mapping
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
 from app.models.models import Farm, InsuranceRecord
@@ -15,20 +15,42 @@ def list_farms(db: Session = Depends(get_db)):
     Lists all farms with farmer/boundary identity, insurance coverage dates
     (from the farm's most recent InsuranceRecord, if any), and, where a GPX
     boundary has been uploaded, the farm's geometry as GeoJSON.
+
+    Runs 2 queries total regardless of farm count: `farmer`/`boundary` are
+    eager-loaded via joinedload (they default to lazy/per-row loading), and
+    insurance records are bulk-fetched once and reduced to "most recent per
+    farm" in Python -- instead of the previous 1 (farms) + up to 3 per farm
+    (farmer + boundary + insurance) queries, which was ~1,770 queries for the
+    589 farms currently in the table.
     """
-    farms = db.query(Farm).order_by(Farm.farm_id.asc()).all()
+    farms = (
+        db.query(Farm)
+        .options(joinedload(Farm.farmer), joinedload(Farm.boundary))
+        .order_by(Farm.farm_id.asc())
+        .all()
+    )
+
+    farm_ids = [farm.farm_id for farm in farms]
+    latest_insurance_by_farm_id: dict[int, InsuranceRecord] = {}
+    if farm_ids:
+        # Ordered desc by effectivity_date, so the first record seen per
+        # farm_id is the most recent -- same "latest" semantics as the old
+        # per-farm .order_by(...).first(), just computed for everyone at once.
+        insurance_records = (
+            db.query(InsuranceRecord)
+            .filter(InsuranceRecord.farm_id.in_(farm_ids))
+            .order_by(InsuranceRecord.farm_id, InsuranceRecord.effectivity_date.desc())
+            .all()
+        )
+        for record in insurance_records:
+            latest_insurance_by_farm_id.setdefault(record.farm_id, record)
 
     data = []
     for farm in farms:
         location_geom = (
             mapping(to_shape(farm.location_geom)) if farm.location_geom is not None else None
         )
-        insurance = (
-            db.query(InsuranceRecord)
-            .filter(InsuranceRecord.farm_id == farm.farm_id)
-            .order_by(InsuranceRecord.effectivity_date.desc())
-            .first()
-        )
+        insurance = latest_insurance_by_farm_id.get(farm.farm_id)
         data.append(
             {
                 "farm_id": farm.farm_id,
