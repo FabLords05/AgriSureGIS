@@ -1981,3 +1981,44 @@ which storm.
 * Verified working directly with the user in the browser.
 * Not yet pushed.
 
+---
+
+## [2026-08-07] - Environment Recheck: uvloop Marker, DB Config Wiring
+
+Fabio asked for a recheck that Postgres/venv/npm are set up correctly.
+Read-only inspection found: `.venv` already has all `requirements-win.txt`
+packages installed (Postgres port 5432 reachable; GeoServer port 8080 is
+not, which is expected/optional per `.claude/ENV_GUIDE.md`); frontend
+`node_modules` already installed. Found two real gaps, fixed here.
+
+### 1. File: `backend/requirements.txt`
+* Fabio had already changed `uvloop==0.22.1` to
+  `uvloop==0.22.1; sys_platform != "win32"` (uvloop doesn't support Windows;
+  `backend/requirements-win.txt` already excluded it entirely). Committing
+  it now — confirmed it matches the actual `.venv` (no uvloop installed).
+
+### 2. File: `backend/app/core/database.py`
+* `SQLALCHEMY_DATABASE_URL` was fully hardcoded in source, including a
+  plaintext password, despite `.claude/ENV_GUIDE.md` documenting a
+  `DATABASE_URL` env var and its own "Key Security Rule" saying never to put
+  DB passwords in the codebase. `python-dotenv` was already installed
+  (listed in both requirements files) but never imported anywhere in the
+  backend.
+* Added `load_dotenv()` + `os.getenv("DATABASE_URL", <old hardcoded value>)`
+  so `backend/.env` (once Fabio creates one) overrides the connection
+  string; the previous hardcoded value stays as the fallback default so
+  behavior is unchanged until `.env` exists.
+
+### 3. File: `backend/.env.example` (new)
+* Did not exist on disk at all — `.claude/ENV_GUIDE.md` instructs copying
+  it to `backend/.env` but there was nothing to copy. Added placeholders
+  for `DATABASE_URL`, `PAGASA_SCRAPE_URL`, `SMTP_HOST`, `SMTP_USER`,
+  `SMTP_PASSWORD` (the backend-side vars from `ENV_GUIDE.md`'s table — the
+  `VITE_*` frontend vars already have their own `frontend/.env.example`).
+
+### Status / Next Steps
+* Not yet pushed. Fabio still needs to create `backend/.env` himself with
+  the real `DATABASE_URL` (and confirm the `agrisure_db`
+  database/`agrisure_admin` user/PostGIS extension actually exist — not
+  verifiable from this environment, needs his `psql` access).
+

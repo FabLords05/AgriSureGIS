@@ -1,9 +1,21 @@
+import os
+
+from dotenv import load_dotenv
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 
-# The connection string to your local Nyarch PostgreSQL server
+# Loads backend/.env if present; no-op (and no error) if it doesn't exist yet.
+load_dotenv()
+
+# The connection string to your local PostgreSQL server.
 # Format: postgresql://user:password@host:port/dbname
-SQLALCHEMY_DATABASE_URL = "postgresql://agrisure_admin:agrisure_password@localhost:5432/agrisure_db"
+# Reads DATABASE_URL from backend/.env (see .claude/ENV_GUIDE.md); falls back
+# to the previous hardcoded local-dev value so behavior is unchanged until a
+# .env is actually created.
+SQLALCHEMY_DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://agrisure_admin:agrisure_password@localhost:5432/agrisure_db",
+)
 
 # The Engine is the actual connection to the database
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
