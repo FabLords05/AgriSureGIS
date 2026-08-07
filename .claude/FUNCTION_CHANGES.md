@@ -2022,3 +2022,112 @@ not, which is expected/optional per `.claude/ENV_GUIDE.md`); frontend
   database/`agrisure_admin` user/PostGIS extension actually exist — not
   verifiable from this environment, needs his `psql` access).
 
+---
+
+## [2026-08-07] - CSV Ingestion Performance Fix (Stall on Large Files)
+
+Reported symptom: CSV ingestion "takes an unusually long time" and "appears
+to stall before finishing," evidenced by a Network-tab screenshot where the
+`csv` upload request sat Pending indefinitely while unrelated background
+requests (the 60s bulletin poll in `App.tsx`) kept completing normally --
+proving the backend process itself wasn't hung, just the ingestion request.
+
+**Root cause:** `tbl_farms.csv_farm_reference` and
+`tbl_admin_boundaries (province, municipality, barangay)` had no DB index,
+but `upload_csv()`'s per-row loop queried them on every row not already in
+its in-process cache. Since `csv_farm_reference` is normally unique per
+row, almost every row triggered a full sequential scan of `tbl_farms` --
+and that table grows by one row for every farm this same upload has
+already inserted, making a large, mostly-new-farms CSV import an
+effectively O(n²) scan. On the real ~23,917-row PABS export this is what
+actually produced the "stall"; on top of that, the loop did up to ~10 DB
+round trips per row (SAVEPOINT + up to 4 SELECTs + up to 4 flushes +
+RELEASE) with zero logging anywhere, so a merely-slow ingest and a truly
+dead one looked identical from the outside.
+
+### 1. File: `backend/app/api/upload.py`
+* Added **`_prefetch_caches()`**: bulk-loads everything the upload's rows
+  are going to look up *before* the per-row loop starts -- the whole
+  `tbl_admin_boundaries` table (small, bounded by one PSGC region) in one
+  query, plus `tbl_farmers_profile`/`tbl_farms` rows matching the CSV's own
+  `farmers_id`/`rsbsa_no`/`csv_farm_reference` values via chunked
+  `WHERE ... IN (...)` queries (`_PREFETCH_CHUNK_SIZE = 1000` per chunk, via
+  new helper **`_chunked()`**). `_ingest_row()` itself is unchanged -- it
+  already checked the cache before falling back to a per-row `SELECT`, so
+  pre-populating that same cache is what removes the scan from the hot path
+  without touching row-level insert/skip/dedup semantics.
+* **`upload_csv()`**: now parses every row into a payload up front (a
+  parse-only failure is recorded immediately, with no SAVEPOINT spent on
+  it), calls `_prefetch_caches()` once, then runs the existing per-row
+  SAVEPOINT/insert/skip loop against the pre-populated caches. Added
+  `logger.info` at ingestion start (filename + row count), prefetch
+  completion (counts per cache), every 1000 rows during the loop (elapsed
+  time, rows/sec, running inserted/skipped/failed counts,
+  `_PROGRESS_LOG_EVERY`), and at completion (total elapsed time + final
+  counts); added `logger.warning` per failed row and `logger.exception` on
+  an unhandled-exception rollback. Response shape (`UploadCsvResult`) is
+  unchanged.
+
+### 2. File: `backend/init_schema.sql`
+* Added `idx_farms_csv_farm_reference` and
+  `idx_admin_boundaries_province_municipality_barangay` indexes (fresh-install
+  schema only -- see Status/Next Steps for the live-DB command).
+
+### 3. File: `backend/tests/test_upload_csv_ingestion.py`
+* Extended the mocked-DB test harness (`_FakeTable`, `_FakeQuery`,
+  `_extract_filter`) to also support `.all()` and `.filter(Model.column.in_(...))`,
+  since `_prefetch_caches()` now issues those in addition to the
+  `.filter(...).first()` calls the harness already simulated.
+* Updated `test_repeated_boundary_across_many_rows_is_only_queried_once` and
+  `test_same_rsbsa_no_across_rows_is_only_queried_once`: expected DB query
+  count changed from 1 to 2 (one upfront prefetch call + one real per-row
+  fallback on the first genuinely-new value) -- still asserts the count
+  doesn't scale with the number of repeated rows, just with a different
+  constant.
+* Added **`test_large_file_all_rows_accounted_for_with_no_duplicates()`**:
+  ingests 1,550 rows (1,500 distinct + 50 exact re-uploads of earlier rows)
+  to exercise the chunked prefetch across multiple `_PREFETCH_CHUNK_SIZE`
+  batches and confirm row accounting (`processed == inserted + skipped +
+  failed`) and dedup/no-duplication behavior still hold at that scale.
+
+### Status / Next Steps
+* **Fabio, DB Admin action needed:** the two new indexes only apply to a
+  fresh `init_schema.sql` run. To speed up ingestion against the database
+  that already exists, run this directly (non-destructive, safe to run
+  regardless of order relative to anything else):
+  ```sql
+  CREATE INDEX IF NOT EXISTS idx_farms_csv_farm_reference ON tbl_farms (csv_farm_reference);
+  CREATE INDEX IF NOT EXISTS idx_admin_boundaries_province_municipality_barangay
+      ON tbl_admin_boundaries (province, municipality, barangay);
+  ```
+* **Verified by Fabio (2026-08-07):** `pytest backend/tests/test_upload_csv_ingestion.py
+  backend/tests/test_csv_upload.py -v` → **19 passed**. The mocked-DB harness
+  changes were written by reasoning through SQLAlchemy's expression internals
+  (`Column.in_()` → `BinaryExpression.operator is sqlalchemy.sql.operators.in_op`,
+  confirmed by reading the installed SQLAlchemy source) rather than by
+  executing them, since this environment can't run Python against the
+  project -- Fabio's run is what actually confirms they're correct.
+* **Measured (Fabio, 2026-08-07, local dev machine, indexes applied):**
+  `backend/scripts/benchmark_csv_ingestion.py --rows 24000` → all 24,000 rows
+  brand-new (no pre-existing farmers/farms to hit the prefetch cache, i.e. the
+  worst case for row-by-row insert overhead) → **272.2s, 88.2 rows/sec,
+  24,000 inserted / 0 skipped / 0 failed**. No true "before" (pre-fix, no
+  index) number was captured -- reverting the code/index to measure it
+  wasn't worth the risk on a real environment -- but this confirms the
+  process now runs to completion in minutes rather than hanging/stalling on
+  a file at the real ~23,917-row PABS export's scale, with correct,
+  complete, non-duplicated row accounting throughout.
+* First benchmark attempt failed for an unrelated reason worth recording:
+  the script's synthetic `FarmersID` values initially exceeded
+  `tbl_farmers_profile.farmers_id`'s `VARCHAR(20)` limit, so Postgres
+  correctly rejected all 24,000 rows with `StringDataRightTruncation` --
+  fixed by shortening the generated IDs. Notably, that all-failure run still
+  completed in 69.9s (343 rows/sec) with zero hang, since a rejected insert
+  is just a cheap per-row SAVEPOINT rollback.
+* Remaining limitation: 88.2 rows/sec is still one-row-at-a-time
+  SAVEPOINT+INSERT+flush, just no longer with an O(n²) unindexed scan on
+  top. If CSVs grow substantially past ~25k rows, the next lever is
+  switching per-row inserts to `bulk_insert_mappings`/`COPY`, which would
+  require redesigning the per-row-failure-isolation architecture the
+  existing tests depend on -- left out of scope for this fix.
+

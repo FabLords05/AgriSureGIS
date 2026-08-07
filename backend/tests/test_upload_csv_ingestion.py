@@ -30,11 +30,24 @@ def _fake_upload_file(csv_text: str, encoding: str = "utf-8", filename: str = "e
     )
 
 
+def _row_matches(row, filters: list) -> bool:
+    for key, value, transform, is_in in filters:
+        actual = getattr(row, key, None)
+        if actual is not None:
+            actual = transform(actual)
+        if is_in:
+            if actual not in value:
+                return False
+        elif actual != value:
+            return False
+    return True
+
+
 class _FakeTable:
     """A tiny in-memory stand-in for one DB table, matched by exact-value equality
-    on whatever columns a given .filter(...) call compared against -- close enough
-    to real get-or-create behavior to catch the blank-value collapse bug, without
-    needing a live database."""
+    (or membership, for .in_(...)) on whatever columns a given .filter(...) call
+    compared against -- close enough to real get-or-create/prefetch behavior to
+    catch the blank-value collapse bug, without needing a live database."""
 
     def __init__(self):
         self.rows: list = []
@@ -44,31 +57,28 @@ class _FakeTable:
 
     def first(self, filters: list):
         for row in self.rows:
-            matched = True
-            for key, value, transform in filters:
-                actual = getattr(row, key, None)
-                if actual is not None:
-                    actual = transform(actual)
-                if actual != value:
-                    matched = False
-                    break
-            if matched:
+            if _row_matches(row, filters):
                 return row
         return None
 
+    def all(self, filters: list):
+        return [row for row in self.rows if _row_matches(row, filters)]
+
 
 def _extract_filter(criterion):
-    # criterion is a SQLAlchemy BinaryExpression for "Model.column == value" or
-    # "func.upper(Model.column) == value". .left is either the Column itself (has
-    # .name) or a Function wrapping it (whose .clauses holds the wrapped column);
-    # .right is the bound literal (has .value). upload_csv() only ever wraps
-    # columns in func.upper(), so that's the only transform simulated here.
+    # criterion is a SQLAlchemy BinaryExpression for "Model.column == value",
+    # "func.upper(Model.column) == value", or "Model.column.in_([...])" (used by
+    # _prefetch_caches()). .left is either the Column itself (has .name) or a
+    # Function wrapping it (whose .clauses holds the wrapped column); .right is
+    # the bound literal/list (has .value). upload_csv() only ever wraps columns
+    # in func.upper(), so that's the only transform simulated here.
     left = criterion.left
     value = criterion.right.value
+    is_in = getattr(criterion.operator, "__name__", "") == "in_op"
     if getattr(left, "name", None) == "upper" and hasattr(left, "clauses"):
         inner = list(left.clauses)[0]
-        return inner.name, value, str.upper
-    return left.name, value, (lambda v: v)
+        return inner.name, value, str.upper, is_in
+    return left.name, value, (lambda v: v), is_in
 
 
 class _FakeQuery:
@@ -82,6 +92,9 @@ class _FakeQuery:
 
     def first(self):
         return self._table.first(self._filters)
+
+    def all(self):
+        return self._table.all(self._filters)
 
 
 def _build_mock_db():
@@ -186,6 +199,12 @@ class UploadCsvIngestionTests(unittest.TestCase):
         # spans far fewer distinct boundaries (the same barangay repeats across
         # ~10-20 rows on average), and the original per-row implementation
         # re-queried the database for the same boundary on every single row.
+        # Expected count is 2, not 1: _prefetch_caches() does one whole-table
+        # `.all()` query up front (query #1), and this boundary doesn't exist yet
+        # in the fake DB, so the first row still falls back to one real lookup
+        # (query #2) before creating + caching it -- rows 2 and 3 then hit that
+        # cache and issue no further queries, so the count still doesn't scale
+        # with the number of repeated rows.
         csv_text = _csv(
             _row("POL-1", "Cruz", "Ana", farmers_id="111", farmid="5001"),
             _row("POL-2", "Reyes", "Ben", farmers_id="222", farmid="5002"),
@@ -195,9 +214,16 @@ class UploadCsvIngestionTests(unittest.TestCase):
 
         upload_module.upload_csv(file=_fake_upload_file(csv_text), db=mock_db)
 
-        self.assertEqual(mock_db.query_call_counts.get(models.AdminBoundary, 0), 1)
+        self.assertEqual(mock_db.query_call_counts.get(models.AdminBoundary, 0), 2)
 
     def test_same_rsbsa_no_across_rows_is_only_queried_once(self):
+        # Expected count is 2, not 1: _prefetch_caches() issues one batched
+        # `rsbsa_no.in_([...])` query up front (query #1; the farmers_id branch is
+        # skipped entirely since no row here sets one), and since this farmer
+        # doesn't exist yet in the fake DB, row 1 still falls back to one real
+        # lookup (query #2) before creating + caching it -- row 2 then hits that
+        # cache and issues no further query, so the count still doesn't scale
+        # with the number of repeated rows.
         csv_text = _csv(
             _row("POL-1", "Cruz", "Ana", rsbsa_no="RSBSA-1"),
             _row("POL-2", "Cruz", "Ana", rsbsa_no="RSBSA-1", area="0.5", amount_cover="5000"),
@@ -208,7 +234,7 @@ class UploadCsvIngestionTests(unittest.TestCase):
 
         farmers = mock_db.tables[models.FarmerProfile].rows
         self.assertEqual(len(farmers), 1)
-        self.assertEqual(mock_db.query_call_counts.get(models.FarmerProfile, 0), 1)
+        self.assertEqual(mock_db.query_call_counts.get(models.FarmerProfile, 0), 2)
 
     def test_blank_farmid_does_not_collapse_distinct_farms(self):
         csv_text = _csv(
@@ -330,6 +356,47 @@ class UploadCsvIngestionTests(unittest.TestCase):
         self.assertEqual(result["rows_failed"], 0)
         insurance = mock_db.tables[models.InsuranceRecord].rows[0]
         self.assertEqual(insurance.policy_no, "1192155")
+
+    def test_large_file_all_rows_accounted_for_with_no_duplicates(self):
+        # Regression test for the prefetch/caching rewrite (_prefetch_caches()):
+        # ingests a file large enough to exercise the batched WHERE...IN(...)
+        # prefetch queries in chunks (_PREFETCH_CHUNK_SIZE=1000), spanning many
+        # distinct farmers/farms plus a handful of exact-duplicate rows, and
+        # checks the row accounting and the dedup/reuse behavior still hold at
+        # this size -- not just for the 1-3 row cases above.
+        n = 1500
+        rows = [
+            _row(f"POL-{i}", "Cruz", "Ana", farmers_id=str(i), farmid=str(10_000 + i))
+            for i in range(n)
+        ]
+        # 50 exact re-uploads of already-defined (policy_no, farm) pairs -- must
+        # be detected as duplicates (skipped), not re-inserted.
+        duplicate_rows = [
+            _row(f"POL-{i}", "Cruz", "Ana", farmers_id=str(i), farmid=str(10_000 + i))
+            for i in range(50)
+        ]
+        csv_text = _csv(*(rows + duplicate_rows))
+        mock_db = _build_mock_db()
+
+        result = upload_module.upload_csv(file=_fake_upload_file(csv_text), db=mock_db)
+
+        self.assertEqual(result["rows_processed"], n + 50)
+        self.assertEqual(result["rows_inserted"], n)
+        self.assertEqual(result["rows_skipped"], 50)
+        self.assertEqual(result["rows_failed"], 0)
+        # No row was silently dropped or double-counted.
+        self.assertEqual(
+            result["rows_inserted"] + result["rows_skipped"] + result["rows_failed"],
+            result["rows_processed"],
+        )
+        # Every farmer/farm is distinct and none were collapsed or duplicated.
+        self.assertEqual(len(mock_db.tables[models.FarmerProfile].rows), n)
+        self.assertEqual(len(mock_db.tables[models.Farm].rows), n)
+        self.assertEqual(len(mock_db.tables[models.InsuranceRecord].rows), n)
+        self.assertEqual(
+            {f.farmers_id for f in mock_db.tables[models.FarmerProfile].rows},
+            {str(i) for i in range(n)},
+        )
 
 
 if __name__ == "__main__":

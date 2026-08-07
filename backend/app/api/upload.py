@@ -2,6 +2,8 @@ import functools
 import io
 import logging
 import re
+import time
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -23,6 +25,27 @@ router = APIRouter(prefix="/api/upload", tags=["upload"])
 logger = logging.getLogger(__name__)
 
 _PSGC_LOOKUP_PATH = Path(__file__).resolve().parent.parent / "data" / "psgc_region10_boundaries.csv"
+
+# Batch size for the prefetch WHERE ... IN (...) queries below -- keeps a single
+# query's parameter list bounded even for a very large CSV, instead of one
+# giant IN(...) covering every distinct value in the file.
+_PREFETCH_CHUNK_SIZE = 1000
+
+# How often (in rows) to emit a progress log line while ingesting -- frequent
+# enough that a real stall/slowdown is visible in the logs within a reasonable
+# window, without spamming a line per row.
+_PROGRESS_LOG_EVERY = 1000
+
+
+def _chunked(items: Iterable[str], size: int) -> Iterator[list[str]]:
+    chunk: list[str] = []
+    for item in items:
+        chunk.append(item)
+        if len(chunk) >= size:
+            yield chunk
+            chunk = []
+    if chunk:
+        yield chunk
 
 
 def _boundary_key(province: str, municipality: str, barangay: str) -> tuple[str, str, str]:
@@ -189,6 +212,55 @@ class _IngestCaches:
     farmers_by_farmers_id: dict[str, models.FarmerProfile] = field(default_factory=dict)
     farmers_by_rsbsa_no: dict[str, models.FarmerProfile] = field(default_factory=dict)
     farms_by_reference: dict[str, models.Farm] = field(default_factory=dict)
+
+
+def _prefetch_caches(prepared_rows: list[tuple[int, dict[str, Any]]], db: Session) -> _IngestCaches:
+    """Primes _IngestCaches with everything this upload's rows are going to look
+    up, in a handful of bulk queries, instead of the per-row SELECT that used to
+    run for every single row.
+
+    This is what actually fixes the root cause of slow/stalled ingestion: before
+    this, `tbl_farms.csv_farm_reference` had no DB index, so every never-before-seen
+    farm reference (i.e. almost every row on a first-time import) triggered an
+    unindexed full table scan of tbl_farms -- and that table grows by one row for
+    every farm this same upload has already inserted, making a large CSV
+    effectively O(n^2). Bulk-loading the rows that already exist up front removes
+    the scan from the hot per-row path entirely; the (now indexed, see
+    init_schema.sql) per-row fallback query in _ingest_row only ever fires for a
+    genuinely new value not covered by this prefetch or by a still-open savepoint
+    within this same run.
+    """
+    caches = _IngestCaches()
+
+    # tbl_admin_boundaries is small (bounded by the number of barangays in one
+    # PSGC region, ~2-3k rows) -- cheaper to load it whole once than to build a
+    # composite IN(...) filter per distinct (province, municipality, barangay)
+    # combination in the file.
+    for boundary in db.query(models.AdminBoundary).all():
+        key = _boundary_key(boundary.province, boundary.municipality, boundary.barangay)
+        caches.boundaries[key] = boundary
+
+    farmers_ids = {p["farmer"]["farmers_id"] for _, p in prepared_rows if p["farmer"]["farmers_id"]}
+    rsbsa_nos = {p["farmer"]["rsbsa_no"] for _, p in prepared_rows if p["farmer"]["rsbsa_no"]}
+    farm_refs = {p["farm"]["csv_farm_reference"] for _, p in prepared_rows if p["farm"]["csv_farm_reference"]}
+
+    for chunk in _chunked(farmers_ids, _PREFETCH_CHUNK_SIZE):
+        for farmer in db.query(models.FarmerProfile).filter(models.FarmerProfile.farmers_id.in_(chunk)).all():
+            caches.farmers_by_farmers_id[farmer.farmers_id] = farmer
+
+    for chunk in _chunked(rsbsa_nos, _PREFETCH_CHUNK_SIZE):
+        for farmer in db.query(models.FarmerProfile).filter(models.FarmerProfile.rsbsa_no.in_(chunk)).all():
+            caches.farmers_by_rsbsa_no[farmer.rsbsa_no] = farmer
+            # Same identity, so a farmer reached via rsbsa_no here should also
+            # satisfy a later row that looks the same farmer up by farmers_id.
+            if farmer.farmers_id and farmer.farmers_id not in caches.farmers_by_farmers_id:
+                caches.farmers_by_farmers_id[farmer.farmers_id] = farmer
+
+    for chunk in _chunked(farm_refs, _PREFETCH_CHUNK_SIZE):
+        for farm in db.query(models.Farm).filter(models.Farm.csv_farm_reference.in_(chunk)).all():
+            caches.farms_by_reference[farm.csv_farm_reference] = farm
+
+    return caches
 
 
 @dataclass
@@ -395,17 +467,38 @@ def upload_csv(
             "failures": [],
         }
 
+    total_rows = len(dataframe)
+    logger.info("CSV ingestion started: %s (%d row(s))", file.filename, total_rows)
+    start_time = time.monotonic()
+
     processed_rows = 0
     inserted_rows = 0
     skipped_rows = 0
     failed_rows = 0
     failures: list[dict[str, Any]] = []
-    caches = _IngestCaches()
+
+    # Parsing a row (prepare_row_payload) never touches the DB, so failures here
+    # are recorded up front without spending a SAVEPOINT on them. This also gives
+    # _prefetch_caches() every row's lookup keys before any DB work starts.
+    prepared_rows: list[tuple[int, dict[str, Any]]] = []
+    for row_number, (_, row) in enumerate(dataframe.iterrows(), start=1):
+        processed_rows += 1
+        try:
+            prepared_rows.append((row_number, prepare_row_payload(row)))
+        except Exception as exc:
+            failed_rows += 1
+            failures.append({"row": row_number, "policy_no": None, "error": str(exc)})
+
+    caches = _prefetch_caches(prepared_rows, db)
+    logger.info(
+        "CSV ingestion prefetch complete for %s: %d boundary(ies), %d farmer(s) by ID, "
+        "%d farmer(s) by RSBSA, %d farm(s) cached",
+        file.filename, len(caches.boundaries), len(caches.farmers_by_farmers_id),
+        len(caches.farmers_by_rsbsa_no), len(caches.farms_by_reference),
+    )
 
     try:
-        for row_number, (_, row) in enumerate(dataframe.iterrows(), start=1):
-            processed_rows += 1
-            payload = None
+        for progress_count, (row_number, payload) in enumerate(prepared_rows, start=1):
             # Per-row SAVEPOINT: an unresolvable row (unmappable boundary, etc.) is
             # rolled back and recorded without discarding every other
             # already-processed row in this same upload -- a 23,917-row real
@@ -413,7 +506,6 @@ def upload_csv(
             # cost every good one.
             savepoint = db.begin_nested()
             try:
-                payload = prepare_row_payload(row)
                 result = _ingest_row(payload, db, caches)
                 if result.outcome == "inserted":
                     inserted_rows += 1
@@ -433,15 +525,31 @@ def upload_csv(
                 failures.append(
                     {
                         "row": row_number,
-                        "policy_no": payload["insurance"]["policy_no"] if payload else None,
+                        "policy_no": payload["insurance"]["policy_no"],
                         "error": str(exc),
                     }
+                )
+                logger.warning("CSV ingestion row %d failed: %s", row_number, exc)
+
+            if progress_count % _PROGRESS_LOG_EVERY == 0 or progress_count == len(prepared_rows):
+                elapsed = time.monotonic() - start_time
+                rate = progress_count / elapsed if elapsed > 0 else 0.0
+                logger.info(
+                    "CSV ingestion progress for %s: %d/%d row(s) (%.1f rows/sec) -- %d inserted, %d skipped, %d failed",
+                    file.filename, progress_count, total_rows, rate, inserted_rows, skipped_rows, failed_rows,
                 )
 
         db.commit()
     except Exception as exc:
         db.rollback()
+        logger.exception("CSV ingestion for %s failed and was rolled back", file.filename)
         raise HTTPException(status_code=500, detail=f"CSV ingestion failed: {exc}") from exc
+
+    elapsed = time.monotonic() - start_time
+    logger.info(
+        "CSV ingestion finished: %s in %.1fs -- %d processed, %d inserted, %d skipped, %d failed",
+        file.filename, elapsed, processed_rows, inserted_rows, skipped_rows, failed_rows,
+    )
 
     message = "CSV data ingested successfully."
     if failed_rows:
