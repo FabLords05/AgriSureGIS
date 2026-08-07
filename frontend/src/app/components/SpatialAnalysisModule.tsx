@@ -117,7 +117,6 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
     else { setSortField(field); setSortDir("asc"); }
   };
 
-
   const handleCsvFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = ""; // allow re-selecting the same filename later
@@ -330,6 +329,11 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
           </div>
 
           <div className="flex-1 overflow-auto">
+            {isLoadingFarms ? (
+              <div className="flex items-center justify-center h-full text-[11px] text-muted-foreground">
+                Loading farm records…
+              </div>
+            ) : (
             <table className="w-full text-[11px]">
               <thead className="sticky top-0 z-10">
                 <tr className="bg-[#166534] text-white">
@@ -391,6 +395,7 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
                 ))}
               </tbody>
             </table>
+            )}
           </div>
         </div>
       </div>
