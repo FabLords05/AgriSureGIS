@@ -12,6 +12,41 @@ const BACKGROUND_FETCH_DELAY_MS = 300;
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
 
+// Caches the last-known farms list across page refreshes/browser restarts,
+// alongside the persisted login session (authStorage.ts) -- without this, a
+// refresh wipes this hook's in-memory state and the whole two-phase fetch
+// restarts from page 1 even if hundreds of rows had already loaded before
+// the reload. The cache is a "seed and revalidate" mechanism, not a source
+// of truth: on mount, `farms` starts from whatever was cached (instant
+// display, no loading blocker), then the normal fetch sequence below still
+// re-runs in the full background exactly as it would on a fresh login,
+// merging real data back over the seed as it lands -- so nothing goes stale,
+// it just doesn't look like it "started over" from the user's perspective.
+const FARMS_CACHE_KEY = "agrisuregis_farms_cache";
+
+function loadCachedFarms(): Farm[] {
+  try {
+    const raw = localStorage.getItem(FARMS_CACHE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    // Corrupt/unparseable cache, or storage unavailable -- fail safe to
+    // "nothing cached," which just means the normal cold-start fetch
+    // sequence runs and shows the usual first-load state.
+    return [];
+  }
+}
+
+function persistFarmsCache(farms: Farm[]): void {
+  try {
+    localStorage.setItem(FARMS_CACHE_KEY, JSON.stringify(farms));
+  } catch {
+    // Storage unavailable/quota exceeded -- this cache is a best-effort
+    // speed-up, not required for correctness, so silently skip persisting.
+  }
+}
+
 // Merges a freshly-fetched page into the existing farm list by farm_id (new
 // ids appended, existing ids updated in place) instead of replacing the
 // array outright. This is what lets both phases below (and a CSV/GPX
@@ -73,7 +108,7 @@ export interface FarmsData {
 // in (harmless no-ops via mergeFarmsPage), since the two phases' offsets
 // aren't directly comparable once the WHERE clause differs.
 export function useFarmsData(enabled: boolean): FarmsData {
-  const [farms, setFarms] = useState<Farm[]>([]);
+  const [farms, setFarms] = useState<Farm[]>(loadCachedFarms);
   const [isLoadingFirstPage, setIsLoadingFirstPage] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isFetchingMore, setIsFetchingMore] = useState(false);
@@ -85,7 +120,11 @@ export function useFarmsData(enabled: boolean): FarmsData {
   const activeOffsetRef = useRef(0);
   const allOffsetRef = useRef(0);
   const fetchInFlightRef = useRef(false);
-  const hasLoadedOnceRef = useRef(false);
+  // Seeded true when `farms` started from a non-empty cache -- the mount
+  // fetch below then behaves as a quiet background revalidation (only
+  // `isFetchingMore`) instead of the full-panel "Loading…" state, since the
+  // cached rows are already on screen.
+  const hasLoadedOnceRef = useRef(farms.length > 0);
   // Bumped on every restart (mount, refresh()). A page fetch already in
   // flight when a restart happens checks this on resolve and discards its
   // result instead of corrupting the new sequence's cursors.
@@ -162,6 +201,14 @@ export function useFarmsData(enabled: boolean): FarmsData {
     start(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [enabled]);
+
+  // Keeps the cache in sync with every merged page so the *next* refresh
+  // has fresh seed data, not just whatever was cached at the start of this
+  // session. Skips persisting an empty array so a transient error before
+  // the first page lands doesn't wipe out a perfectly good previous cache.
+  useEffect(() => {
+    if (farms.length > 0) persistFarmsCache(farms);
+  }, [farms]);
 
   return {
     farms,

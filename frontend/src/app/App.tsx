@@ -9,17 +9,15 @@ import { CalibrationModule } from "./components/CalibrationModule";
 import { AppNotification } from "./components/mockData";
 import { Bulletin, getBulletins } from "@/lib/api";
 import { useFarmsData } from "@/lib/useFarmsData";
+import { CurrentUser, loadPersistedUser, persistUser, clearPersistedUser } from "@/lib/authStorage";
 
 const BULLETIN_POLL_MS = 60_000;
 
-interface CurrentUser {
-  name: string;
-  role: string;
-  email: string;
-}
-
 export default function App() {
-  const [currentUser, setCurrentUser]     = useState<CurrentUser | null>(null);
+  // Lazy initializer reads localStorage synchronously on first render, so a
+  // refresh never flashes the login screen before rehydrating -- the user
+  // stays logged in until they explicitly log out (see handleLogout below).
+  const [currentUser, setCurrentUser]     = useState<CurrentUser | null>(loadPersistedUser);
   const [activeModule, setActiveModule]   = useState<ModuleId>("monitoring");
   const [darkMode, setDarkMode]           = useState(false);
   const [coverageRatePerHa, setCoverageRatePerHa] = useState(25000);
@@ -35,6 +33,12 @@ export default function App() {
 
   const handleLogin = (user: CurrentUser) => {
     setCurrentUser(user);
+    persistUser(user);
+  };
+
+  const handleLogout = () => {
+    setCurrentUser(null);
+    clearPersistedUser();
   };
 
   const handleClearNotification = (id: string) => {
@@ -103,7 +107,7 @@ export default function App() {
           notifications={notifications}
           onClearNotification={handleClearNotification}
           currentUser={currentUser}
-          onLogout={() => setCurrentUser(null)}
+          onLogout={handleLogout}
         />
 
         <main className="flex-1 overflow-hidden">

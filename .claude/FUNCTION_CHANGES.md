@@ -2532,3 +2532,131 @@ behind it at all.
   cards) -- left unused/available for a future request rather than adding
   UI surface that wasn't asked for.
 
+---
+
+## [2026-08-08] - Persist login session across page refresh
+
+Reported symptom: refreshing the page always redirected back to the login
+screen. Root cause: `LoginScreen.tsx` has no real backend auth (checks
+against hardcoded `DEMO_ACCOUNTS` client-side, issues no token/session --
+registration is similarly fake, just a `setTimeout` before showing a
+"submitted for approval" message) and `App.tsx`'s `currentUser` was purely
+in-memory React state, which a full page reload always wipes.
+
+Confirmed with Fabio: persist across full browser restarts (not just
+same-tab refresh), with no automatic time-based expiry -- the session lasts
+until the user explicitly logs out.
+
+### 1. File: `frontend/src/lib/authStorage.ts` (new)
+* Added **`CurrentUser`** interface (`{ name, role, email }` -- the same
+  shape `LoginScreen.tsx`'s `onLogin()` already passed, now the single
+  source of truth instead of a duplicate inline interface in `App.tsx`).
+* Added **`loadPersistedUser()`**: reads/parses the persisted user from
+  `localStorage` (key `agrisuregis_current_user`), with shape-validation on
+  the parsed JSON and a try/catch fallback to `null` (not logged in) for
+  corrupt/unparseable storage or a storage-unavailable environment (private
+  browsing, quota, disabled) -- fails safe rather than crashing app load.
+* Added **`persistUser(user)`** / **`clearPersistedUser()`**: write/remove
+  that same key, each independently try/caught so a storage failure doesn't
+  break login/logout itself, just the "survives a refresh" behavior.
+
+### 2. File: `frontend/src/app/App.tsx`
+* **Changes to Functions:**
+  * `currentUser` state now initialized via `useState<CurrentUser | null>
+    (loadPersistedUser)` -- a lazy initializer, so it reads `localStorage`
+    synchronously on the very first render and never flashes the login
+    screen before rehydrating.
+  * `handleLogin()`: now also calls `persistUser(user)` alongside the
+    existing `setCurrentUser(user)`.
+  * Added **`handleLogout()`**: `setCurrentUser(null)` + `clearPersistedUser()`,
+    replacing the inline `onLogout={() => setCurrentUser(null)}` prop that
+    never cleared storage.
+  * Removed the local `interface CurrentUser` (moved to `authStorage.ts`,
+    imported instead).
+* **Side effect worth noting, not a regression:** `useFarmsData(!!currentUser)`
+  (from the entry above) now effectively also starts on refresh instead of
+  only on a fresh login, since `currentUser` is populated synchronously on
+  first render whenever a persisted session exists -- consistent with the
+  rest of the app now staying "logged in" across a refresh.
+
+### Status / Next Steps
+* **Verified by Fabio (2026-08-08):** login persists across refresh and full
+  browser restarts, and explicit logout correctly clears the session (see
+  the follow-up entry directly below for the companion farms-cache fix found
+  during this same walkthrough).
+* No expiry timer exists by design (per Fabio's direction) -- the persisted
+  session is only ever cleared by an explicit logout. If a future request
+  wants automatic expiry, `authStorage.ts` would need a stored timestamp and
+  an expiry check in `loadPersistedUser()`.
+* This persists to `localStorage`, which is per-browser-profile, not a real
+  server-side session -- since there is still no backend auth endpoint,
+  logging in on a second device/browser is a separate, independent "session"
+  with no shared server-side state. Flagging in case real backend
+  authentication is wanted later; out of scope for this fix.
+
+---
+
+## [2026-08-08] - Farm records cache: seed instantly on refresh instead of
+## restarting the fetch from page 1
+
+Follow-up to the login-persistence entry directly above. Fabio's first
+walkthrough of that fix reported the login screen correctly stopped
+reappearing on refresh, but the Farm Records table/map still visibly reset
+and re-fetched from scratch on every refresh -- because `useFarmsData.ts`'s
+progress (the `farms` array, and which pages had already been fetched) only
+ever lived in React state, which a full page reload always wipes regardless
+of whether `currentUser` itself now survives it.
+
+Considered a "true resume" (persist exactly which offsets/pages were already
+fetched and pick up from there) vs. "seed instantly, then revalidate in the
+background" -- confirmed with Fabio: the latter, since it's simpler and
+self-correcting (no risk of stale data lingering if something changed
+server-side between sessions), at the cost of re-requesting some pages a
+true resume could have skipped.
+
+### 1. File: `frontend/src/lib/useFarmsData.ts`
+* Added **`loadCachedFarms()`** / **`persistFarmsCache()`**: read/write the
+  farms list to `localStorage` (key `agrisuregis_farms_cache`), each
+  independently try/caught (corrupt/unparseable cache, storage unavailable,
+  or quota exceeded all fail safe -- worst case, this cache is skipped and
+  the hook behaves exactly as it did before this entry, a cold-start fetch).
+* `farms` state now initialized via `useState<Farm[]>(loadCachedFarms)` (a
+  lazy initializer, reads `localStorage` synchronously on first render) --
+  instead of starting empty on every mount.
+* Added a `useEffect` that persists `farms` to the cache on every change
+  (i.e. after every merged page), so the *next* refresh seeds from
+  up-to-date data, not just whatever was cached at the start of the current
+  session. Skips persisting an empty array so a transient early error can't
+  wipe out a previously good cache.
+* `hasLoadedOnceRef` (already existed, drives the `isLoadingFirstPage` vs.
+  `isFetchingMore` distinction in `fetchNextPage()`) now initializes to
+  `farms.length > 0` instead of unconditionally `false` -- when `farms`
+  started from a non-empty cache, the mount fetch is treated as a quiet
+  background revalidation from the very first page, so the full-panel
+  "Loading farm records…" blocker never reappears on a refresh where cached
+  data already exists. No other logic changed: the same two-phase fetch
+  sequence (active-first, then complete) still runs in full on every mount,
+  it just does so behind already-visible cached rows instead of a blank
+  loading state, merging real data back over the seed via the existing
+  `mergeFarmsPage()` as it lands.
+* **Deliberately not cleared on logout** (unlike the login session itself in
+  `authStorage.ts`): farm records are shared, global data, not user-specific
+  or per-account -- both demo accounts see the same underlying dataset, and
+  the cache is never rendered without a valid session anyway (`App.tsx`
+  gates all screens behind `currentUser`). Leaving it in place across a
+  logout/re-login cycle is a free speed-up for the next login, not a
+  data-exposure risk.
+
+### Status / Next Steps
+* **Verified by Fabio (2026-08-08):** fresh `npm run dev` walkthrough
+  confirmed -- farm records appear immediately on refresh (no "Loading farm
+  records…" blocker), the background-completion sequence quietly re-runs
+  behind them, and the login-persistence behavior from the entry above still
+  holds (refresh, browser restart, and explicit logout all behave as
+  expected).
+* Very large datasets (the benchmarked ~24k-row CSV ingestion ceiling) could
+  approach `localStorage`'s typical ~5-10MB per-origin limit -- not a
+  concern at today's ~589-row scale, but `persistFarmsCache()`'s try/catch
+  means this fails safe (cache silently stops updating) rather than
+  breaking the app if that ceiling is ever hit.
+
