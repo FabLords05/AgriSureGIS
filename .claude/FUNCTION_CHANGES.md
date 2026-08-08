@@ -2660,3 +2660,239 @@ true resume could have skipped.
   means this fails safe (cache silently stops updating) rather than
   breaking the app if that ceiling is ever hit.
 
+---
+
+## [2026-08-08] - Farm records: true resume instead of re-walking the whole
+## fetch on every refresh
+
+Follow-up to the entry directly above. The "very large datasets" note in its
+Status/Next Steps turned out to already be Fabio's actual situation: his dev
+DB apparently still carries the ~24,000 synthetic rows from the CSV
+ingestion benchmark run (`FUNCTION_CHANGES.md`, 2026-08-07), on top of the
+original ~589 -- Monitoring's "Affected Farms" stat card showed `0/25700`.
+At that real scale, "seed instantly, then fully revalidate the entire
+two-phase sequence in the background" (the entry above) meant every single
+refresh re-issued 250+ paginated requests at the deliberately-unhurried
+300ms/page background pace -- 75+ seconds of visible churn every reload,
+which Fabio reported as the page/backend "getting stuck" and "doing it again
+from the start." Confirmed with Fabio: switch to true resume.
+
+### 1. File: `frontend/src/lib/useFarmsData.ts`
+* Added **`loadCachedProgress()`** / **`persistProgress()`**: read/write
+  `{ phase, activeOffset, allOffset }` to `localStorage` (key
+  `agrisuregis_farms_progress`, separate key from the farms data cache
+  itself), with the same shape-validated-with-fallback-to-fresh pattern as
+  `loadCachedFarms()`/`persistFarmsCache()`.
+* `phaseRef`/`activeOffsetRef`/`allOffsetRef` now initialize from this
+  cached progress instead of always `"active"`/`0`/`0`. `hasMore`/
+  `isComplete` state likewise initialize from `cachedProgress.phase` instead
+  of always `true`/`false`.
+* `fetchNextPage()`'s success branch now calls `persistProgress()` after
+  every merged page (and after any phase transition), so the persisted
+  progress always reflects exactly how far the sequence has gotten.
+* Added **`resume()`**: the new mount-time entry point (replaces calling
+  `start(false)` on mount). Unlike `start()`, it does **not** reset
+  `phaseRef`/the offset refs -- it continues `fetchNextPage()` from
+  whatever they already are. If a previous session had already reached
+  phase `"done"`, `resume()` is a complete no-op: zero requests, the cached
+  `farms` (already seeded, per the entry above) is simply left as-is.
+* `start(isRefresh)` (still used only by `refresh()`, i.e. a CSV/GPX
+  upload) is unchanged in behavior -- a real restart, resetting both the
+  in-memory cursors *and* the persisted progress via
+  `persistProgress(FRESH_PROGRESS)`, so a refresh that happens mid-upload
+  resumes from that fresh sequence rather than stale pre-upload progress.
+
+### Status / Next Steps
+* Not yet verified by Fabio -- needs a walkthrough at his actual (large)
+  dataset scale: let the background sequence reach `isComplete` once, then
+  refresh -- confirm `farms` display instantly *and* the Network tab shows
+  no new `/api/farms/` requests at all (full resume, not just fast display).
+  Then try refreshing mid-sequence (before it completes) -- confirm it
+  continues from roughly where it left off rather than restarting at
+  `offset=0`.
+* Real corollary of true resume (called out when this tradeoff was first
+  offered, now the active choice): a farm that changes server-side (e.g.
+  insurance status flips) won't be reflected in the cached copy until
+  something eventually re-fetches its specific page -- once `isComplete` is
+  reached, that may never happen again automatically. No staleness
+  invalidation exists yet (e.g. re-running phase "all" periodically, or
+  after some elapsed time) -- flagging as a possible follow-up if stale data
+  becomes a real problem in practice, not built here since it wasn't asked
+  for.
+* `agrisuregis_farms_progress` is left uncleared on logout, same reasoning
+  as `agrisuregis_farms_cache` in the entry above (not user-specific data,
+  never rendered without a valid session).
+
+---
+
+## [2026-08-08] - Farm records: move the farms cache from localStorage to
+## IndexedDB (root cause of the "stuck at 16800" bug)
+
+Follow-up to the entry directly above. Fabio's walkthrough of "true resume"
+found it stuck: "Affected Farms" showed `0/16800`, unchanging across
+refreshes, with confirmed zero new backend requests (`curl` checks against
+`GET /api/farms/` directly proved the backend was completely healthy --
+`total: 48588`, `has_more: true` even at `offset=16795`; the real
+`tbl_farms` count via `psql` also confirmed `48588`).
+
+**Root cause, found via browser console:** `localStorage.getItem
+('agrisuregis_farms_progress')` returned `{"phase":"done","activeOffset":39,
+"allOffset":48588}` -- the fetch sequence had genuinely, correctly walked
+all 48,588 rows and correctly detected completion. But `JSON.parse
+(localStorage.getItem('agrisuregis_farms_cache')).length` was only `16800`.
+`localStorage` has a hard ~5-10MB per-origin quota (flagged as a risk in the
+entry above, but the actual failure mode wasn't yet understood). Once the
+serialized `farms` array grew past what ~16,800 real farm records encode to,
+every subsequent `persistFarmsCache()` call started throwing
+`QuotaExceededError` -- silently, since it's caught and treated as
+"best-effort, skip on failure." Meanwhile `persistProgress()`'s payload
+(`{phase, activeOffset, allOffset}`, a few dozen bytes) never came close to
+the quota and kept succeeding all the way to `"done"`. The two caches
+desynced: progress said "fully done," the farms cache silently froze at its
+last successful write. Every later `resume()` correctly trusted the
+(accurate) "done" progress marker and skipped fetching entirely -- but
+`farms` had seeded from the (stale, truncated) cache, so the UI stayed stuck
+at 16,800 forever with no way to notice.
+
+Confirmed with Fabio: move the (potentially large) farms array cache to
+IndexedDB, which doesn't have `localStorage`'s small quota ceiling. The tiny
+progress marker stays in `localStorage`, since it's the whole reason the two
+caches were distinguishable enough to diagnose this at all.
+
+### 1. File: `frontend/src/lib/useFarmsData.ts`
+* Replaced `loadCachedFarms()`/`persistFarmsCache()`'s `localStorage`
+  implementation with an `IndexedDB`-backed one (`openFarmsDb()` +
+  a single-record object store, db name `agrisuregis`, store
+  `farms_cache`). Both are now `async` (`IndexedDB`'s API is inherently
+  asynchronous, unlike `localStorage`), with the same fail-safe-on-any-error
+  philosophy as before (unavailable/disabled storage → treated as "nothing
+  cached" / "skip this write," never throws into calling code).
+* Added a one-time, unconditional `localStorage.removeItem
+  ('agrisuregis_farms_cache')` at module load -- the old cache key is now
+  orphaned dead weight, and since it was written right up to the quota
+  wall, leaving it in place risked *other* small `localStorage` writes
+  (the progress marker, `authStorage.ts`'s session) failing too.
+* `PROGRESS_CACHE_KEY` renamed to `agrisuregis_farms_progress_v2`. Without
+  this, the very first load after this fix would read the *old* progress
+  key's `"done"` state (persisted by the previous version of this hook)
+  against the *new*, empty IndexedDB cache -- reproducing this exact bug
+  immediately (progress says done, cache has nothing, farms render
+  permanently empty). Versioning the key forces one real walk instead.
+* Because the farms cache read is now async, `farms` state can no longer be
+  seeded synchronously via `useState`'s lazy initializer (`useState(() =>
+  ...)`, what the previous entry used) -- it now starts `[]` and is
+  populated inside the mount `useEffect`, after `await loadCachedFarms()`
+  resolves. `isLoadingFirstPage`'s default flipped from `false` to `true`
+  to cover this brief async gap (previously: default `false`, since a
+  synchronous `localStorage` read meant `farms` was correct from the very
+  first render) -- and is explicitly cleared after the cache read if
+  `phaseRef.current === "done"`, since in that case `fetchNextPage()`
+  (which normally clears it) never runs at all.
+* `hasLoadedOnceRef`'s initial value changed from `farms.length > 0`
+  (readable synchronously before) to unconditionally `false`, now set
+  `true` inside the mount effect once the async cache read resolves with
+  data, or by a successful `fetchNextPage()` -- same purpose as before
+  (distinguishing "nothing to show yet" from "quiet background top-up"),
+  just triggered from the new async path instead of the constructor-time
+  value.
+
+### Status / Next Steps
+* Tested by Fabio: the walk itself ran to real completion (progress marker
+  correctly reached `{"phase":"done",...,"allOffset":48588}`), but a reload
+  right around that point landed in the exact race this entry's own "Residual
+  risk" note below had already flagged -- see the next entry
+  (`[2026-08-08] - Farm records: close the IndexedDB write race behind
+  "done"`) for the follow-up fix and why the predicted risk turned out not to
+  be narrow enough to skip.
+
+## [2026-08-08] - Farm records: close the IndexedDB write race behind "done"
+
+Follow-up to the entry directly above. Fabio reloaded mid-testing (per that
+entry's own instructions, to check "does a second reload show zero new
+requests") and hit a fresh symptom: two stat cards on Monitoring disagreed on
+the farm total at the same moment (`Affected Farms: 0/48488` vs.
+`Active Insurance: 39/48588`) -- diagnosed as unrelated to this bug (they
+read from two independent sources, `farms.length` vs. a one-shot
+`GET /api/insurance/summary` `COUNT(*)`, explained and confirmed as a
+red herring). The real symptom, confirmed with Fabio afterward: the count
+climbed live, then permanently stopped at `48488` -- 100 rows (one page)
+short -- even though nothing on screen indicated loading was still in
+progress (neither `MonitoringModule.tsx` nor `SpatialAnalysisModule.tsx`
+gate any indicator on `isComplete`, only on `isLoadingFirstPage`, which
+clears after just the first page).
+
+**Root cause, confirmed via evidence at each step:**
+* `curl -sS "http://localhost:8000/api/farms/?limit=100&offset=48488&active_only=false"`
+  returned `total: 48588`, `has_more: false`, `len(data): 100`, farm_ids
+  `48489`-`48588` -- proving the backend was completely healthy and this was
+  the true, correct final page. Backend ruled out.
+* Browser console: `localStorage.getItem('agrisuregis_farms_progress_v2')`
+  returned `{"phase":"done","activeOffset":39,"allOffset":48588}` -- the
+  fetch sequence genuinely, correctly completed all 48,588 rows.
+* Browser console (reading the IndexedDB record directly): the cached
+  `farms` array held only `48488` entries -- matching the stuck on-screen
+  count exactly.
+* Fabio confirmed a reload happened between watching the count climb and it
+  landing on 48488. That reload is what exposed the bug: the tiny
+  `agrisuregis_farms_progress_v2` marker (`localStorage`) is written
+  *synchronously*, the instant a page's fetch resolves; the (much larger)
+  `IndexedDB` farms-array write was, until this fix, fired from a *separate*
+  `useEffect` keyed on `farms`, async and unawaited -- "best-effort," same
+  philosophy as the localStorage-quota-era version. The reload landed in the
+  gap: progress had already persisted `"done"` for the completing page, but
+  that page's IndexedDB write hadn't flushed yet. The new mount seeded
+  `farms` from the still-truncated (48488-row) cache, saw progress already
+  `"done"`, and `resume()` correctly no-op'd on `"done"` -- permanently
+  stuck, no further requests ever made. Same failure shape as the
+  `localStorage`-quota bug two entries above, different mechanism: a race
+  window instead of a hard wall. This is exactly the "residual risk" flagged
+  (but left unbuilt) in that entry's Status/Next Steps.
+
+### 1. File: `frontend/src/lib/useFarmsData.ts`
+* Added `farmsRef`, a ref mirroring `farms` state synchronously. Needed
+  because `setFarms(prev => mergeFarmsPage(prev, res.data))`'s updater isn't
+  guaranteed to have run yet by the time the code right after it needs the
+  merged array (React 18 batches state updates) -- `farmsRef.current` is
+  always the true current merged array, readable immediately.
+* `fetchNextPage()`: on the page that finishes the walk (`!res.has_more` in
+  phase `"all"`), now `await persistFarmsCache(mergedFarms)` *before* setting
+  `phaseRef.current = "done"` and before `persistProgress()` runs. This is
+  the actual fix -- it guarantees the complete farms array is durably in
+  IndexedDB before the progress marker is ever allowed to claim `"done"`, closing
+  the race a reload could land in. Every other (non-final) page keeps a
+  fire-and-forget `persistFarmsCache()` call, unchanged in spirit from
+  before -- a reload catching one of *those* mid-flight just resumes
+  normally via the persisted (non-`"done"`) progress and re-fetches whatever
+  the cache is missing, so only the final page's write needed to become
+  blocking.
+* Removed the separate `useEffect(() => { if (farms.length > 0)
+  persistFarmsCache(farms); }, [farms])` that previously drove all cache
+  writes -- superseded by the inline writes above (fire-and-forget mid-walk,
+  awaited on completion), which also avoids opening a fresh `IndexedDB`
+  connection on every single render-triggered `farms` change independent of
+  whether a fetch actually completed.
+* Mount effect: added a self-heal guard, checked right after seeding `farms`
+  from the IndexedDB cache. If loaded progress says `phase: "done"` but
+  `farmsRef.current.length !== allOffsetRef.current` (the "all" phase's
+  cumulative row count when it finished, which must equal the cached array's
+  length if that completing page's write truly landed), the `"done"` is
+  treated as unverifiable: falls back to `phaseRef.current = "all"`,
+  `allOffsetRef.current = 0`, `hasMore`/`isComplete` reset, and persists that
+  corrected progress immediately. Re-walking the `"all"` phase from scratch
+  is safe and idempotent (`mergeFarmsPage` dedupes by `farm_id`). This is
+  also what self-heals Fabio's already-stuck browser tab on its next
+  reload -- no manual cache-clearing needed -- and guards against any other
+  future cause of the same desync shape, not just this specific race.
+
+### Status / Next Steps
+* Verified by Fabio (2026-08-08): reload converged from 48488 to the true
+  48588, and a subsequent reload showed the count instantly with no further
+  `/api/farms/` requests.
+* The two stat-card totals reading from independent sources
+  (`farms.length` vs. `GET /api/insurance/summary`'s `COUNT(*)`) is a
+  pre-existing, separate characteristic, not touched by this fix -- flagged
+  during this investigation as a possible future inconsistency (most visible
+  transiently, mid-load, at real dataset scale) but out of scope here since
+  Fabio confirmed the frozen-count symptom, not the transient mismatch, was
+  the actual problem.
+
