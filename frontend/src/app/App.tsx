@@ -8,6 +8,7 @@ import { AssessmentModule } from "./components/AssessmentModule";
 import { CalibrationModule } from "./components/CalibrationModule";
 import { AppNotification } from "./components/mockData";
 import { Bulletin, getBulletins } from "@/lib/api";
+import { useFarmsData } from "@/lib/useFarmsData";
 
 const BULLETIN_POLL_MS = 60_000;
 
@@ -25,6 +26,12 @@ export default function App() {
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [selectedBulletin, setSelectedBulletin] = useState<Bulletin | null>(null);
   const seenMaxTcbId = useRef<number | null>(null);
+
+  // Starts fetching farm records the moment login succeeds, regardless of
+  // which tab is active -- shared by MonitoringModule (needs the complete
+  // dataset for its aggregate stat cards) and SpatialAnalysisModule (its
+  // table/map), instead of each independently fetching its own copy.
+  const farmsData = useFarmsData(!!currentUser);
 
   const handleLogin = (user: CurrentUser) => {
     setCurrentUser(user);
@@ -105,12 +112,14 @@ export default function App() {
               darkMode={darkMode}
               selectedBulletin={selectedBulletin}
               onSelectBulletin={setSelectedBulletin}
+              farmsData={farmsData}
             />
           )}
           {activeModule === "spatial"     && (
             <SpatialAnalysisModule
               darkMode={darkMode}
               selectedBulletin={selectedBulletin}
+              farmsData={farmsData}
             />
           )}
           {activeModule === "assessment"  && (

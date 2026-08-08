@@ -5,7 +5,8 @@ import {
 } from "lucide-react";
 import { GISLeafletMap } from "./GISLeafletMap";
 import { AOISARPanel } from "./AOISARPanel";
-import { getFarms, getAssessments, uploadCsv, uploadGpx, Farm, Assessment, Bulletin } from "@/lib/api";
+import { getAssessments, uploadCsv, uploadGpx, Farm, Assessment, Bulletin } from "@/lib/api";
+import { FarmsData } from "@/lib/useFarmsData";
 
 interface FarmRow extends Farm {
   assessment: Assessment | null;
@@ -17,17 +18,36 @@ type SortDir   = "asc" | "desc";
 interface SpatialAnalysisModuleProps {
   darkMode: boolean;
   selectedBulletin: Bulletin | null;
+  // Shared with MonitoringModule and owned by App.tsx (useFarmsData) --
+  // fetching starts the moment the app opens, not when this module mounts,
+  // so data is often already there (or well underway) by the time a user
+  // navigates here. See useFarmsData.ts for the fetch/pagination mechanics.
+  farmsData: FarmsData;
 }
 
-export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAnalysisModuleProps) {
-  const [farms, setFarms] = useState<Farm[]>([]);
+export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }: SpatialAnalysisModuleProps) {
+  const {
+    farms,
+    isLoadingFirstPage,
+    isRefreshing,
+    isFetchingMore,
+    hasMore,
+    loadError,
+    refresh: refreshFarms,
+    requestMore,
+  } = farmsData;
   const [assessments, setAssessments] = useState<Assessment[]>([]);
-  const [isLoadingFarms, setIsLoadingFarms] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [selectedFarmId, setSelectedFarmId] = useState<number | null>(null);
   const [showSARPanel, setShowSARPanel]      = useState(false);
   const [filterMuni, setFilterMuni] = useState("All");
-  const [activeInsuranceOnly, setActiveInsuranceOnly] = useState(false);
+  // Defaults to true: a farm with no currently-active insurance policy is
+  // rarely useful to look at day to day. This is purely a client-side
+  // display filter over the shared `farms` cache -- toggling it does not
+  // trigger a fetch, since useFarmsData already fetches active-insurance
+  // farms first and the complete dataset shortly after, regardless of this
+  // toggle's state (MonitoringModule's stat cards need the complete set
+  // either way).
+  const [activeInsuranceOnly, setActiveInsuranceOnly] = useState(true);
   const [muniQuery, setMuniQuery] = useState("");
   const [showMuniSuggestions, setShowMuniSuggestions] = useState(false);
   const [sortField, setSortField] = useState<SortField>("farm_id");
@@ -36,20 +56,39 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
   const [uploadStatus, setUploadStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
   const csvInputRef = useRef<HTMLInputElement>(null);
   const gpxInputRef = useRef<HTMLInputElement>(null);
-
-  const refreshFarms = () => {
-    setIsLoadingFarms(true);
-    setLoadError(null);
-    getFarms()
-      .then(res => setFarms(res.data))
-      .catch(error => setLoadError(error instanceof Error ? error.message : "Failed to load farms."))
-      .finally(() => setIsLoadingFarms(false));
-  };
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const sentinelRef = useRef<HTMLTableRowElement | null>(null);
 
   useEffect(() => {
-    refreshFarms();
     getAssessments().then(res => setAssessments(res.data)).catch(() => setAssessments([]));
   }, []);
+
+  // Infinite scroll: observe a sentinel row at the end of the table body and
+  // request the next page immediately once it scrolls into view, instead of
+  // waiting for useFarmsData's own background-paced loop to get there.
+  // Re-attaches whenever the sentinel's presence in the DOM changes (first
+  // page finishing load, or `hasMore` flipping) since IntersectionObserver
+  // needs a live DOM node.
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    const root = scrollContainerRef.current;
+    if (!hasMore || !sentinel || !root) return;
+
+    const observer = new IntersectionObserver(
+      entries => {
+        if (entries[0]?.isIntersecting) requestMore();
+      },
+      { root, rootMargin: "200px" }
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+    // `requestMore` is a fresh function identity on every App-level re-render
+    // (whenever useFarmsData's state changes, which happens on every page
+    // fetch) -- excluded from deps so the observer isn't torn down/rebuilt
+    // constantly; it always calls through to the same underlying fetch logic
+    // regardless of which render's closure invoked it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasMore, isLoadingFirstPage]);
 
   // Most recent assessment per farm_id (list_assessments() is ordered by assessment_date desc).
   const assessmentByFarmId = useMemo(() => {
@@ -313,7 +352,7 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
               <Table2 size={13} className="text-[#166534]" />
               <span className="text-[11px] font-semibold">Farm Records</span>
               <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">
-                {isLoadingFarms ? "Loading…" : `${filteredFarms.length} records`}
+                {isLoadingFirstPage ? "Loading…" : isRefreshing ? "Refreshing…" : `${filteredFarms.length} records`}
               </span>
               {loadError && <span className="text-[10px] text-red-500">{loadError}</span>}
             </div>
@@ -328,8 +367,8 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
             </div>
           </div>
 
-          <div className="flex-1 overflow-auto">
-            {isLoadingFarms ? (
+          <div className="flex-1 overflow-auto" ref={scrollContainerRef}>
+            {isLoadingFirstPage ? (
               <div className="flex items-center justify-center h-full text-[11px] text-muted-foreground">
                 Loading farm records…
               </div>
@@ -393,6 +432,13 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin }: SpatialAna
                     </td>
                   </tr>
                 ))}
+                {hasMore && (
+                  <tr ref={sentinelRef} className="h-9">
+                    <td colSpan={12} className="text-center text-[10px] text-muted-foreground">
+                      {isFetchingMore ? "Loading more…" : ""}
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
             )}

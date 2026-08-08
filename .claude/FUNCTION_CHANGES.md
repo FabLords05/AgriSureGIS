@@ -2251,3 +2251,284 @@ dead one looked identical from the outside.
   * Adds `{"permissions": {"defaultMode": "bypassPermissions"}}` as the
     project-level Claude Code permission default.
 
+---
+
+## [2026-08-08] - Farm Records: paginated first load with infinite scroll +
+## default active-insurance-only filter
+
+Reported symptom (screenshot): opening the Spatial Analysis screen blocks
+the whole "Farm Records" panel behind a single "Loading farm records…"
+message until the entire `GET /api/farms/` response has arrived, with
+nothing visible in the meantime -- Fabio wanted the table to show *some*
+real data immediately and load the rest as the user scrolls, rather than
+one all-or-nothing fetch.
+
+This directly follows the three same-day reverts logged under
+`[2026-08-07] - Farm Records table: ...` above -- those attempts only
+re-staggered the *paint* of an already-fully-fetched array (row-reveal
+animation, then skeleton rows) and were reverted for visible layout jank.
+This entry changes how much data is actually in flight over the network
+instead, which is why it lands differently.
+
+### 1. File: `backend/app/api/farms.py`
+* **Changes to Functions:**
+  * `list_farms()` gains three optional query params: `limit: int | None`
+    (`Query(None, ge=1, le=1000)`), `offset: int` (`Query(0, ge=0)`), and
+    `active_only: bool` (`Query(False)`).
+  * **Backward compatibility (required):** `MonitoringModule.tsx` also calls
+    `getFarms()` with no args and expects the full unpaginated array back.
+    Omitting `limit` runs the exact same unmodified query as before -- no
+    `.offset()`/`.limit()`, no extra `COUNT` query -- so that caller sees
+    zero behavior change.
+  * When `limit` is given: `.offset(offset).limit(limit)` is applied to the
+    existing farms query, plus one additional `COUNT` query for `total`. The
+    bulk `InsuranceRecord` fetch is left structurally unchanged -- it already
+    scopes to `farm_ids` from whichever `farms` list resulted, so it
+    naturally becomes page-scoped. Still 2 real query executions per page
+    (farms + insurance), a 3rd (`COUNT`) only when paginated -- no N+1
+    reintroduced.
+  * When `active_only=True`: restricts the farms query to farms with at
+    least one `InsuranceRecord` currently bracketing today
+    (`effectivity_date <= today <= expiry_date`, via a
+    `Farm.farm_id.in_(subquery)` filter) -- the same "active" definition
+    `SpatialAnalysisModule.tsx`'s `isActiveInsurance()` already applies
+    client-side, now pushed into the query so an all-inactive farm is never
+    fetched at all. The subquery is embedded in the farms query's WHERE
+    clause (not separately executed), so it doesn't add a real query
+    round-trip.
+  * Response gains `total`, `limit`, `offset`, `has_more` fields (additive --
+    existing callers only read `.data`). `has_more = offset + len(data) <
+    total` when paginated; unpaginated responses get `total=len(data)`,
+    `limit=None`, `offset=0`, `has_more=False` for shape consistency.
+  * Docstring updated to describe the new params and restate the
+    "2 (+1 COUNT) queries per page" guarantee.
+
+### 2. File: `frontend/src/lib/api.ts`
+* **Changes to Functions:**
+  * `getFarms()` now takes an optional `{ limit?, offset?, active_only? }`
+    param and returns the widened `GetFarmsResult` (adds `total`/`limit`/
+    `offset`/`has_more`). Called with no args, as `MonitoringModule.tsx`
+    still does, it hits `/api/farms/` with no query string -- unchanged
+    behavior.
+
+### 3. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* **Changes to Functions/Rendering:**
+  * Added **`mergeFarmsPage()`**: upserts a freshly-fetched page into the
+    existing `farms` array by `farm_id` (new ids appended, existing ids
+    updated in place) instead of replacing the array outright. This is what
+    lets pagination grow the table incrementally *and* lets a CSV/GPX- or
+    filter-triggered refetch update stale rows without the visible row count
+    ever dropping mid-refresh -- old rows simply stay until fresh data for
+    that same farm arrives.
+  * Added **`fetchNextPage(reason)`**: the single place (besides the initial
+    page-1 call) that issues a `GET /api/farms/` request, guarded by a
+    shared `fetchInFlightRef`/`nextOffsetRef` pair so the scroll trigger and
+    the background-completion loop never double-request the same page.
+    Tracks a `generationRef` counter so a page fetch already in flight when a
+    restart happens (CSV/GPX upload, or the Active-Insurance toggle) is
+    discarded on resolve instead of corrupting the new sequence's cursor.
+  * Added **`runBackgroundCompletion()`**: after page 1 lands, keeps fetching
+    subsequent pages at a deliberately unhurried pace (`sleep(300ms)`
+    between pages) so `GISLeafletMap`'s markers and the municipality filter's
+    suggestion list become complete shortly after first paint, without
+    competing for bandwidth/DB load against a user actively scrolling.
+  * Added **`loadFarmsFromStart(reason)`**: (re)starts the fetch sequence
+    from page 1 -- used on mount, on CSV/GPX upload (`refreshFarms()`, now a
+    thin wrapper around this), and whenever the Active-Insurance toggle
+    changes. Existing `farms` data is left untouched; `mergeFarmsPage` folds
+    new pages in, so the table never blanks or shrinks mid-refresh.
+  * Infinite scroll: a sentinel `<tr>` (spans all 12 columns, fixed height,
+    shows "Loading more…" only while `isFetchingNextPage`) is appended after
+    the table body while `hasMore`, observed via `IntersectionObserver`
+    rooted at the table's existing scroll container -- fetches the next page
+    once scrolled near the bottom. Chosen over a hand-rolled scroll-position
+    listener since it's the first infinite-scroll implementation in the
+    codebase and doesn't require reasoning about exact scroll geometry.
+  * Loading-state split into three flags, replacing the old single
+    `isLoadingFarms`: **`isLoadingFirstPage`** (nothing loaded yet -- the one
+    case where the whole table panel still swaps to the "Loading farm
+    records…" message, unchanged from the 2026-08-07 revert's end state),
+    **`isRefreshing`** (a CSV/GPX/toggle-triggered refetch is in flight --
+    header pill reads "Refreshing…", table stays fully visible throughout,
+    no blank state), and **`isFetchingNextPage`** (scroll-triggered next-page
+    fetch in flight -- drives only the small sentinel-row indicator).
+  * `activeInsuranceOnly` now **defaults to `true`** (was `false`) and is
+    threaded into every paginated fetch via `active_only`, not just the
+    existing client-side filter on `filteredFarms` (left in place unchanged,
+    as a harmless safety net). Toggling it calls `loadFarmsFromStart` to
+    restart pagination under the new filter value; farms fetched under a
+    prior filter state are never purged from the cache, they're just
+    correctly hidden/shown by the existing client-side filter -- so
+    switching back doesn't require re-fetching farms already seen once.
+  * Accepted, explicitly-flagged side effect: for a non-default sort (e.g.
+    by "Farmer"), rows can visibly reorder as background pages land -- real
+    data changing, not animation, matching what was already accepted for the
+    table growing during first load.
+
+### 4. File: `backend/tests/test_farms_api.py` (new)
+* Added `ListFarmsUnpaginatedTests`, `ListFarmsPaginationTests`,
+  `ListFarmsActiveOnlyTests`, `ListFarmsResponseShapeTests` -- direct-call
+  tests against `list_farms()` using a purpose-built `_ChainableQuery` fake
+  (mirrors the `.options()/.order_by()/.filter()/.offset()/.limit()` chain
+  the endpoint actually uses, with `.all()`/`.count()` call counters), same
+  direct-call-with-mocked-`Session` style as `test_upload_gpx_api.py`.
+  Covers: unpaginated backward compatibility (no `.offset()`/`.limit()`, no
+  extra `COUNT`), pagination applying `.offset()`/`.limit()` correctly,
+  `has_more` at the start/middle/last page, the insurance bulk-fetch staying
+  scoped to the current page's `farm_ids` only, exactly 2 (+1 `COUNT` when
+  paginated) query executions, `active_only` filtering by the
+  effectivity/expiry date bracket and being a no-op when omitted, and the
+  existing "most recent insurance record per farm" reduction still working
+  after the refactor. FastAPI's `Query(..., ge=..., le=...)` bound
+  validation is Pydantic/routing-layer behavior and isn't exercised by these
+  direct-call tests -- consistent with the rest of this test suite, which
+  has no `TestClient`-based tests anywhere.
+
+### Status / Next Steps
+* **Bug found and fixed via Fabio's first test run (2026-08-08):**
+  `Farm.farm_id.in_(active_farm_ids)` raised `sqlalchemy.exc.ArgumentError`
+  ("IN expression list, SELECT construct, or bound parameter object
+  expected") -- in SQLAlchemy 2.x, a bare ORM `Query` object (what
+  `db.query(InsuranceRecord.farm_id).filter(...).distinct()` returns) is not
+  a valid `.in_()` operand; it must be converted to a `ScalarSelect` first.
+  Fixed by appending `.scalar_subquery()` to `active_farm_ids` in
+  `farms.py`. This would have failed on every real `active_only=true`
+  request, not just the tests -- caught before this ever reached Fabio's
+  running dev server. `test_farms_api.py`'s active-only tests were updated
+  to match: the `InsuranceRecord.farm_id` branch of the test's fake
+  `db.query()` router now returns a real, unbound (`session=None`)
+  SQLAlchemy `Query` (needed for `.scalar_subquery()` to produce a genuine
+  construct `Farm.farm_id.in_(...)` will accept) instead of the test's own
+  `_ChainableQuery` fake, and the date-bracket assertion compiles the
+  resulting filter criterion to SQL text (`literal_binds=True`) rather than
+  introspecting the fake chain's call log.
+* **Verified by Fabio (2026-08-08):** `pytest backend/tests/test_farms_api.py -v`
+  → all 10 tests pass after the `.scalar_subquery()` fix above.
+* Not run against a live database or the frontend yet -- Fabio still needs
+  to click through the Spatial Analysis screen locally (fresh load,
+  scroll-to-bottom, leave it idle to watch background completion, toggle
+  Active Insurance Only, and a CSV/GPX upload) to confirm the UX matches the
+  plan's verification checklist.
+* `PAGE_SIZE = 100` and the 300ms background-completion delay are fixed
+  constants for this pass (not configurable), per Fabio's direction.
+* The municipality filter's suggestion list intentionally has no "still
+  loading full list…" indicator -- it silently grows as background pages
+  land, consistent with how the table itself grows silently, per Fabio's
+  direction.
+
+---
+
+## [2026-08-08] - Farm Records: lift the fetch to app-level, shared with
+## Monitoring's stats
+
+Follow-up to the entry directly above, raised by Fabio during the frontend
+walkthrough: farm records should start loading the moment the app opens
+(right after login), not wait until the user navigates into the Spatial
+Analysis tab. `SpatialAnalysisModule` only mounts when `activeModule ===
+"spatial"` (`App.tsx`), so the whole pagination pipeline built above never
+even started until then.
+
+This surfaced a real conflict worth recording: `MonitoringModule` (the
+actual default landing tab) already ran its own separate, unpaginated
+`getFarms()` call on mount, and its stat cards (Total Farms, Affected Farms,
+Total Area, Total Indemnity, per-signal distribution) need the *complete*
+farm dataset to be correct. Naively sharing SpatialAnalysisModule's
+`active_only`-gated fetch as-is would have made those stats silently
+undercount whenever the Spatial screen's toggle was left on its new default.
+Resolved (confirmed with Fabio) by making the shared fetch always walk to
+100% completion in two phases -- active-insurance farms first, then
+everything else -- so Monitoring's stats are always eventually accurate and
+Spatial's toggle becomes a pure client-side display filter with no fetch
+behind it at all.
+
+### 1. File: `frontend/src/lib/useFarmsData.ts` (new)
+* Added **`useFarmsData(enabled)`**: the shared farms data source, lifted out
+  of `SpatialAnalysisModule.tsx`'s previous self-contained implementation.
+  Starts fetching once `enabled` flips true (App.tsx passes `!!currentUser`,
+  so it starts right after login, before any tab-specific module mounts) and
+  keeps running regardless of which tab is active.
+  * Fetches in two phases via a `phaseRef` (`"active" | "all" | "done"`):
+    phase `"active"` pages through `active_only=true` first (fast, matches
+    what the Spatial table's default view needs); once that's exhausted,
+    phase `"all"` restarts pagination from offset 0 with `active_only=false`
+    to fill in the remainder. The two phases' offsets aren't directly
+    comparable (different WHERE clauses shift what falls at a given offset),
+    so phase `"all"` does re-fetch farms phase `"active"` already merged in
+    -- harmless no-ops via `mergeFarmsPage`'s upsert semantics, traded for
+    not needing to track which specific farm_ids were already seen.
+  * Kept **`mergeFarmsPage()`** (moved from `SpatialAnalysisModule.tsx`,
+    unchanged) and the same shared-lock/generation-counter pattern
+    (`fetchInFlightRef`, `generationRef`) from the entry above, now scoped to
+    this hook instead of one component.
+  * Returns `{ farms, isLoadingFirstPage, isRefreshing, isFetchingMore,
+    hasMore, isComplete, loadError, refresh, requestMore }` --
+    `isComplete` is new (true once phase `"all"` exhausts, i.e. the complete
+    dataset has landed) for any future consumer that wants to know when
+    aggregate stats are guaranteed fully accurate; not consumed yet.
+  * `isFetchingNextPage` (Spatial-only naming) collapsed into
+    **`isFetchingMore`**, since the reason a page fetch is happening (scroll
+    vs. background pace) no longer needs separate UI treatment once shared
+    across screens -- both drive the same "Loading more…" sentinel.
+
+### 2. File: `frontend/src/app/App.tsx`
+* **Changes to Functions:**
+  * Added `const farmsData = useFarmsData(!!currentUser)`, called
+    unconditionally above the `if (!currentUser) return <LoginScreen/>`
+    early-return (required -- hooks can't be called conditionally), so the
+    fetch starts the instant `currentUser` is set by `handleLogin()`.
+  * Passes `farmsData` as a new prop to both `<MonitoringModule>` and
+    `<SpatialAnalysisModule>`.
+
+### 3. File: `frontend/src/app/components/MonitoringModule.tsx`
+* **Changes to Functions/Rendering:**
+  * Removed its own `farms` state and the `getFarms()` call from its mount
+    effect; `farms` is now `farmsData.farms`, read from the new required
+    `farmsData: FarmsData` prop. `totalFarms`/`affectedFarms`/`totalArea`/
+    `totalIndemnity` and the signal-distribution chart are otherwise
+    unchanged -- they already just read from `farms`/`farmRows`, so they now
+    grow live as the shared background completion progresses, same
+    "silently grows" philosophy already accepted for the Spatial table.
+  * `assessments`/`insuranceSummary`/`activeTyphoons` fetching is unchanged
+    (out of scope for this entry -- only the farms fetch was duplicated).
+
+### 4. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* **Changes to Functions/Rendering:**
+  * Removed everything the entry above added for its *own* fetch/pagination
+    machinery (`farms`/`isLoadingFirstPage`/`isRefreshing`/
+    `isFetchingNextPage`/`hasMore` state, `nextOffsetRef`/`hasMoreRef`/
+    `fetchInFlightRef`/`activeOnlyRef`/`generationRef`, `fetchNextPage()`,
+    `runBackgroundCompletion()`, `loadFarmsFromStart()`, `mergeFarmsPage()`,
+    the `PAGE_SIZE`/`BACKGROUND_FETCH_DELAY_MS` constants) -- all of it now
+    lives in `useFarmsData.ts` instead. This component now takes a required
+    `farmsData: FarmsData` prop and destructures `farms`, `isLoadingFirstPage`,
+    `isRefreshing`, `isFetchingMore`, `hasMore`, `loadError`,
+    `refresh` (aliased to the existing local name `refreshFarms`, so the
+    CSV/GPX upload handlers didn't need to change), and `requestMore` from it.
+  * The infinite-scroll `IntersectionObserver` effect now calls
+    `requestMore()` instead of a local `fetchNextPage("scroll")` --
+    `requestMore` is deliberately excluded from the effect's dependency
+    array (it's a fresh function identity on every `useFarmsData` state
+    change, i.e. every page fetch, which would otherwise tear down/rebuild
+    the observer constantly for no behavioral difference).
+  * `activeInsuranceOnly` (still defaults to `true`) is now **purely a
+    client-side display filter** on `filteredFarms`, same as it always was
+    structurally, but no longer triggers a fetch restart when toggled -- the
+    `useEffect(() => { loadFarmsFromStart(...) }, [activeInsuranceOnly])`
+    from the entry above is gone entirely, since `useFarmsData` already
+    fetches every farm (active-first, then the rest) regardless of this
+    toggle's state. Toggling now re-filters the already-loaded/loading
+    shared array instantly, with no network request -- strictly better UX
+    than the previous design's "restart pagination on toggle" behavior.
+
+### Status / Next Steps
+* **Verified by Fabio (2026-08-08):** fresh `npm run dev` + login walkthrough
+  confirmed -- farm records populate on the Monitoring tab immediately after
+  login (before ever clicking into Spatial), the Spatial tab shows data
+  immediately/near-immediately on first visit, the Active-Insurance toggle
+  re-filters instantly with no new network request, and scrolling/idle
+  background completion/CSV/GPX upload refresh all behave as expected.
+* `isComplete` is returned by `useFarmsData` but not yet consumed by either
+  screen (e.g. as a "still finishing up…" affordance on Monitoring's stat
+  cards) -- left unused/available for a future request rather than adding
+  UI surface that wasn't asked for.
+

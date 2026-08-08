@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends
+from datetime import date
+
+from fastapi import APIRouter, Depends, Query
 from geoalchemy2.shape import to_shape
 from shapely.geometry import mapping
 from sqlalchemy.orm import Session, joinedload
@@ -10,25 +12,65 @@ router = APIRouter(prefix="/farms", tags=["farms"])
 
 
 @router.get("/")
-def list_farms(db: Session = Depends(get_db)):
+def list_farms(
+    db: Session = Depends(get_db),
+    limit: int | None = Query(None, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
+    active_only: bool = Query(False),
+):
     """
-    Lists all farms with farmer/boundary identity, insurance coverage dates
-    (from the farm's most recent InsuranceRecord, if any), and, where a GPX
+    Lists farms with farmer/boundary identity, insurance coverage dates (from
+    the farm's most recent InsuranceRecord, if any), and, where a GPX
     boundary has been uploaded, the farm's geometry as GeoJSON.
 
-    Runs 2 queries total regardless of farm count: `farmer`/`boundary` are
-    eager-loaded via joinedload (they default to lazy/per-row loading), and
-    insurance records are bulk-fetched once and reduced to "most recent per
-    farm" in Python -- instead of the previous 1 (farms) + up to 3 per farm
-    (farmer + boundary + insurance) queries, which was ~1,770 queries for the
-    589 farms currently in the table.
+    Runs 2 queries total per request regardless of farm count: `farmer`/
+    `boundary` are eager-loaded via joinedload (they default to lazy/per-row
+    loading), and insurance records are bulk-fetched once -- scoped to
+    whichever page of farms this request resolved to -- and reduced to "most
+    recent per farm" in Python -- instead of the old 1 (farms) + up to 3 per
+    farm (farmer + boundary + insurance) queries, which was ~1,770 queries
+    for the 589 farms currently in the table. A third query (COUNT) is added
+    only when `limit` is given, to report `total`/`has_more`.
+
+    `limit`/`offset` are both optional. Omitting `limit` preserves the
+    original unpaginated behavior (every farm, in one `data` array, no
+    `total`/`has_more` query) -- existing callers that don't pass these
+    params (e.g. MonitoringModule.tsx) are unaffected.
+
+    `active_only=True` restricts results to farms with at least one
+    InsuranceRecord currently bracketing today (effectivity_date <= today <=
+    expiry_date) -- the same "active" definition SpatialAnalysisModule.tsx's
+    isActiveInsurance() already applies client-side, now pushed into the
+    query so an all-inactive farm is never fetched in the first place.
     """
-    farms = (
+    farms_query = (
         db.query(Farm)
         .options(joinedload(Farm.farmer), joinedload(Farm.boundary))
         .order_by(Farm.farm_id.asc())
-        .all()
     )
+
+    if active_only:
+        today = date.today()
+        active_farm_ids = (
+            db.query(InsuranceRecord.farm_id)
+            .filter(
+                InsuranceRecord.effectivity_date <= today,
+                InsuranceRecord.expiry_date >= today,
+            )
+            .distinct()
+            # A bare Query object isn't a valid .in_() operand in SQLAlchemy
+            # 2.x -- scalar_subquery() turns it into the embeddable
+            # ScalarSelect the outer filter below actually needs.
+            .scalar_subquery()
+        )
+        farms_query = farms_query.filter(Farm.farm_id.in_(active_farm_ids))
+
+    total: int | None = None
+    if limit is not None:
+        total = farms_query.order_by(None).count()
+        farms_query = farms_query.offset(offset).limit(limit)
+
+    farms = farms_query.all()
 
     farm_ids = [farm.farm_id for farm in farms]
     latest_insurance_by_farm_id: dict[int, InsuranceRecord] = {}
@@ -73,4 +115,22 @@ def list_farms(db: Session = Depends(get_db)):
             }
         )
 
-    return {"status": "success", "data": data}
+    if limit is not None:
+        has_more = offset + len(data) < total
+        return {
+            "status": "success",
+            "data": data,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+            "has_more": has_more,
+        }
+
+    return {
+        "status": "success",
+        "data": data,
+        "total": len(data),
+        "limit": None,
+        "offset": 0,
+        "has_more": False,
+    }
