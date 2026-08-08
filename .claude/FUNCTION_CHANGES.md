@@ -2896,3 +2896,54 @@ clears after just the first page).
   Fabio confirmed the frozen-count symptom, not the transient mismatch, was
   the actual problem.
 
+## [2026-08-08] - Dev data: seed 1000 additional active InsuranceRecord rows
+
+Requested by Fabio directly (not tied to the Farm Records work above) so the
+dev DB's "active insurance" set is large enough to meaningfully exercise the
+app beyond the real dataset's tiny 39-farm active count -- e.g. testing the
+`useFarmsData` "active" phase (previously a single ~39-row page) against
+something closer to a realistic multi-page volume.
+
+### 1. File: `backend/seed_active_insurance.py` (new)
+* Standalone one-off script, same `psycopg2` connection style as the
+  existing `backend/seed_database.py` -- but unlike that script (which is
+  driven entirely by `pabs_results.csv` and isn't parameterized), this one
+  is a targeted, repeatable "add N active records" utility with no CSV
+  dependency.
+* `run()`: selects up to `TARGET_NEW_ACTIVE_RECORDS` (1000) farms at random
+  from `tbl_farms` via `NOT EXISTS (... WHERE effectivity_date <= today AND
+  expiry_date >= today)` -- i.e. farms with zero currently-active coverage,
+  the same "active" definition already used by
+  `backend/app/api/farms.py`'s `active_only` filter and
+  `backend/app/api/insurance.py`'s summary endpoint. Inserts one new
+  `InsuranceRecord` per selected farm:
+  * `policy_no = f"POL-SEED-{farm_id}"` -- deliberately distinct from both
+    the real dataset's plain numeric `policy_no` (e.g. `"1192155"`) and the
+    existing large synthetic batch's `"POL<digits>"` convention (e.g.
+    `"POL10483323900"`), so this batch stays trivially identifiable/
+    greppable (`WHERE policy_no LIKE 'POL-SEED-%'`) and reversible later
+    without touching real or previously-seeded rows.
+  * `program_type = "Rice Parametric"`, `amount_cover = area_size *
+    ₱25,000/ha` (rounded to 2dp) -- matches `pabs_results.csv`'s template
+    row convention (2.50 ha -> ₱62,500.00 `InsuredAmountofCover`) rather
+    than a flat amount, so the new rows don't stand out from real ones by
+    coverage size alone.
+  * `effectivity_date` = a random day within the last 30 days (not a single
+    shared date, so the batch doesn't read as obviously bulk-inserted),
+    `expiry_date` = `effectivity_date + 365 days` (standard annual policy
+    duration).
+  * `ON CONFLICT (policy_no, farm_id) DO NOTHING`, matching the existing
+    `uq_insurance_records_policy_no_farm_id` constraint's semantics.
+
+### Status / Next Steps
+* Run by Fabio via his own venv (`python seed_active_insurance.py` from
+  `backend/`) -- not run by Claude, per the repo's DB/venv command-handoff
+  rules. Reported inserting ~1000 rows.
+* Verified via `GET /api/insurance/summary`: `active_count` went `39` ->
+  `1039` (exactly +1000), `total_count` (total `InsuranceRecord` rows, not
+  farms) went `48588` -> `49588` (also exactly +1000) -- confirms the script
+  only added new rows and didn't touch or duplicate any existing ones.
+* Committed directly to `develop` (Fabio's choice) rather than behind a
+  feature branch, since it's a standalone dev-tooling/data script with no
+  application behavior change -- same category as `seed_database.py`.
+
