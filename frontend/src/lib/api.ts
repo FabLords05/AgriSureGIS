@@ -229,8 +229,30 @@ export function uploadGpx(file: File, farmerId?: number, farmId?: number): Promi
   });
 }
 
-export function getFarms(): Promise<{ status: string; data: Farm[] }> {
-  return request<{ status: string; data: Farm[] }>('/api/farms/');
+export interface GetFarmsResult {
+  status: string;
+  data: Farm[];
+  total: number;
+  limit: number | null;
+  offset: number;
+  has_more: boolean;
+}
+
+// Omitting params returns the full, unpaginated farm list (unchanged legacy
+// behavior -- MonitoringModule.tsx relies on this). Pass `limit`/`offset` to
+// page through the list, and `active_only` to restrict to farms with a
+// currently-active InsuranceRecord -- see SpatialAnalysisModule.tsx.
+export function getFarms(params?: {
+  limit?: number;
+  offset?: number;
+  active_only?: boolean;
+}): Promise<GetFarmsResult> {
+  const query = new URLSearchParams();
+  if (params?.limit != null) query.set('limit', String(params.limit));
+  if (params?.offset != null) query.set('offset', String(params.offset));
+  if (params?.active_only != null) query.set('active_only', String(params.active_only));
+  const qs = query.toString();
+  return request<GetFarmsResult>(`/api/farms/${qs ? `?${qs}` : ''}`);
 }
 
 export interface InsuranceSummary {

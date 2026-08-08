@@ -2251,3 +2251,648 @@ dead one looked identical from the outside.
   * Adds `{"permissions": {"defaultMode": "bypassPermissions"}}` as the
     project-level Claude Code permission default.
 
+---
+
+## [2026-08-08] - Farm Records: paginated first load with infinite scroll +
+## default active-insurance-only filter
+
+Reported symptom (screenshot): opening the Spatial Analysis screen blocks
+the whole "Farm Records" panel behind a single "Loading farm records…"
+message until the entire `GET /api/farms/` response has arrived, with
+nothing visible in the meantime -- Fabio wanted the table to show *some*
+real data immediately and load the rest as the user scrolls, rather than
+one all-or-nothing fetch.
+
+This directly follows the three same-day reverts logged under
+`[2026-08-07] - Farm Records table: ...` above -- those attempts only
+re-staggered the *paint* of an already-fully-fetched array (row-reveal
+animation, then skeleton rows) and were reverted for visible layout jank.
+This entry changes how much data is actually in flight over the network
+instead, which is why it lands differently.
+
+### 1. File: `backend/app/api/farms.py`
+* **Changes to Functions:**
+  * `list_farms()` gains three optional query params: `limit: int | None`
+    (`Query(None, ge=1, le=1000)`), `offset: int` (`Query(0, ge=0)`), and
+    `active_only: bool` (`Query(False)`).
+  * **Backward compatibility (required):** `MonitoringModule.tsx` also calls
+    `getFarms()` with no args and expects the full unpaginated array back.
+    Omitting `limit` runs the exact same unmodified query as before -- no
+    `.offset()`/`.limit()`, no extra `COUNT` query -- so that caller sees
+    zero behavior change.
+  * When `limit` is given: `.offset(offset).limit(limit)` is applied to the
+    existing farms query, plus one additional `COUNT` query for `total`. The
+    bulk `InsuranceRecord` fetch is left structurally unchanged -- it already
+    scopes to `farm_ids` from whichever `farms` list resulted, so it
+    naturally becomes page-scoped. Still 2 real query executions per page
+    (farms + insurance), a 3rd (`COUNT`) only when paginated -- no N+1
+    reintroduced.
+  * When `active_only=True`: restricts the farms query to farms with at
+    least one `InsuranceRecord` currently bracketing today
+    (`effectivity_date <= today <= expiry_date`, via a
+    `Farm.farm_id.in_(subquery)` filter) -- the same "active" definition
+    `SpatialAnalysisModule.tsx`'s `isActiveInsurance()` already applies
+    client-side, now pushed into the query so an all-inactive farm is never
+    fetched at all. The subquery is embedded in the farms query's WHERE
+    clause (not separately executed), so it doesn't add a real query
+    round-trip.
+  * Response gains `total`, `limit`, `offset`, `has_more` fields (additive --
+    existing callers only read `.data`). `has_more = offset + len(data) <
+    total` when paginated; unpaginated responses get `total=len(data)`,
+    `limit=None`, `offset=0`, `has_more=False` for shape consistency.
+  * Docstring updated to describe the new params and restate the
+    "2 (+1 COUNT) queries per page" guarantee.
+
+### 2. File: `frontend/src/lib/api.ts`
+* **Changes to Functions:**
+  * `getFarms()` now takes an optional `{ limit?, offset?, active_only? }`
+    param and returns the widened `GetFarmsResult` (adds `total`/`limit`/
+    `offset`/`has_more`). Called with no args, as `MonitoringModule.tsx`
+    still does, it hits `/api/farms/` with no query string -- unchanged
+    behavior.
+
+### 3. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* **Changes to Functions/Rendering:**
+  * Added **`mergeFarmsPage()`**: upserts a freshly-fetched page into the
+    existing `farms` array by `farm_id` (new ids appended, existing ids
+    updated in place) instead of replacing the array outright. This is what
+    lets pagination grow the table incrementally *and* lets a CSV/GPX- or
+    filter-triggered refetch update stale rows without the visible row count
+    ever dropping mid-refresh -- old rows simply stay until fresh data for
+    that same farm arrives.
+  * Added **`fetchNextPage(reason)`**: the single place (besides the initial
+    page-1 call) that issues a `GET /api/farms/` request, guarded by a
+    shared `fetchInFlightRef`/`nextOffsetRef` pair so the scroll trigger and
+    the background-completion loop never double-request the same page.
+    Tracks a `generationRef` counter so a page fetch already in flight when a
+    restart happens (CSV/GPX upload, or the Active-Insurance toggle) is
+    discarded on resolve instead of corrupting the new sequence's cursor.
+  * Added **`runBackgroundCompletion()`**: after page 1 lands, keeps fetching
+    subsequent pages at a deliberately unhurried pace (`sleep(300ms)`
+    between pages) so `GISLeafletMap`'s markers and the municipality filter's
+    suggestion list become complete shortly after first paint, without
+    competing for bandwidth/DB load against a user actively scrolling.
+  * Added **`loadFarmsFromStart(reason)`**: (re)starts the fetch sequence
+    from page 1 -- used on mount, on CSV/GPX upload (`refreshFarms()`, now a
+    thin wrapper around this), and whenever the Active-Insurance toggle
+    changes. Existing `farms` data is left untouched; `mergeFarmsPage` folds
+    new pages in, so the table never blanks or shrinks mid-refresh.
+  * Infinite scroll: a sentinel `<tr>` (spans all 12 columns, fixed height,
+    shows "Loading more…" only while `isFetchingNextPage`) is appended after
+    the table body while `hasMore`, observed via `IntersectionObserver`
+    rooted at the table's existing scroll container -- fetches the next page
+    once scrolled near the bottom. Chosen over a hand-rolled scroll-position
+    listener since it's the first infinite-scroll implementation in the
+    codebase and doesn't require reasoning about exact scroll geometry.
+  * Loading-state split into three flags, replacing the old single
+    `isLoadingFarms`: **`isLoadingFirstPage`** (nothing loaded yet -- the one
+    case where the whole table panel still swaps to the "Loading farm
+    records…" message, unchanged from the 2026-08-07 revert's end state),
+    **`isRefreshing`** (a CSV/GPX/toggle-triggered refetch is in flight --
+    header pill reads "Refreshing…", table stays fully visible throughout,
+    no blank state), and **`isFetchingNextPage`** (scroll-triggered next-page
+    fetch in flight -- drives only the small sentinel-row indicator).
+  * `activeInsuranceOnly` now **defaults to `true`** (was `false`) and is
+    threaded into every paginated fetch via `active_only`, not just the
+    existing client-side filter on `filteredFarms` (left in place unchanged,
+    as a harmless safety net). Toggling it calls `loadFarmsFromStart` to
+    restart pagination under the new filter value; farms fetched under a
+    prior filter state are never purged from the cache, they're just
+    correctly hidden/shown by the existing client-side filter -- so
+    switching back doesn't require re-fetching farms already seen once.
+  * Accepted, explicitly-flagged side effect: for a non-default sort (e.g.
+    by "Farmer"), rows can visibly reorder as background pages land -- real
+    data changing, not animation, matching what was already accepted for the
+    table growing during first load.
+
+### 4. File: `backend/tests/test_farms_api.py` (new)
+* Added `ListFarmsUnpaginatedTests`, `ListFarmsPaginationTests`,
+  `ListFarmsActiveOnlyTests`, `ListFarmsResponseShapeTests` -- direct-call
+  tests against `list_farms()` using a purpose-built `_ChainableQuery` fake
+  (mirrors the `.options()/.order_by()/.filter()/.offset()/.limit()` chain
+  the endpoint actually uses, with `.all()`/`.count()` call counters), same
+  direct-call-with-mocked-`Session` style as `test_upload_gpx_api.py`.
+  Covers: unpaginated backward compatibility (no `.offset()`/`.limit()`, no
+  extra `COUNT`), pagination applying `.offset()`/`.limit()` correctly,
+  `has_more` at the start/middle/last page, the insurance bulk-fetch staying
+  scoped to the current page's `farm_ids` only, exactly 2 (+1 `COUNT` when
+  paginated) query executions, `active_only` filtering by the
+  effectivity/expiry date bracket and being a no-op when omitted, and the
+  existing "most recent insurance record per farm" reduction still working
+  after the refactor. FastAPI's `Query(..., ge=..., le=...)` bound
+  validation is Pydantic/routing-layer behavior and isn't exercised by these
+  direct-call tests -- consistent with the rest of this test suite, which
+  has no `TestClient`-based tests anywhere.
+
+### Status / Next Steps
+* **Bug found and fixed via Fabio's first test run (2026-08-08):**
+  `Farm.farm_id.in_(active_farm_ids)` raised `sqlalchemy.exc.ArgumentError`
+  ("IN expression list, SELECT construct, or bound parameter object
+  expected") -- in SQLAlchemy 2.x, a bare ORM `Query` object (what
+  `db.query(InsuranceRecord.farm_id).filter(...).distinct()` returns) is not
+  a valid `.in_()` operand; it must be converted to a `ScalarSelect` first.
+  Fixed by appending `.scalar_subquery()` to `active_farm_ids` in
+  `farms.py`. This would have failed on every real `active_only=true`
+  request, not just the tests -- caught before this ever reached Fabio's
+  running dev server. `test_farms_api.py`'s active-only tests were updated
+  to match: the `InsuranceRecord.farm_id` branch of the test's fake
+  `db.query()` router now returns a real, unbound (`session=None`)
+  SQLAlchemy `Query` (needed for `.scalar_subquery()` to produce a genuine
+  construct `Farm.farm_id.in_(...)` will accept) instead of the test's own
+  `_ChainableQuery` fake, and the date-bracket assertion compiles the
+  resulting filter criterion to SQL text (`literal_binds=True`) rather than
+  introspecting the fake chain's call log.
+* **Verified by Fabio (2026-08-08):** `pytest backend/tests/test_farms_api.py -v`
+  → all 10 tests pass after the `.scalar_subquery()` fix above.
+* Not run against a live database or the frontend yet -- Fabio still needs
+  to click through the Spatial Analysis screen locally (fresh load,
+  scroll-to-bottom, leave it idle to watch background completion, toggle
+  Active Insurance Only, and a CSV/GPX upload) to confirm the UX matches the
+  plan's verification checklist.
+* `PAGE_SIZE = 100` and the 300ms background-completion delay are fixed
+  constants for this pass (not configurable), per Fabio's direction.
+* The municipality filter's suggestion list intentionally has no "still
+  loading full list…" indicator -- it silently grows as background pages
+  land, consistent with how the table itself grows silently, per Fabio's
+  direction.
+
+---
+
+## [2026-08-08] - Farm Records: lift the fetch to app-level, shared with
+## Monitoring's stats
+
+Follow-up to the entry directly above, raised by Fabio during the frontend
+walkthrough: farm records should start loading the moment the app opens
+(right after login), not wait until the user navigates into the Spatial
+Analysis tab. `SpatialAnalysisModule` only mounts when `activeModule ===
+"spatial"` (`App.tsx`), so the whole pagination pipeline built above never
+even started until then.
+
+This surfaced a real conflict worth recording: `MonitoringModule` (the
+actual default landing tab) already ran its own separate, unpaginated
+`getFarms()` call on mount, and its stat cards (Total Farms, Affected Farms,
+Total Area, Total Indemnity, per-signal distribution) need the *complete*
+farm dataset to be correct. Naively sharing SpatialAnalysisModule's
+`active_only`-gated fetch as-is would have made those stats silently
+undercount whenever the Spatial screen's toggle was left on its new default.
+Resolved (confirmed with Fabio) by making the shared fetch always walk to
+100% completion in two phases -- active-insurance farms first, then
+everything else -- so Monitoring's stats are always eventually accurate and
+Spatial's toggle becomes a pure client-side display filter with no fetch
+behind it at all.
+
+### 1. File: `frontend/src/lib/useFarmsData.ts` (new)
+* Added **`useFarmsData(enabled)`**: the shared farms data source, lifted out
+  of `SpatialAnalysisModule.tsx`'s previous self-contained implementation.
+  Starts fetching once `enabled` flips true (App.tsx passes `!!currentUser`,
+  so it starts right after login, before any tab-specific module mounts) and
+  keeps running regardless of which tab is active.
+  * Fetches in two phases via a `phaseRef` (`"active" | "all" | "done"`):
+    phase `"active"` pages through `active_only=true` first (fast, matches
+    what the Spatial table's default view needs); once that's exhausted,
+    phase `"all"` restarts pagination from offset 0 with `active_only=false`
+    to fill in the remainder. The two phases' offsets aren't directly
+    comparable (different WHERE clauses shift what falls at a given offset),
+    so phase `"all"` does re-fetch farms phase `"active"` already merged in
+    -- harmless no-ops via `mergeFarmsPage`'s upsert semantics, traded for
+    not needing to track which specific farm_ids were already seen.
+  * Kept **`mergeFarmsPage()`** (moved from `SpatialAnalysisModule.tsx`,
+    unchanged) and the same shared-lock/generation-counter pattern
+    (`fetchInFlightRef`, `generationRef`) from the entry above, now scoped to
+    this hook instead of one component.
+  * Returns `{ farms, isLoadingFirstPage, isRefreshing, isFetchingMore,
+    hasMore, isComplete, loadError, refresh, requestMore }` --
+    `isComplete` is new (true once phase `"all"` exhausts, i.e. the complete
+    dataset has landed) for any future consumer that wants to know when
+    aggregate stats are guaranteed fully accurate; not consumed yet.
+  * `isFetchingNextPage` (Spatial-only naming) collapsed into
+    **`isFetchingMore`**, since the reason a page fetch is happening (scroll
+    vs. background pace) no longer needs separate UI treatment once shared
+    across screens -- both drive the same "Loading more…" sentinel.
+
+### 2. File: `frontend/src/app/App.tsx`
+* **Changes to Functions:**
+  * Added `const farmsData = useFarmsData(!!currentUser)`, called
+    unconditionally above the `if (!currentUser) return <LoginScreen/>`
+    early-return (required -- hooks can't be called conditionally), so the
+    fetch starts the instant `currentUser` is set by `handleLogin()`.
+  * Passes `farmsData` as a new prop to both `<MonitoringModule>` and
+    `<SpatialAnalysisModule>`.
+
+### 3. File: `frontend/src/app/components/MonitoringModule.tsx`
+* **Changes to Functions/Rendering:**
+  * Removed its own `farms` state and the `getFarms()` call from its mount
+    effect; `farms` is now `farmsData.farms`, read from the new required
+    `farmsData: FarmsData` prop. `totalFarms`/`affectedFarms`/`totalArea`/
+    `totalIndemnity` and the signal-distribution chart are otherwise
+    unchanged -- they already just read from `farms`/`farmRows`, so they now
+    grow live as the shared background completion progresses, same
+    "silently grows" philosophy already accepted for the Spatial table.
+  * `assessments`/`insuranceSummary`/`activeTyphoons` fetching is unchanged
+    (out of scope for this entry -- only the farms fetch was duplicated).
+
+### 4. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* **Changes to Functions/Rendering:**
+  * Removed everything the entry above added for its *own* fetch/pagination
+    machinery (`farms`/`isLoadingFirstPage`/`isRefreshing`/
+    `isFetchingNextPage`/`hasMore` state, `nextOffsetRef`/`hasMoreRef`/
+    `fetchInFlightRef`/`activeOnlyRef`/`generationRef`, `fetchNextPage()`,
+    `runBackgroundCompletion()`, `loadFarmsFromStart()`, `mergeFarmsPage()`,
+    the `PAGE_SIZE`/`BACKGROUND_FETCH_DELAY_MS` constants) -- all of it now
+    lives in `useFarmsData.ts` instead. This component now takes a required
+    `farmsData: FarmsData` prop and destructures `farms`, `isLoadingFirstPage`,
+    `isRefreshing`, `isFetchingMore`, `hasMore`, `loadError`,
+    `refresh` (aliased to the existing local name `refreshFarms`, so the
+    CSV/GPX upload handlers didn't need to change), and `requestMore` from it.
+  * The infinite-scroll `IntersectionObserver` effect now calls
+    `requestMore()` instead of a local `fetchNextPage("scroll")` --
+    `requestMore` is deliberately excluded from the effect's dependency
+    array (it's a fresh function identity on every `useFarmsData` state
+    change, i.e. every page fetch, which would otherwise tear down/rebuild
+    the observer constantly for no behavioral difference).
+  * `activeInsuranceOnly` (still defaults to `true`) is now **purely a
+    client-side display filter** on `filteredFarms`, same as it always was
+    structurally, but no longer triggers a fetch restart when toggled -- the
+    `useEffect(() => { loadFarmsFromStart(...) }, [activeInsuranceOnly])`
+    from the entry above is gone entirely, since `useFarmsData` already
+    fetches every farm (active-first, then the rest) regardless of this
+    toggle's state. Toggling now re-filters the already-loaded/loading
+    shared array instantly, with no network request -- strictly better UX
+    than the previous design's "restart pagination on toggle" behavior.
+
+### Status / Next Steps
+* **Verified by Fabio (2026-08-08):** fresh `npm run dev` + login walkthrough
+  confirmed -- farm records populate on the Monitoring tab immediately after
+  login (before ever clicking into Spatial), the Spatial tab shows data
+  immediately/near-immediately on first visit, the Active-Insurance toggle
+  re-filters instantly with no new network request, and scrolling/idle
+  background completion/CSV/GPX upload refresh all behave as expected.
+* `isComplete` is returned by `useFarmsData` but not yet consumed by either
+  screen (e.g. as a "still finishing up…" affordance on Monitoring's stat
+  cards) -- left unused/available for a future request rather than adding
+  UI surface that wasn't asked for.
+
+---
+
+## [2026-08-08] - Persist login session across page refresh
+
+Reported symptom: refreshing the page always redirected back to the login
+screen. Root cause: `LoginScreen.tsx` has no real backend auth (checks
+against hardcoded `DEMO_ACCOUNTS` client-side, issues no token/session --
+registration is similarly fake, just a `setTimeout` before showing a
+"submitted for approval" message) and `App.tsx`'s `currentUser` was purely
+in-memory React state, which a full page reload always wipes.
+
+Confirmed with Fabio: persist across full browser restarts (not just
+same-tab refresh), with no automatic time-based expiry -- the session lasts
+until the user explicitly logs out.
+
+### 1. File: `frontend/src/lib/authStorage.ts` (new)
+* Added **`CurrentUser`** interface (`{ name, role, email }` -- the same
+  shape `LoginScreen.tsx`'s `onLogin()` already passed, now the single
+  source of truth instead of a duplicate inline interface in `App.tsx`).
+* Added **`loadPersistedUser()`**: reads/parses the persisted user from
+  `localStorage` (key `agrisuregis_current_user`), with shape-validation on
+  the parsed JSON and a try/catch fallback to `null` (not logged in) for
+  corrupt/unparseable storage or a storage-unavailable environment (private
+  browsing, quota, disabled) -- fails safe rather than crashing app load.
+* Added **`persistUser(user)`** / **`clearPersistedUser()`**: write/remove
+  that same key, each independently try/caught so a storage failure doesn't
+  break login/logout itself, just the "survives a refresh" behavior.
+
+### 2. File: `frontend/src/app/App.tsx`
+* **Changes to Functions:**
+  * `currentUser` state now initialized via `useState<CurrentUser | null>
+    (loadPersistedUser)` -- a lazy initializer, so it reads `localStorage`
+    synchronously on the very first render and never flashes the login
+    screen before rehydrating.
+  * `handleLogin()`: now also calls `persistUser(user)` alongside the
+    existing `setCurrentUser(user)`.
+  * Added **`handleLogout()`**: `setCurrentUser(null)` + `clearPersistedUser()`,
+    replacing the inline `onLogout={() => setCurrentUser(null)}` prop that
+    never cleared storage.
+  * Removed the local `interface CurrentUser` (moved to `authStorage.ts`,
+    imported instead).
+* **Side effect worth noting, not a regression:** `useFarmsData(!!currentUser)`
+  (from the entry above) now effectively also starts on refresh instead of
+  only on a fresh login, since `currentUser` is populated synchronously on
+  first render whenever a persisted session exists -- consistent with the
+  rest of the app now staying "logged in" across a refresh.
+
+### Status / Next Steps
+* **Verified by Fabio (2026-08-08):** login persists across refresh and full
+  browser restarts, and explicit logout correctly clears the session (see
+  the follow-up entry directly below for the companion farms-cache fix found
+  during this same walkthrough).
+* No expiry timer exists by design (per Fabio's direction) -- the persisted
+  session is only ever cleared by an explicit logout. If a future request
+  wants automatic expiry, `authStorage.ts` would need a stored timestamp and
+  an expiry check in `loadPersistedUser()`.
+* This persists to `localStorage`, which is per-browser-profile, not a real
+  server-side session -- since there is still no backend auth endpoint,
+  logging in on a second device/browser is a separate, independent "session"
+  with no shared server-side state. Flagging in case real backend
+  authentication is wanted later; out of scope for this fix.
+
+---
+
+## [2026-08-08] - Farm records cache: seed instantly on refresh instead of
+## restarting the fetch from page 1
+
+Follow-up to the login-persistence entry directly above. Fabio's first
+walkthrough of that fix reported the login screen correctly stopped
+reappearing on refresh, but the Farm Records table/map still visibly reset
+and re-fetched from scratch on every refresh -- because `useFarmsData.ts`'s
+progress (the `farms` array, and which pages had already been fetched) only
+ever lived in React state, which a full page reload always wipes regardless
+of whether `currentUser` itself now survives it.
+
+Considered a "true resume" (persist exactly which offsets/pages were already
+fetched and pick up from there) vs. "seed instantly, then revalidate in the
+background" -- confirmed with Fabio: the latter, since it's simpler and
+self-correcting (no risk of stale data lingering if something changed
+server-side between sessions), at the cost of re-requesting some pages a
+true resume could have skipped.
+
+### 1. File: `frontend/src/lib/useFarmsData.ts`
+* Added **`loadCachedFarms()`** / **`persistFarmsCache()`**: read/write the
+  farms list to `localStorage` (key `agrisuregis_farms_cache`), each
+  independently try/caught (corrupt/unparseable cache, storage unavailable,
+  or quota exceeded all fail safe -- worst case, this cache is skipped and
+  the hook behaves exactly as it did before this entry, a cold-start fetch).
+* `farms` state now initialized via `useState<Farm[]>(loadCachedFarms)` (a
+  lazy initializer, reads `localStorage` synchronously on first render) --
+  instead of starting empty on every mount.
+* Added a `useEffect` that persists `farms` to the cache on every change
+  (i.e. after every merged page), so the *next* refresh seeds from
+  up-to-date data, not just whatever was cached at the start of the current
+  session. Skips persisting an empty array so a transient early error can't
+  wipe out a previously good cache.
+* `hasLoadedOnceRef` (already existed, drives the `isLoadingFirstPage` vs.
+  `isFetchingMore` distinction in `fetchNextPage()`) now initializes to
+  `farms.length > 0` instead of unconditionally `false` -- when `farms`
+  started from a non-empty cache, the mount fetch is treated as a quiet
+  background revalidation from the very first page, so the full-panel
+  "Loading farm records…" blocker never reappears on a refresh where cached
+  data already exists. No other logic changed: the same two-phase fetch
+  sequence (active-first, then complete) still runs in full on every mount,
+  it just does so behind already-visible cached rows instead of a blank
+  loading state, merging real data back over the seed via the existing
+  `mergeFarmsPage()` as it lands.
+* **Deliberately not cleared on logout** (unlike the login session itself in
+  `authStorage.ts`): farm records are shared, global data, not user-specific
+  or per-account -- both demo accounts see the same underlying dataset, and
+  the cache is never rendered without a valid session anyway (`App.tsx`
+  gates all screens behind `currentUser`). Leaving it in place across a
+  logout/re-login cycle is a free speed-up for the next login, not a
+  data-exposure risk.
+
+### Status / Next Steps
+* **Verified by Fabio (2026-08-08):** fresh `npm run dev` walkthrough
+  confirmed -- farm records appear immediately on refresh (no "Loading farm
+  records…" blocker), the background-completion sequence quietly re-runs
+  behind them, and the login-persistence behavior from the entry above still
+  holds (refresh, browser restart, and explicit logout all behave as
+  expected).
+* Very large datasets (the benchmarked ~24k-row CSV ingestion ceiling) could
+  approach `localStorage`'s typical ~5-10MB per-origin limit -- not a
+  concern at today's ~589-row scale, but `persistFarmsCache()`'s try/catch
+  means this fails safe (cache silently stops updating) rather than
+  breaking the app if that ceiling is ever hit.
+
+---
+
+## [2026-08-08] - Farm records: true resume instead of re-walking the whole
+## fetch on every refresh
+
+Follow-up to the entry directly above. The "very large datasets" note in its
+Status/Next Steps turned out to already be Fabio's actual situation: his dev
+DB apparently still carries the ~24,000 synthetic rows from the CSV
+ingestion benchmark run (`FUNCTION_CHANGES.md`, 2026-08-07), on top of the
+original ~589 -- Monitoring's "Affected Farms" stat card showed `0/25700`.
+At that real scale, "seed instantly, then fully revalidate the entire
+two-phase sequence in the background" (the entry above) meant every single
+refresh re-issued 250+ paginated requests at the deliberately-unhurried
+300ms/page background pace -- 75+ seconds of visible churn every reload,
+which Fabio reported as the page/backend "getting stuck" and "doing it again
+from the start." Confirmed with Fabio: switch to true resume.
+
+### 1. File: `frontend/src/lib/useFarmsData.ts`
+* Added **`loadCachedProgress()`** / **`persistProgress()`**: read/write
+  `{ phase, activeOffset, allOffset }` to `localStorage` (key
+  `agrisuregis_farms_progress`, separate key from the farms data cache
+  itself), with the same shape-validated-with-fallback-to-fresh pattern as
+  `loadCachedFarms()`/`persistFarmsCache()`.
+* `phaseRef`/`activeOffsetRef`/`allOffsetRef` now initialize from this
+  cached progress instead of always `"active"`/`0`/`0`. `hasMore`/
+  `isComplete` state likewise initialize from `cachedProgress.phase` instead
+  of always `true`/`false`.
+* `fetchNextPage()`'s success branch now calls `persistProgress()` after
+  every merged page (and after any phase transition), so the persisted
+  progress always reflects exactly how far the sequence has gotten.
+* Added **`resume()`**: the new mount-time entry point (replaces calling
+  `start(false)` on mount). Unlike `start()`, it does **not** reset
+  `phaseRef`/the offset refs -- it continues `fetchNextPage()` from
+  whatever they already are. If a previous session had already reached
+  phase `"done"`, `resume()` is a complete no-op: zero requests, the cached
+  `farms` (already seeded, per the entry above) is simply left as-is.
+* `start(isRefresh)` (still used only by `refresh()`, i.e. a CSV/GPX
+  upload) is unchanged in behavior -- a real restart, resetting both the
+  in-memory cursors *and* the persisted progress via
+  `persistProgress(FRESH_PROGRESS)`, so a refresh that happens mid-upload
+  resumes from that fresh sequence rather than stale pre-upload progress.
+
+### Status / Next Steps
+* Not yet verified by Fabio -- needs a walkthrough at his actual (large)
+  dataset scale: let the background sequence reach `isComplete` once, then
+  refresh -- confirm `farms` display instantly *and* the Network tab shows
+  no new `/api/farms/` requests at all (full resume, not just fast display).
+  Then try refreshing mid-sequence (before it completes) -- confirm it
+  continues from roughly where it left off rather than restarting at
+  `offset=0`.
+* Real corollary of true resume (called out when this tradeoff was first
+  offered, now the active choice): a farm that changes server-side (e.g.
+  insurance status flips) won't be reflected in the cached copy until
+  something eventually re-fetches its specific page -- once `isComplete` is
+  reached, that may never happen again automatically. No staleness
+  invalidation exists yet (e.g. re-running phase "all" periodically, or
+  after some elapsed time) -- flagging as a possible follow-up if stale data
+  becomes a real problem in practice, not built here since it wasn't asked
+  for.
+* `agrisuregis_farms_progress` is left uncleared on logout, same reasoning
+  as `agrisuregis_farms_cache` in the entry above (not user-specific data,
+  never rendered without a valid session).
+
+---
+
+## [2026-08-08] - Farm records: move the farms cache from localStorage to
+## IndexedDB (root cause of the "stuck at 16800" bug)
+
+Follow-up to the entry directly above. Fabio's walkthrough of "true resume"
+found it stuck: "Affected Farms" showed `0/16800`, unchanging across
+refreshes, with confirmed zero new backend requests (`curl` checks against
+`GET /api/farms/` directly proved the backend was completely healthy --
+`total: 48588`, `has_more: true` even at `offset=16795`; the real
+`tbl_farms` count via `psql` also confirmed `48588`).
+
+**Root cause, found via browser console:** `localStorage.getItem
+('agrisuregis_farms_progress')` returned `{"phase":"done","activeOffset":39,
+"allOffset":48588}` -- the fetch sequence had genuinely, correctly walked
+all 48,588 rows and correctly detected completion. But `JSON.parse
+(localStorage.getItem('agrisuregis_farms_cache')).length` was only `16800`.
+`localStorage` has a hard ~5-10MB per-origin quota (flagged as a risk in the
+entry above, but the actual failure mode wasn't yet understood). Once the
+serialized `farms` array grew past what ~16,800 real farm records encode to,
+every subsequent `persistFarmsCache()` call started throwing
+`QuotaExceededError` -- silently, since it's caught and treated as
+"best-effort, skip on failure." Meanwhile `persistProgress()`'s payload
+(`{phase, activeOffset, allOffset}`, a few dozen bytes) never came close to
+the quota and kept succeeding all the way to `"done"`. The two caches
+desynced: progress said "fully done," the farms cache silently froze at its
+last successful write. Every later `resume()` correctly trusted the
+(accurate) "done" progress marker and skipped fetching entirely -- but
+`farms` had seeded from the (stale, truncated) cache, so the UI stayed stuck
+at 16,800 forever with no way to notice.
+
+Confirmed with Fabio: move the (potentially large) farms array cache to
+IndexedDB, which doesn't have `localStorage`'s small quota ceiling. The tiny
+progress marker stays in `localStorage`, since it's the whole reason the two
+caches were distinguishable enough to diagnose this at all.
+
+### 1. File: `frontend/src/lib/useFarmsData.ts`
+* Replaced `loadCachedFarms()`/`persistFarmsCache()`'s `localStorage`
+  implementation with an `IndexedDB`-backed one (`openFarmsDb()` +
+  a single-record object store, db name `agrisuregis`, store
+  `farms_cache`). Both are now `async` (`IndexedDB`'s API is inherently
+  asynchronous, unlike `localStorage`), with the same fail-safe-on-any-error
+  philosophy as before (unavailable/disabled storage → treated as "nothing
+  cached" / "skip this write," never throws into calling code).
+* Added a one-time, unconditional `localStorage.removeItem
+  ('agrisuregis_farms_cache')` at module load -- the old cache key is now
+  orphaned dead weight, and since it was written right up to the quota
+  wall, leaving it in place risked *other* small `localStorage` writes
+  (the progress marker, `authStorage.ts`'s session) failing too.
+* `PROGRESS_CACHE_KEY` renamed to `agrisuregis_farms_progress_v2`. Without
+  this, the very first load after this fix would read the *old* progress
+  key's `"done"` state (persisted by the previous version of this hook)
+  against the *new*, empty IndexedDB cache -- reproducing this exact bug
+  immediately (progress says done, cache has nothing, farms render
+  permanently empty). Versioning the key forces one real walk instead.
+* Because the farms cache read is now async, `farms` state can no longer be
+  seeded synchronously via `useState`'s lazy initializer (`useState(() =>
+  ...)`, what the previous entry used) -- it now starts `[]` and is
+  populated inside the mount `useEffect`, after `await loadCachedFarms()`
+  resolves. `isLoadingFirstPage`'s default flipped from `false` to `true`
+  to cover this brief async gap (previously: default `false`, since a
+  synchronous `localStorage` read meant `farms` was correct from the very
+  first render) -- and is explicitly cleared after the cache read if
+  `phaseRef.current === "done"`, since in that case `fetchNextPage()`
+  (which normally clears it) never runs at all.
+* `hasLoadedOnceRef`'s initial value changed from `farms.length > 0`
+  (readable synchronously before) to unconditionally `false`, now set
+  `true` inside the mount effect once the async cache read resolves with
+  data, or by a successful `fetchNextPage()` -- same purpose as before
+  (distinguishing "nothing to show yet" from "quiet background top-up"),
+  just triggered from the new async path instead of the constructor-time
+  value.
+
+### Status / Next Steps
+* Tested by Fabio: the walk itself ran to real completion (progress marker
+  correctly reached `{"phase":"done",...,"allOffset":48588}`), but a reload
+  right around that point landed in the exact race this entry's own "Residual
+  risk" note below had already flagged -- see the next entry
+  (`[2026-08-08] - Farm records: close the IndexedDB write race behind
+  "done"`) for the follow-up fix and why the predicted risk turned out not to
+  be narrow enough to skip.
+
+## [2026-08-08] - Farm records: close the IndexedDB write race behind "done"
+
+Follow-up to the entry directly above. Fabio reloaded mid-testing (per that
+entry's own instructions, to check "does a second reload show zero new
+requests") and hit a fresh symptom: two stat cards on Monitoring disagreed on
+the farm total at the same moment (`Affected Farms: 0/48488` vs.
+`Active Insurance: 39/48588`) -- diagnosed as unrelated to this bug (they
+read from two independent sources, `farms.length` vs. a one-shot
+`GET /api/insurance/summary` `COUNT(*)`, explained and confirmed as a
+red herring). The real symptom, confirmed with Fabio afterward: the count
+climbed live, then permanently stopped at `48488` -- 100 rows (one page)
+short -- even though nothing on screen indicated loading was still in
+progress (neither `MonitoringModule.tsx` nor `SpatialAnalysisModule.tsx`
+gate any indicator on `isComplete`, only on `isLoadingFirstPage`, which
+clears after just the first page).
+
+**Root cause, confirmed via evidence at each step:**
+* `curl -sS "http://localhost:8000/api/farms/?limit=100&offset=48488&active_only=false"`
+  returned `total: 48588`, `has_more: false`, `len(data): 100`, farm_ids
+  `48489`-`48588` -- proving the backend was completely healthy and this was
+  the true, correct final page. Backend ruled out.
+* Browser console: `localStorage.getItem('agrisuregis_farms_progress_v2')`
+  returned `{"phase":"done","activeOffset":39,"allOffset":48588}` -- the
+  fetch sequence genuinely, correctly completed all 48,588 rows.
+* Browser console (reading the IndexedDB record directly): the cached
+  `farms` array held only `48488` entries -- matching the stuck on-screen
+  count exactly.
+* Fabio confirmed a reload happened between watching the count climb and it
+  landing on 48488. That reload is what exposed the bug: the tiny
+  `agrisuregis_farms_progress_v2` marker (`localStorage`) is written
+  *synchronously*, the instant a page's fetch resolves; the (much larger)
+  `IndexedDB` farms-array write was, until this fix, fired from a *separate*
+  `useEffect` keyed on `farms`, async and unawaited -- "best-effort," same
+  philosophy as the localStorage-quota-era version. The reload landed in the
+  gap: progress had already persisted `"done"` for the completing page, but
+  that page's IndexedDB write hadn't flushed yet. The new mount seeded
+  `farms` from the still-truncated (48488-row) cache, saw progress already
+  `"done"`, and `resume()` correctly no-op'd on `"done"` -- permanently
+  stuck, no further requests ever made. Same failure shape as the
+  `localStorage`-quota bug two entries above, different mechanism: a race
+  window instead of a hard wall. This is exactly the "residual risk" flagged
+  (but left unbuilt) in that entry's Status/Next Steps.
+
+### 1. File: `frontend/src/lib/useFarmsData.ts`
+* Added `farmsRef`, a ref mirroring `farms` state synchronously. Needed
+  because `setFarms(prev => mergeFarmsPage(prev, res.data))`'s updater isn't
+  guaranteed to have run yet by the time the code right after it needs the
+  merged array (React 18 batches state updates) -- `farmsRef.current` is
+  always the true current merged array, readable immediately.
+* `fetchNextPage()`: on the page that finishes the walk (`!res.has_more` in
+  phase `"all"`), now `await persistFarmsCache(mergedFarms)` *before* setting
+  `phaseRef.current = "done"` and before `persistProgress()` runs. This is
+  the actual fix -- it guarantees the complete farms array is durably in
+  IndexedDB before the progress marker is ever allowed to claim `"done"`, closing
+  the race a reload could land in. Every other (non-final) page keeps a
+  fire-and-forget `persistFarmsCache()` call, unchanged in spirit from
+  before -- a reload catching one of *those* mid-flight just resumes
+  normally via the persisted (non-`"done"`) progress and re-fetches whatever
+  the cache is missing, so only the final page's write needed to become
+  blocking.
+* Removed the separate `useEffect(() => { if (farms.length > 0)
+  persistFarmsCache(farms); }, [farms])` that previously drove all cache
+  writes -- superseded by the inline writes above (fire-and-forget mid-walk,
+  awaited on completion), which also avoids opening a fresh `IndexedDB`
+  connection on every single render-triggered `farms` change independent of
+  whether a fetch actually completed.
+* Mount effect: added a self-heal guard, checked right after seeding `farms`
+  from the IndexedDB cache. If loaded progress says `phase: "done"` but
+  `farmsRef.current.length !== allOffsetRef.current` (the "all" phase's
+  cumulative row count when it finished, which must equal the cached array's
+  length if that completing page's write truly landed), the `"done"` is
+  treated as unverifiable: falls back to `phaseRef.current = "all"`,
+  `allOffsetRef.current = 0`, `hasMore`/`isComplete` reset, and persists that
+  corrected progress immediately. Re-walking the `"all"` phase from scratch
+  is safe and idempotent (`mergeFarmsPage` dedupes by `farm_id`). This is
+  also what self-heals Fabio's already-stuck browser tab on its next
+  reload -- no manual cache-clearing needed -- and guards against any other
+  future cause of the same desync shape, not just this specific race.
+
+### Status / Next Steps
+* Verified by Fabio (2026-08-08): reload converged from 48488 to the true
+  48588, and a subsequent reload showed the count instantly with no further
+  `/api/farms/` requests.
+* The two stat-card totals reading from independent sources
+  (`farms.length` vs. `GET /api/insurance/summary`'s `COUNT(*)`) is a
+  pre-existing, separate characteristic, not touched by this fix -- flagged
+  during this investigation as a possible future inconsistency (most visible
+  transiently, mid-load, at real dataset scale) but out of scope here since
+  Fabio confirmed the frozen-count symptom, not the transient mismatch, was
+  the actual problem.
+

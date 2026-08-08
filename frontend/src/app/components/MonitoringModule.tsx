@@ -12,9 +12,10 @@ import {
 import {
   Bulletin, TcbSignal, Farm, Assessment, InsuranceSummary, ActiveTyphoon,
   getBulletins, parseBulletins, getBulletinSignals,
-  computeExposure, ComputeExposureResult, getFarms, getAssessments, getInsuranceSummary,
+  computeExposure, ComputeExposureResult, getAssessments, getInsuranceSummary,
   getActiveTyphoons,
 } from "@/lib/api";
+import { FarmsData } from "@/lib/useFarmsData";
 
 interface FarmRow extends Farm {
   assessment: Assessment | null;
@@ -454,9 +455,10 @@ interface MonitoringModuleProps {
   darkMode: boolean;
   selectedBulletin: Bulletin | null;
   onSelectBulletin: (bulletin: Bulletin | null) => void;
+  farmsData: FarmsData;
 }
 
-export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin }: MonitoringModuleProps) {
+export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin, farmsData }: MonitoringModuleProps) {
   const [bulletins, setBulletins] = useState<Bulletin[]>([]);
   const [isLoadingBulletins, setIsLoadingBulletins] = useState(false);
   const [isParsing, setIsParsing] = useState(false);
@@ -482,7 +484,7 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
 
   const [sarFarmer, setSarFarmer] = useState<FarmRow | null>(null);
 
-  const [farms, setFarms] = useState<Farm[]>([]);
+  const farms = farmsData.farms;
   const [assessments, setAssessments] = useState<Assessment[]>([]);
   const [insuranceSummary, setInsuranceSummary] = useState<InsuranceSummary | null>(null);
   const [activeTyphoons, setActiveTyphoons] = useState<ActiveTyphoon[]>([]);
@@ -497,7 +499,6 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
   }, []);
 
   useEffect(() => {
-    getFarms().then(res => setFarms(res.data)).catch(() => setFarms([]));
     getAssessments().then(res => setAssessments(res.data)).catch(() => setAssessments([]));
     getInsuranceSummary().then(setInsuranceSummary).catch(() => setInsuranceSummary(null));
     loadActiveTyphoons();
