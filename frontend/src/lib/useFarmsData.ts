@@ -1,11 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 import { getFarms, Farm } from "./api";
 
-// Rows fetched per GET /api/farms/ page. Keeps a single request small even
-// at Fabio's real dev dataset scale (~48,588 rows as of 2026-08-08).
-const PAGE_SIZE = 100;
-// Pause between background-completion page fetches, so the loop doesn't
-// compete for bandwidth/DB load against a user actively scrolling/using the app.
+// Rows fetched per GET /api/farms/ page, for both phases below. 1000 is the
+// backend's own max `limit` (farms.py: Query(..., le=1000)) -- previously
+// the "all" phase used a smaller 100-row page (486 requests to walk all
+// 48,588 farms); at 1000/page that's ~49 requests instead, meaningfully
+// fewer round trips, which matters more once this isn't all running on
+// localhost (see BACKGROUND_FETCH_DELAY_MS and runBackgroundLoop).
+const PAGE_SIZE = 1000;
+// Pause between background-completion page fetches during the "all" phase,
+// so the loop doesn't compete for bandwidth/DB load against a user actively
+// scrolling/using the app. Not applied to the "active" phase -- see
+// runBackgroundLoop -- since that's a much smaller, bounded set (1,039 as of
+// 2026-08-08) meant to land in a fast burst instead of trickling in.
 const BACKGROUND_FETCH_DELAY_MS = 300;
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
@@ -90,28 +97,34 @@ async function persistFarmsCache(farms: Farm[]): Promise<void> {
 
 // ---------------------------------------------------------------------------
 // Fetch progress -- still localStorage, deliberately. This payload is tiny
-// (`{phase, activeOffset, allOffset}`, a few dozen bytes) and never at risk
-// of the quota problem above; keeping it separate from the (much larger)
-// IndexedDB farms cache is what makes it possible to tell the two apart at
-// all. Without this, a refresh re-walked the entire two-phase sequence from
-// page 1 every time; with it, a refresh resumes from the exact phase/offset
-// it was at -- if it had already finished, nothing is re-fetched at all.
+// and never at risk of the quota problem above; keeping it separate from
+// the (much larger) IndexedDB farms cache is what makes it possible to tell
+// the two apart at all. Without this, a refresh re-walked the entire
+// two-phase sequence from the beginning every time; with it, a refresh
+// resumes from the exact phase/cursor it was at -- if it had already
+// finished, nothing is re-fetched at all.
 //
-// Key is versioned (`_v2`) so any progress persisted by the old,
-// localStorage-cache-paired version of this hook is never read back and
-// trusted against the new (empty, on first run) IndexedDB cache -- that
-// combination would otherwise reproduce the exact desync bug this fixes:
-// progress says "done," new cache has nothing, farms render as permanently
-// empty. Starting the version-2 progress fresh forces one real walk instead.
+// `activeCursor`/`allCursor` are keyset (cursor) positions -- the highest
+// `farm_id` already seen in each phase, 0 meaning "not started" -- not
+// OFFSET counts. `allCount` is tracked separately: a cumulative *count* of
+// rows fetched during the "all" phase, used only by the mount effect's
+// self-heal guard below (a farm_id cursor value isn't a count, so this
+// can't be derived from allCursor).
+//
+// Key is versioned (`_v3`, bumped from `_v2` when pagination moved from
+// OFFSET to keyset cursors -- an old `_v2` record's numeric offsets would
+// be silently wrong if read back as farm_id cursors) so old progress is
+// never trusted against a shape/semantics it wasn't written for.
 // ---------------------------------------------------------------------------
 interface FetchProgress {
   phase: Phase;
-  activeOffset: number;
-  allOffset: number;
+  activeCursor: number;
+  allCursor: number;
+  allCount: number;
 }
 
-const PROGRESS_CACHE_KEY = "agrisuregis_farms_progress_v2";
-const FRESH_PROGRESS: FetchProgress = { phase: "active", activeOffset: 0, allOffset: 0 };
+const PROGRESS_CACHE_KEY = "agrisuregis_farms_progress_v3";
+const FRESH_PROGRESS: FetchProgress = { phase: "active", activeCursor: 0, allCursor: 0, allCount: 0 };
 
 function loadCachedProgress(): FetchProgress {
   try {
@@ -119,7 +132,12 @@ function loadCachedProgress(): FetchProgress {
     if (!raw) return FRESH_PROGRESS;
     const parsed = JSON.parse(raw);
     const validPhase = parsed?.phase === "active" || parsed?.phase === "all" || parsed?.phase === "done";
-    if (validPhase && typeof parsed.activeOffset === "number" && typeof parsed.allOffset === "number") {
+    if (
+      validPhase &&
+      typeof parsed.activeCursor === "number" &&
+      typeof parsed.allCursor === "number" &&
+      typeof parsed.allCount === "number"
+    ) {
       return parsed as FetchProgress;
     }
     return FRESH_PROGRESS;
@@ -170,8 +188,8 @@ export interface FarmsData {
   // fully accurate once this is true.
   isComplete: boolean;
   loadError: string | null;
-  // Restarts the fetch from page 1 (e.g. after a CSV/GPX upload). Existing
-  // `farms` are left in place and merged over, never cleared first.
+  // Restarts the fetch from the beginning (e.g. after a CSV/GPX upload).
+  // Existing `farms` are left in place and merged over, never cleared first.
   refresh: () => void;
   // Requests the next page immediately instead of waiting for the
   // background loop's next paced iteration -- e.g. a consumer's infinite
@@ -193,14 +211,18 @@ export interface FarmsData {
 // correct aggregate stats (e.g. Monitoring's "Total Farms" stat card) are
 // only ever computed over `farms`, which keeps growing until `isComplete`.
 // Phase "active" (active_only=true) runs first; once it's exhausted, phase
-// "all" (active_only=false) restarts pagination from offset 0 to fill in
-// the remainder -- this does re-fetch farms phase "active" already merged
-// in (harmless no-ops via mergeFarmsPage), since the two phases' offsets
-// aren't directly comparable once the WHERE clause differs.
+// "all" (active_only=false) restarts pagination from the beginning to fill
+// in the remainder -- this does re-fetch farms phase "active" already
+// merged in (harmless no-ops via mergeFarmsPage), since the two phases'
+// cursors aren't directly comparable once the WHERE clause differs.
+//
+// Pagination is keyset (cursor), not OFFSET/LIMIT -- see
+// backend/app/api/farms.py's docstring for why (OFFSET's cost grows with
+// how deep into a walk you are; a farm_id cursor's doesn't).
 export function useFarmsData(enabled: boolean): FarmsData {
   const [farms, setFarms] = useState<Farm[]>([]);
   // Loaded synchronously (localStorage, tiny) -- determines the initial
-  // phase/offset/hasMore/isComplete below. The (much larger) farms array
+  // phase/cursor/hasMore/isComplete below. The (much larger) farms array
   // itself is seeded separately and asynchronously, see the mount effect.
   const cachedProgress = loadCachedProgress();
   const [isLoadingFirstPage, setIsLoadingFirstPage] = useState(true);
@@ -211,11 +233,14 @@ export function useFarmsData(enabled: boolean): FarmsData {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   // Seeded from the cached progress above (defaults to phase "active",
-  // offset 0 when nothing was cached) -- resume() below continues from
-  // exactly these values instead of always restarting at page 1.
+  // cursor 0 when nothing was cached) -- resume() below continues from
+  // exactly these values instead of always restarting at the beginning.
   const phaseRef = useRef<Phase>(cachedProgress.phase);
-  const activeOffsetRef = useRef(cachedProgress.activeOffset);
-  const allOffsetRef = useRef(cachedProgress.allOffset);
+  const activeCursorRef = useRef(cachedProgress.activeCursor);
+  const allCursorRef = useRef(cachedProgress.allCursor);
+  // Cumulative row count for the "all" phase only -- see the FetchProgress
+  // comment above for why this is tracked separately from allCursorRef.
+  const allCountRef = useRef(cachedProgress.allCount);
   const fetchInFlightRef = useRef(false);
   // Mirrors `farms` state synchronously (see fetchNextPage's comment on why
   // this can't just be read back from `farms` itself) -- always the current
@@ -240,9 +265,9 @@ export function useFarmsData(enabled: boolean): FarmsData {
 
     try {
       const activeOnly = phaseRef.current === "active";
-      const offsetRef = activeOnly ? activeOffsetRef : allOffsetRef;
-      const requestOffset = offsetRef.current;
-      const res = await getFarms({ limit: PAGE_SIZE, offset: requestOffset, active_only: activeOnly });
+      const cursorRef = activeOnly ? activeCursorRef : allCursorRef;
+      const requestAfterId = cursorRef.current;
+      const res = await getFarms({ limit: PAGE_SIZE, after_id: requestAfterId, active_only: activeOnly });
       if (myGeneration !== generationRef.current) return; // superseded by a restart -- discard
 
       // Tracked in a ref (not read back from `farms` state) because React 18
@@ -252,14 +277,25 @@ export function useFarmsData(enabled: boolean): FarmsData {
       const mergedFarms = mergeFarmsPage(farmsRef.current, res.data);
       farmsRef.current = mergedFarms;
       setFarms(mergedFarms);
-      offsetRef.current = requestOffset + res.data.length;
+      // The cursor advances to the last (highest) farm_id actually returned
+      // -- order_by(farm_id asc) on the backend guarantees that's the
+      // correct "resume point" regardless of active_only. An empty page
+      // leaves the cursor untouched (nothing to advance past); has_more
+      // will already be false in that case, so the phase ends anyway.
+      if (res.data.length > 0) {
+        cursorRef.current = res.data[res.data.length - 1].farm_id;
+      }
+      if (!activeOnly) {
+        allCountRef.current += res.data.length;
+      }
       hasLoadedOnceRef.current = true;
       setLoadError(null);
 
       if (!res.has_more) {
         if (phaseRef.current === "active") {
           phaseRef.current = "all";
-          allOffsetRef.current = 0;
+          allCursorRef.current = 0;
+          allCountRef.current = 0;
         } else {
           // Await the final cache write before this page's phase="done" is
           // persisted below. Previously this write was fire-and-forget (via
@@ -283,8 +319,9 @@ export function useFarmsData(enabled: boolean): FarmsData {
       }
       persistProgress({
         phase: phaseRef.current,
-        activeOffset: activeOffsetRef.current,
-        allOffset: allOffsetRef.current,
+        activeCursor: activeCursorRef.current,
+        allCursor: allCursorRef.current,
+        allCount: allCountRef.current,
       });
     } catch (error) {
       if (myGeneration !== generationRef.current) return;
@@ -303,10 +340,16 @@ export function useFarmsData(enabled: boolean): FarmsData {
   };
 
   const runBackgroundLoop = async (myGeneration: number) => {
-    while (phaseRef.current !== "done" && myGeneration === generationRef.current) {
+    while (true) {
+      if ((phaseRef.current as Phase) === "done" || myGeneration !== generationRef.current) break;
       await fetchNextPage();
-      if (phaseRef.current === "done" || myGeneration !== generationRef.current) break;
-      await sleep(BACKGROUND_FETCH_DELAY_MS);
+      if ((phaseRef.current as Phase) === "done" || myGeneration !== generationRef.current) break;
+      // Only pace the "all" phase (see PAGE_SIZE/BACKGROUND_FETCH_DELAY_MS's
+      // comments) -- the "active" phase is small/bounded enough that it's
+      // meant to land in a fast, back-to-back burst instead of trickling in.
+      if (phaseRef.current === "all") {
+        await sleep(BACKGROUND_FETCH_DELAY_MS);
+      }
     }
   };
 
@@ -319,8 +362,9 @@ export function useFarmsData(enabled: boolean): FarmsData {
     const myGeneration = generationRef.current;
     fetchInFlightRef.current = false; // release any stale lock from a superseded sequence
     phaseRef.current = "active";
-    activeOffsetRef.current = 0;
-    allOffsetRef.current = 0;
+    activeCursorRef.current = 0;
+    allCursorRef.current = 0;
+    allCountRef.current = 0;
     setHasMore(true);
     setIsComplete(false);
     persistProgress(FRESH_PROGRESS);
@@ -328,7 +372,7 @@ export function useFarmsData(enabled: boolean): FarmsData {
     fetchNextPage().then(() => runBackgroundLoop(myGeneration));
   };
 
-  // Mount-time entry point -- continues from wherever phaseRef/offsetRefs
+  // Mount-time entry point -- continues from wherever phaseRef/cursorRefs
   // already are (seeded from the cached progress above), instead of
   // resetting them like start() does. If a previous session already
   // finished (phase "done"), this is a complete no-op: no requests at all.
@@ -355,8 +399,8 @@ export function useFarmsData(enabled: boolean): FarmsData {
         hasLoadedOnceRef.current = true;
       }
       // Self-heal guard: "done" progress is only trustworthy if the cache it
-      // was persisted alongside actually holds every row -- `allOffsetRef`
-      // is the "all" phase's cumulative count when it finished, which
+      // was persisted alongside actually holds every row -- `allCountRef` is
+      // the "all" phase's cumulative row count when it finished, which
       // should equal the cached array's length if that page's cache write
       // truly landed. A mismatch here is exactly this bug's fingerprint (a
       // reload catching the IndexedDB write for the completing page still
@@ -365,12 +409,18 @@ export function useFarmsData(enabled: boolean): FarmsData {
       // resuming the "all" phase from scratch. Re-walking is safe (merge is
       // idempotent by farm_id) and is what actually recovers a stuck
       // install like this one, no manual cache-clearing required.
-      if (phaseRef.current === "done" && farmsRef.current.length !== allOffsetRef.current) {
+      if (phaseRef.current === "done" && farmsRef.current.length !== allCountRef.current) {
         phaseRef.current = "all";
-        allOffsetRef.current = 0;
+        allCursorRef.current = 0;
+        allCountRef.current = 0;
         setHasMore(true);
         setIsComplete(false);
-        persistProgress({ phase: "all", activeOffset: activeOffsetRef.current, allOffset: 0 });
+        persistProgress({
+          phase: "all",
+          activeCursor: activeCursorRef.current,
+          allCursor: 0,
+          allCount: 0,
+        });
       }
       if (phaseRef.current === "done") {
         // Nothing left to fetch -- the cache read above is the only thing

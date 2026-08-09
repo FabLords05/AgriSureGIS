@@ -16,6 +16,8 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.farms_cache import invalidate_farms_cache
+from app.core.farms_view import refresh_farm_latest_insurance_view
 from app.models import models
 from app.services.gpx_farmer_matcher import GpxFarmerMatcherService
 from app.services.gpx_parser import GpxParserService
@@ -545,6 +547,16 @@ def upload_csv(
         logger.exception("CSV ingestion for %s failed and was rolled back", file.filename)
         raise HTTPException(status_code=500, detail=f"CSV ingestion failed: {exc}") from exc
 
+    # A no-op unless REDIS_URL is configured -- see app/core/farms_cache.py.
+    # Without this, a page cached before this ingest could keep serving
+    # stale data for up to the cache's TTL after a CSV upload just changed it.
+    invalidate_farms_cache()
+    # A no-op unless the migration in backend/migrations/2026-08-09_farms_perf.sql
+    # has been applied -- see app/core/farms_view.py. This CSV ingest can
+    # insert/update InsuranceRecord rows, which the view precomputes "most
+    # recent per farm" from.
+    refresh_farm_latest_insurance_view(db)
+
     elapsed = time.monotonic() - start_time
     logger.info(
         "CSV ingestion finished: %s in %.1fs -- %d processed, %d inserted, %d skipped, %d failed",
@@ -633,6 +645,10 @@ def upload_gpx(
     farm.location_geom = location_geom
     db.commit()
     db.refresh(farm)
+
+    # A no-op unless REDIS_URL is configured -- see app/core/farms_cache.py.
+    # location_geom is part of the cached farms list response.
+    invalidate_farms_cache()
 
     return {
         "status": "success",

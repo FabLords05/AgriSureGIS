@@ -207,6 +207,36 @@ CREATE INDEX idx_farms_csv_farm_reference ON tbl_farms (csv_farm_reference);
 CREATE INDEX idx_admin_boundaries_province_municipality_barangay
     ON tbl_admin_boundaries (province, municipality, barangay);
 
+-- 6c. Covers backend/app/api/farms.py's active_only=True filter (WHERE
+-- effectivity_date <= today AND expiry_date >= today, projecting DISTINCT
+-- farm_id). Column order puts the two range filters first so Postgres can
+-- use the index for the WHERE clause, with farm_id included last to make
+-- it a covering index (index-only scan, no heap lookup) for that exact
+-- query. See models.py's InsuranceRecord.__table_args__ for the ORM-side
+-- mirror of this index.
+CREATE INDEX ix_insurance_records_active_lookup
+    ON tbl_insurance_records (effectivity_date, expiry_date, farm_id);
+
+-- 6d. Precomputes "most recent InsuranceRecord per farm" for
+-- backend/app/api/farms.py's list_farms() -- see app/core/farms_view.py.
+-- Empty until tbl_insurance_records has data and gets refreshed (the app
+-- refreshes it itself after every CSV/GPX upload; seed_active_insurance.py
+-- does too). See backend/migrations/2026-08-09_farms_perf.sql for the
+-- standalone version of these same two statements, for applying this to an
+-- already-provisioned DB without re-running this whole file.
+CREATE MATERIALIZED VIEW mv_farm_latest_insurance AS
+SELECT DISTINCT ON (farm_id)
+    farm_id,
+    insurance_records_id,
+    policy_no,
+    effectivity_date,
+    expiry_date
+FROM tbl_insurance_records
+ORDER BY farm_id, effectivity_date DESC NULLS LAST;
+
+CREATE UNIQUE INDEX ix_mv_farm_latest_insurance_farm_id
+    ON mv_farm_latest_insurance (farm_id);
+
 -- 7. Real PCIC seed data for the two-step parametric lookup (replaces the old
 -- made-up placeholder block). Source: PCIC "Table 11" damage matrix and Rice
 -- Indemnity Factor Table, transcribed from the manuscript figures.

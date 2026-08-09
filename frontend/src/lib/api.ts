@@ -232,24 +232,35 @@ export function uploadGpx(file: File, farmerId?: number, farmId?: number): Promi
 export interface GetFarmsResult {
   status: string;
   data: Farm[];
-  total: number;
+  // Only populated on the first page of a paginated walk (after_id === 0)
+  // -- the backend skips recomputing this COUNT on every subsequent page to
+  // avoid redoing it hundreds of times across a full walk. `null` on later
+  // pages; unpaginated calls (no `limit`) still always populate it as
+  // `data.length`. See backend/app/api/farms.py's docstring.
+  total: number | null;
   limit: number | null;
-  offset: number;
+  after_id: number;
   has_more: boolean;
 }
 
 // Omitting params returns the full, unpaginated farm list (unchanged legacy
-// behavior -- MonitoringModule.tsx relies on this). Pass `limit`/`offset` to
-// page through the list, and `active_only` to restrict to farms with a
+// behavior -- MonitoringModule.tsx relies on this). Pass `limit`/`after_id`
+// to page through the list, and `active_only` to restrict to farms with a
 // currently-active InsuranceRecord -- see SpatialAnalysisModule.tsx.
+//
+// `after_id` is a keyset (cursor) position, not an OFFSET: pass the highest
+// `farm_id` already seen (0 to start from the beginning). Unlike OFFSET,
+// this costs the backend about the same regardless of how deep into a walk
+// it is -- see backend/app/api/farms.py's docstring for the measured
+// OFFSET-cost-grows-with-depth numbers this replaced.
 export function getFarms(params?: {
   limit?: number;
-  offset?: number;
+  after_id?: number;
   active_only?: boolean;
 }): Promise<GetFarmsResult> {
   const query = new URLSearchParams();
   if (params?.limit != null) query.set('limit', String(params.limit));
-  if (params?.offset != null) query.set('offset', String(params.offset));
+  if (params?.after_id != null) query.set('after_id', String(params.after_id));
   if (params?.active_only != null) query.set('active_only', String(params.active_only));
   const qs = query.toString();
   return request<GetFarmsResult>(`/api/farms/${qs ? `?${qs}` : ''}`);

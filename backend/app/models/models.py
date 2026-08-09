@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Date, DateTime, ForeignKey, Integer, Numeric, String, Boolean, UniqueConstraint, func
+from sqlalchemy import Column, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Boolean, UniqueConstraint, func
 from sqlalchemy.orm import relationship
 from geoalchemy2 import Geometry
 
@@ -70,6 +70,19 @@ class InsuranceRecord(Base):
     # a single Policy No. spanning 10-14 distinct farmers.
     __table_args__ = (
         UniqueConstraint("policy_no", "farm_id", name="uq_insurance_records_policy_no_farm_id"),
+        # Covers backend/app/api/farms.py's active_only=True filter
+        # (`WHERE effectivity_date <= :today AND expiry_date >= :today`,
+        # projecting DISTINCT farm_id) -- column order puts the two range
+        # filters first so Postgres can use the index for the WHERE clause,
+        # with farm_id included last to make it a covering index (an
+        # index-only scan, no heap lookup needed) for that exact query.
+        # Without this, the filter falls back to a sequential scan that gets
+        # more expensive as tbl_insurance_records grows -- not yet a problem
+        # at ~49,588 rows (2026-08-09), but doesn't scale past dev size.
+        Index(
+            "ix_insurance_records_active_lookup",
+            "effectivity_date", "expiry_date", "farm_id",
+        ),
     )
 
     insurance_records_id = Column(Integer, primary_key=True, index=True)

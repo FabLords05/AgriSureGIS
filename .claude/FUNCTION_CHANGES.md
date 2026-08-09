@@ -2947,3 +2947,148 @@ something closer to a realistic multi-page volume.
   feature branch, since it's a standalone dev-tooling/data script with no
   application behavior change -- same category as `seed_database.py`.
 
+## [2026-08-09] - Farm Records: "most recent insurance per farm" NULLS-FIRST bug, then a 6-part farms-listing performance pass
+
+Two rounds of follow-up work in the same session, both triggered by testing
+`seed_active_insurance.py`'s output (see the entry above).
+
+### Round 1: NULLS FIRST bug in "most recent InsuranceRecord per farm"
+
+Fabio reported the Farm Records table (Active Insurance Only) stuck at 39-54
+records while Monitoring's Active Insurance stat card correctly showed
+~1036-1039. Root-caused: `GET /api/farms/?active_only=true` correctly
+*included* the 1000 newly-seeded farms (has an active record), but
+*displayed* the wrong record for ~949 of them -- `effectivity_date`/
+`expiry_date: null` instead of the new active dates.
+
+**Root cause:** `backend/app/api/farms.py`'s "most recent per farm"
+resolution (`order_by(InsuranceRecord.farm_id, InsuranceRecord.effectivity_date.desc())`,
+first-seen-per-farm_id wins) assumed Postgres sorts NULLs last in `DESC`
+order. It doesn't -- Postgres's default is NULLS FIRST for `DESC`, so a
+farm's old record with no dates set (common in the large synthetic batch)
+sorted *ahead of* a real dated record, and `setdefault()` picked the wrong
+one. Invisible until this session, since no farm had ever had 2+
+InsuranceRecords before `seed_active_insurance.py`.
+
+**Fix:** added `.nullslast()` to the ordering. Verified via curl against a
+sample of the previously-broken farm_ids (651, 880, 894) -- all 1000/1000
+rows in a full active_only=true page now correctly bracket today.
+
+#### File: `backend/app/api/farms.py`
+* `.order_by(InsuranceRecord.farm_id, InsuranceRecord.effectivity_date.desc().nullslast())`.
+
+### Round 2: 6-part performance pass (Fabio: "apply 1-6")
+
+Triggered by a side discussion about OFFSET pagination's cost profile --
+measured empirically (curl timing) at 54ms (offset=0) / 151ms (offset=24000)
+/ 264ms (offset=48000), confirming cost grows with depth. Fabio asked for
+all of it applied at once.
+
+#### 1. Keyset (cursor) pagination -- replaces OFFSET/LIMIT
+* `backend/app/api/farms.py`: `offset: int` param replaced with
+  `after_id: int` (0 = start). Filters `Farm.farm_id > after_id` instead of
+  `.offset()`. `total` still only computed on `after_id == 0` (unchanged
+  reasoning from the prior COUNT-skipping optimization); `has_more` no
+  longer needs `total` at all under keyset pagination -- just `len(data) ==
+  limit`.
+* `frontend/src/lib/api.ts`: `GetFarmsResult.offset` -> `after_id`;
+  `getFarms({ offset })` -> `getFarms({ after_id })`.
+* `frontend/src/lib/useFarmsData.ts`: `activeOffsetRef`/`allOffsetRef`
+  (OFFSET counters) replaced with `activeCursorRef`/`allCursorRef` (last-seen
+  `farm_id`), advanced from the last row of each returned page rather than
+  arithmetic on requested-offset + response-length. Added `allCountRef`, a
+  plain cumulative row counter *decoupled* from the cursor -- needed because
+  the mount effect's self-heal invariant (`farms.length` must equal the
+  "all" phase's total when `phase: "done"`) previously relied on
+  `allOffsetRef` doing double duty as both "resume position" and "count
+  fetched so far," which a farm_id cursor value can't do on its own.
+  `PROGRESS_CACHE_KEY` bumped `_v2` -> `_v3` (shape and semantics both
+  changed; an old record's numeric offsets would be silently wrong read
+  back as farm_id cursors).
+
+#### 2. Bigger pages
+* `PAGE_SIZE` (the "all" phase) raised from 100 to 1000 -- the backend's own
+  max `limit`. Was `ACTIVE_PAGE_SIZE`, a separate constant already at 1000
+  from the earlier active-phase speedup entry; now unified into one constant
+  since both phases use the same value. Cuts the "all" phase's walk from
+  ~486 requests to ~49.
+
+#### 3. Index for the active_only filter
+* `backend/app/models/models.py`: `InsuranceRecord.__table_args__` gained
+  `Index("ix_insurance_records_active_lookup", "effectivity_date",
+  "expiry_date", "farm_id")` -- a covering index (index-only scan) for
+  `active_only=True`'s `WHERE effectivity_date <= today AND expiry_date >=
+  today` / `DISTINCT farm_id` query.
+* `backend/init_schema.sql`: matching `CREATE INDEX` added, for future fresh
+  installs.
+* `backend/migrations/2026-08-09_farms_perf.sql` (new): standalone
+  `CREATE INDEX CONCURRENTLY` for Fabio's already-populated DB (re-running
+  `init_schema.sql` wholesale would `DROP TABLE` everything).
+
+#### 4. Optional Redis page-level cache
+* `backend/app/core/farms_cache.py` (new): `get_cached_farms_page()`/
+  `cache_farms_page()`/`invalidate_farms_cache()`. A no-op unless
+  `REDIS_URL` is set -- deliberately not a forced dependency (not added to
+  `requirements.txt`); degrades gracefully the same way the DB/venv/npm
+  handoff rules in `.claude/CLAUDE.md` treat any new local infrastructure.
+  Rationale: multiple real users each independently walking the same
+  ~48,588-farm dataset would otherwise each cost the DB the same queries
+  redundantly -- a shared cache means only the first request per page
+  actually hits Postgres. (Client-side IndexedDB caching only helps repeat
+  visits from the *same* browser, not a different user's first walk.)
+* `backend/app/api/farms.py`: checks the cache first, populates it after a
+  cache miss.
+* `backend/app/api/upload.py`: `invalidate_farms_cache()` called after a
+  successful CSV ingest and after a GPX boundary update (both change data
+  the cache could be serving stale).
+* `backend/seed_active_insurance.py`: also invalidates (best-effort, since
+  it writes outside the app) after inserting.
+
+#### 5. Materialized view for "most recent insurance per farm"
+* `backend/app/core/farms_view.py` (new): `mv_farm_latest_insurance`
+  precomputes what `list_farms()` otherwise resolves via bulk-fetch +
+  Python reduction on every request. `materialized_view_available()` checks
+  existence once and memoizes *only* a positive result -- a negative result
+  is cheaply re-checked every call, so applying the migration mid-session
+  is picked up by the very next request without restarting the backend
+  (this needed a follow-up fix after Fabio ran the migration and the
+  already-running process kept using the fallback path, having cached
+  `False` from testing before the migration existed).
+  `refresh_farm_latest_insurance_view()` uses `REFRESH ... CONCURRENTLY`
+  (needs the view's unique index) and is called from the same write paths
+  as `invalidate_farms_cache()` above.
+* `backend/app/api/farms.py`: uses the view when available, falls back to
+  the original bulk-fetch-and-reduce-in-Python path (with the Round 1
+  `.nullslast()` fix preserved) otherwise.
+* `backend/migrations/2026-08-09_farms_perf.sql`: `CREATE MATERIALIZED VIEW
+  IF NOT EXISTS` + its required unique index, `DISTINCT ON (farm_id) ...
+  ORDER BY farm_id, effectivity_date DESC NULLS LAST`.
+* `backend/init_schema.sql`: matching statements added for future fresh
+  installs.
+
+#### 6. DB connection pooling
+* `backend/app/core/database.py`: `create_engine(...)` gained explicit
+  `pool_size=10, max_overflow=20` (up from SQLAlchemy's unstated defaults of
+  5/10, sized for one local dev process, not concurrent real users),
+  `pool_pre_ping=True` (transparently replaces a connection that went stale
+  while idle instead of surfacing as a request failure), `pool_recycle=1800`
+  (proactively retires connections older than 30 minutes).
+
+### Status / Next Steps
+* Migration applied by Fabio (`psql -U agrisure_admin -d agrisure_db -f
+  migrations/2026-08-09_farms_perf.sql`) -- succeeded.
+* Verified via curl: keyset pagination pages correctly (cursor advances,
+  `has_more`/`total` semantics correct), materialized-view path returns the
+  same correct data as the Python fallback did.
+* Verified by Fabio: cleared frontend cache (`agrisuregis_farms_progress_v2`
+  removed, IndexedDB `agrisuregis` deleted, per the `_v3` bump), reloaded --
+  farms load correctly, counts reach the right totals, no errors.
+* Redis caching (item 4) is written but not enabled -- would need `pip
+  install redis`, a running Redis server, and `REDIS_URL` set in
+  `backend/.env`, none of which Fabio has done yet. Everything works
+  identically without it; enabling it is a future opt-in, not required.
+* `backend/seed_active_insurance.py`'s changelog entry (the one directly
+  above this one) is now slightly out of date in one respect: it predates
+  the NULLS FIRST bug fix, so re-reading it without this entry would miss
+  why the active-insurance data it seeds initially displayed incorrectly.
+

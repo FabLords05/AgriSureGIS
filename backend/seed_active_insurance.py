@@ -87,6 +87,34 @@ def run():
         inserted += cur.rowcount
 
     conn.commit()
+
+    # This script writes straight to Postgres, bypassing the app entirely --
+    # so it also has to explicitly clean up after itself the two things the
+    # app would otherwise keep in sync on its own write paths (see
+    # app/core/farms_cache.py and app/core/farms_view.py). Both no-op
+    # gracefully if that infrastructure isn't set up, so this is safe to
+    # leave in regardless of whether either optimization has been applied.
+    try:
+        cur.execute("REFRESH MATERIALIZED VIEW CONCURRENTLY mv_farm_latest_insurance")
+        conn.commit()
+        print("Refreshed mv_farm_latest_insurance.")
+    except psycopg2.Error:
+        conn.rollback()  # view doesn't exist yet -- fine, nothing to refresh
+
+    try:
+        import os
+
+        import redis
+
+        redis_url = os.getenv("REDIS_URL")
+        if redis_url:
+            client = redis.from_url(redis_url, socket_connect_timeout=1, socket_timeout=1)
+            for key in client.scan_iter("agrisuregis:farms:*"):
+                client.delete(key)
+            print("Invalidated Redis farms cache.")
+    except Exception:
+        pass  # Redis not installed/configured/running -- nothing to invalidate
+
     cur.close()
     conn.close()
     print(f"Inserted {inserted} new active InsuranceRecord rows.")
