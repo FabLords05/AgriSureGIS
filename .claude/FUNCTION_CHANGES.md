@@ -3092,3 +3092,65 @@ all of it applied at once.
   the NULLS FIRST bug fix, so re-reading it without this entry would miss
   why the active-insurance data it seeds initially displayed incorrectly.
 
+## [2026-08-10] - REDIS_URL documented; TCB polling interval moved to minutes
+
+Two small follow-ups from the same day's remote-server-migration session.
+
+### 1. `REDIS_URL` documented (`backend/.env.example`, `.claude/ENV_GUIDE.md`)
+Fabio set up Redis locally (installed via `pacman`, started the service) to
+actually activate the optional page cache from the 2026-08-09 performance
+pass (`backend/app/core/farms_cache.py`). Added `REDIS_URL=` to
+`.env.example` with a placeholder and a row to `ENV_GUIDE.md`'s variable
+table, per that guide's own rule 4 ("add new variables to `.env.example` in
+the same commit"). `backend/.env` itself (gitignored) was updated directly
+with `REDIS_URL=redis://localhost:6379/0`, not part of this commit.
+
+### 2. TCB polling interval: hours -> minutes
+Fabio asked for the PAGASA bulletin scraper's polling interval to support
+15-minute granularity ("every 15 mins checking"). The prior implementation
+was hardcoded to whole hours at every layer (DB column, API validation,
+scheduler calls) with a 1-hour minimum -- confirmed with Fabio that this
+means the scraper hitting PAGASA's site up to 4x more often than that
+previous floor, since this polls an external third-party site, before
+implementing.
+
+#### Files
+* `backend/app/models/models.py`: `ParserSettings.polling_interval_hours`
+  (Integer, default 3) -> `polling_interval_minutes` (Integer, default 180
+  -- same real-world default of "every 3 hours," just expressed in minutes).
+* `backend/app/api/bulletins.py`: `ParserSettingsUpdate.polling_interval_hours`
+  (`ge=1, le=24`) -> `polling_interval_minutes` (`ge=15, le=1440` -- 1440 =
+  24h, same upper bound as before, just in minutes). `GET`/`PUT
+  /api/bulletins/settings` request/response bodies renamed to match.
+* `backend/app/core/scheduler.py`: `build_scheduler()`/
+  `reschedule_bulletin_job()` now pass `minutes=` to APScheduler instead of
+  `hours=`.
+* `backend/app/main.py`: reads `settings.polling_interval_minutes` (default
+  180 if no row exists yet) instead of `polling_interval_hours` (default 3)
+  when building the scheduler at startup.
+* `frontend/src/lib/api.ts`: `ParserSettings.polling_interval_minutes`;
+  `updateParserSettings(minutes)` (was `(hours)`).
+* `frontend/src/app/components/CalibrationModule.tsx`: `parserInterval`
+  state's default changed `3` -> `180`; the "TCB Polling Interval" input's
+  label, `min`/`max`/`step` (`15`/`1440`/`15`), and helper text all updated
+  to describe minutes instead of hours.
+* `backend/tests/test_parser_settings_api.py`: updated field names/values
+  and bound-rejection tests (`14`/`1441` instead of `0`/`25`).
+* `backend/migrations/2026-08-10_polling_interval_minutes.sql` (new):
+  `ALTER TABLE ... RENAME COLUMN polling_interval_hours TO
+  polling_interval_minutes`, then `UPDATE ... SET polling_interval_minutes
+  = polling_interval_minutes * 60` -- converts any already-persisted value
+  (e.g. `3`) to the equivalent real-world interval in minutes (`180`)
+  instead of silently reinterpreting it as 3 *minutes*, which would have
+  made the scheduler run 60x more often than intended for anyone with a
+  non-default saved interval.
+* `backend/init_schema.sql`: matching column rename for future fresh installs.
+
+### Status / Next Steps
+* `*.dump` added to `.gitignore` -- the `pg_dump` output used to migrate
+  data to the remote server (`agrisure_db.dump`, 1.7MB) is a data snapshot,
+  not source, and can carry real farmer/insurance data.
+* Not yet verified -- needs the migration applied and the backend restarted
+  on whichever DB(s) still have the old `polling_interval_hours` column
+  (both Fabio's local dev DB and the newly-provisioned remote server's DB).
+

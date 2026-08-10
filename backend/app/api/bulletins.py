@@ -26,13 +26,16 @@ TEMP_DIR = "temp_bulletins"
 
 
 class ParserSettingsUpdate(BaseModel):
-    polling_interval_hours: int = Field(..., ge=1, le=24)
+    # Minutes, not hours (was `polling_interval_hours`, `ge=1, le=24`, until
+    # 2026-08-10) -- Fabio wanted sub-hour granularity, down to 15 minutes.
+    # Upper bound kept equivalent to the old 24h max (24 * 60 = 1440).
+    polling_interval_minutes: int = Field(..., ge=15, le=1440)
 
 
 def _get_or_create_settings(db: Session) -> ParserSettings:
     settings = db.query(ParserSettings).first()
     if not settings:
-        settings = ParserSettings(polling_interval_hours=3)
+        settings = ParserSettings(polling_interval_minutes=180)
         db.add(settings)
         db.commit()
         db.refresh(settings)
@@ -42,12 +45,12 @@ def _get_or_create_settings(db: Session) -> ParserSettings:
 @router.get("/settings")
 def get_parser_settings(db: Session = Depends(get_db)):
     """
-    Returns the currently persisted TCB polling interval (hours) that drives
-    the background PAGASA scraper — backs the Calibration screen's "TCB
-    Polling Interval" field.
+    Returns the currently persisted TCB polling interval (minutes) that
+    drives the background PAGASA scraper — backs the Calibration screen's
+    "TCB Polling Interval" field.
     """
     settings = _get_or_create_settings(db)
-    return {"polling_interval_hours": settings.polling_interval_hours}
+    return {"polling_interval_minutes": settings.polling_interval_minutes}
 
 
 @router.put("/settings")
@@ -57,13 +60,13 @@ def update_parser_settings(payload: ParserSettingsUpdate, request: Request, db: 
     background scraper job to match, without requiring a backend restart.
     """
     settings = _get_or_create_settings(db)
-    settings.polling_interval_hours = payload.polling_interval_hours
+    settings.polling_interval_minutes = payload.polling_interval_minutes
     db.commit()
     db.refresh(settings)
 
-    reschedule_bulletin_job(request.app.state.scheduler, settings.polling_interval_hours)
+    reschedule_bulletin_job(request.app.state.scheduler, settings.polling_interval_minutes)
 
-    return {"polling_interval_hours": settings.polling_interval_hours}
+    return {"polling_interval_minutes": settings.polling_interval_minutes}
 
 
 @router.get("/")

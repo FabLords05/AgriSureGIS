@@ -24,14 +24,14 @@ async def lifespan(app: FastAPI):
     db = SessionLocal()
     try:
         settings = db.query(models.ParserSettings).first()
-        interval = settings.polling_interval_hours if settings else 3
+        interval = settings.polling_interval_minutes if settings else 180
     finally:
         db.close()
 
     scheduler = build_scheduler(interval)
     scheduler.start()
     app.state.scheduler = scheduler
-    logger.info("PAGASA polling scheduler started, interval=%dh.", interval)
+    logger.info("PAGASA polling scheduler started, interval=%dmin.", interval)
 
     yield
 

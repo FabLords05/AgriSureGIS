@@ -72,7 +72,7 @@ export function CalibrationModule({ coverageRatePerHa, onCoverageRateChange }: C
   const [sessionTimeout, setSessionTimeout] = useState(5);
   const [autoBackup, setAutoBackup]     = useState(true);
   const [emailAlerts, setEmailAlerts]   = useState(true);
-  const [parserInterval, setParserInterval] = useState(3);
+  const [parserInterval, setParserInterval] = useState(180); // minutes -- was 3 (hours) until 2026-08-10
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [confirm, setConfirm]           = useState<{ msg: string; fn: () => void } | null>(null);
   const [backupRunning, setBackupRunning] = useState(false);
@@ -96,7 +96,7 @@ export function CalibrationModule({ coverageRatePerHa, onCoverageRateChange }: C
   useEffect(() => {
     getParserSettings()
       .then(s => {
-        setParserInterval(s.polling_interval_hours);
+        setParserInterval(s.polling_interval_minutes);
         setBackendOk(true);
       })
       .catch(() => setBackendOk(false)) // keep the default of 3 if the backend isn't reachable yet
@@ -444,14 +444,14 @@ export function CalibrationModule({ coverageRatePerHa, onCoverageRateChange }: C
         <Section title="PAGASA Parser & Notification Settings" icon={<Bell size={15} />}>
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="text-[11px] font-medium block mb-1">TCB Polling Interval (hours)</label>
+              <label className="text-[11px] font-medium block mb-1">TCB Polling Interval (minutes)</label>
               <input
-                type="number" min={1} max={24}
+                type="number" min={15} max={1440} step={15}
                 value={parserInterval}
                 onChange={e => setParserInterval(Number(e.target.value))}
                 className="w-full border border-border rounded-lg px-3 py-2 text-[11px] bg-background focus:outline-none focus:border-[#166534]"
               />
-              <p className="text-[9px] text-muted-foreground mt-1">How often to check the PAGASA website for new bulletins during an active typhoon.</p>
+              <p className="text-[9px] text-muted-foreground mt-1">How often to check the PAGASA website for new bulletins during an active typhoon (15 min minimum).</p>
             </div>
             <div>
               <label className="text-[11px] font-medium block mb-1">Alert Email Recipients</label>

@@ -186,11 +186,13 @@ CREATE TABLE tbl_area_exposure_summary (
 -- APScheduler job that drives automated PAGASA bulletin ingestion).
 CREATE TABLE tbl_parser_settings (
     setting_id SERIAL PRIMARY KEY,
-    polling_interval_hours INT NOT NULL DEFAULT 3,
+    -- Minutes, not hours (as of 2026-08-10 -- see
+    -- backend/migrations/2026-08-10_polling_interval_minutes.sql). 180 = 3 hours.
+    polling_interval_minutes INT NOT NULL DEFAULT 180,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-INSERT INTO tbl_parser_settings (polling_interval_hours) VALUES (3);
+INSERT INTO tbl_parser_settings (polling_interval_minutes) VALUES (180);
 
 -- 6. Optimize Spatial Queries
 CREATE INDEX idx_farms_location_geom ON tbl_farms USING GIST(location_geom);

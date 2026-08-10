@@ -7,6 +7,7 @@ Copy `.env.example` to `.env` in the `backend/` directory. **Do not commit `.env
 | Variable | Description | Where to get it |
 |---|---|---|
 | `DATABASE_URL` | PostGIS database connection string. | Provided by Fabio (DB Admin). |
+| `REDIS_URL` | Optional -- `GET /api/farms/`'s page cache (`backend/app/core/farms_cache.py`). Unset/empty means caching is a no-op; nothing else changes. | A locally running Redis server, e.g. `redis://localhost:6379/0`. |
 | `PAGASA_SCRAPE_URL` | PAGASA Tropical Cyclone Bulletin webpage URL. | PAGASA official website. |
 | `SMTP_HOST` | SMTP server address for email alerts. | Internal mail server / SMTP provider. |
 | `SMTP_USER` | SMTP server login username. | Mail administrator. |

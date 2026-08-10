@@ -42,12 +42,12 @@ def run_scheduled_scrape() -> None:
         db.close()
 
 
-def build_scheduler(initial_interval_hours: int) -> BackgroundScheduler:
+def build_scheduler(initial_interval_minutes: int) -> BackgroundScheduler:
     scheduler = BackgroundScheduler()
     scheduler.add_job(
         run_scheduled_scrape,
         "interval",
-        hours=initial_interval_hours,
+        minutes=initial_interval_minutes,
         id=BULLETIN_JOB_ID,
         replace_existing=True,
         max_instances=1,  # guard against overlapping runs if a scrape outlasts the interval
@@ -55,6 +55,6 @@ def build_scheduler(initial_interval_hours: int) -> BackgroundScheduler:
     return scheduler
 
 
-def reschedule_bulletin_job(scheduler: BackgroundScheduler, new_interval_hours: int) -> None:
-    scheduler.reschedule_job(BULLETIN_JOB_ID, trigger="interval", hours=new_interval_hours)
-    logger.info("Rescheduled PAGASA poll job to every %dh.", new_interval_hours)
+def reschedule_bulletin_job(scheduler: BackgroundScheduler, new_interval_minutes: int) -> None:
+    scheduler.reschedule_job(BULLETIN_JOB_ID, trigger="interval", minutes=new_interval_minutes)
+    logger.info("Rescheduled PAGASA poll job to every %dmin.", new_interval_minutes)

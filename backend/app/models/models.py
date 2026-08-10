@@ -206,5 +206,10 @@ class ParserSettings(Base):
     __tablename__ = "tbl_parser_settings"
 
     setting_id = Column(Integer, primary_key=True, index=True)
-    polling_interval_hours = Column(Integer, nullable=False, default=3)
+    # Minutes, not hours -- was polling_interval_hours (Integer, min 1) until
+    # 2026-08-10, when Fabio asked for sub-hour granularity (down to 15 min).
+    # Default 180 preserves the old default of "every 3 hours."
+    # backend/migrations/2026-08-10_polling_interval_minutes.sql renames and
+    # converts (x * 60) any existing value for already-provisioned DBs.
+    polling_interval_minutes = Column(Integer, nullable=False, default=180)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())

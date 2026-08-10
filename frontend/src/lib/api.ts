@@ -97,7 +97,8 @@ export interface ParseBulletinsResult {
 }
 
 export interface ParserSettings {
-  polling_interval_hours: number;
+  // Minutes, not hours (was polling_interval_hours until 2026-08-10).
+  polling_interval_minutes: number;
 }
 
 export interface TcbSignal {
@@ -209,11 +210,11 @@ export function getParserSettings(): Promise<ParserSettings> {
   return request<ParserSettings>('/api/bulletins/settings');
 }
 
-export function updateParserSettings(hours: number): Promise<ParserSettings> {
+export function updateParserSettings(minutes: number): Promise<ParserSettings> {
   return request<ParserSettings>('/api/bulletins/settings', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ polling_interval_hours: hours }),
+    body: JSON.stringify({ polling_interval_minutes: minutes }),
   });
 }
 
