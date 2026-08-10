@@ -1,8 +1,22 @@
 # Base image Python version must match the venv actually running on
-# 192.168.1.41 -- confirm via `python --version` there first (see the
-# SSH handoff sequence) before trusting this tag. Swap it if the remote
-# venv is on a different minor version.
-FROM python:3.13-slim
+# 192.168.1.41 (confirmed 3.13, matches this tag).
+#
+# Pinned to a digest, not just the mutable ":3.13-slim" tag. BuildKit always
+# resolves a tag against the registry (even when a matching image is already
+# cached locally) to check whether the tag now points somewhere else -- that
+# resolution step is what was failing on 192.168.1.41 over SSH (Windows
+# Credential Manager/DPAPI needs an interactive logon session an SSH-created
+# session doesn't have -- see backend/docker-compose.yml/project memory).
+# A digest reference is immutable, so BuildKit can match it against the
+# local cache directly, no registry contact needed -- this is what actually
+# lets `docker compose build` work over SSH for ordinary code-only rebuilds
+# going forward. Only re-pulling a genuinely different image (a version
+# bump, not this exact digest) needs the console again.
+#
+# Digest is linux/amd64 for python:3.13-slim, confirmed via Docker Hub's
+# API on 2026-08-11: https://hub.docker.com/_/python/tags?name=3.13-slim
+# If this ever needs updating, re-check that URL rather than guessing.
+FROM python:3.13-slim@sha256:69e18bd8d831d88e0ef70239dc7771ab7c28bc296ae78ac75cde71e60aa4434f
 
 WORKDIR /app
 

@@ -3364,5 +3364,50 @@ real GPX-surveyed boundaries.
     `CircleMarker` import (both otherwise-unused after the above).
 
 #### Status / Next Steps
-* Not yet verified in the browser -- handed off to Fabio.
+* Verified 2026-08-11 -- circles gone, everything else (selection, GPX
+  upload targeting) still works.
+
+## [2026-08-11] - Fix backend Docker build needing physical console (pin FROM to a digest)
+
+Fabio wants ordinary backend code updates buildable entirely over SSH,
+without the physical-console requirement hit during the initial
+containerization work ([[project_docker_containerization]]). Root cause
+was more specific than first thought: it's not just about pulling a
+*brand-new* image -- `docker images -a` on 192.168.1.41 showed
+`python:3.13-slim` was never actually stored as its own locally-tagged
+image at all (only the final `backend-backend:latest` image existed).
+Without a local tag-to-digest mapping, BuildKit's `FROM python:3.13-slim`
+step has to ask the registry "what does this tag currently point to?" on
+*every* build, not just the first -- and that resolution call is what
+hits the Windows Credential Manager/DPAPI-over-SSH limitation
+(`error getting credentials ... A specified logon session does not
+exist.`), independent of whether any actual layers end up needing to be
+downloaded.
+
+Fix: pin the Dockerfile's `FROM` to an exact digest instead of the
+mutable `:3.13-slim` tag. A digest reference is immutable, so BuildKit
+can match it against the local cache directly with no ambiguity to
+resolve -- no registry contact needed at all once it's cached under that
+exact digest.
+
+#### Files
+* `backend/Dockerfile`: `FROM python:3.13-slim` -> `FROM
+  python:3.13-slim@sha256:69e18bd8d831d88e0ef70239dc7771ab7c28bc296ae78ac75cde71e60aa4434f`
+  (linux/amd64, confirmed via Docker Hub's public API, not guessed).
+
+#### Status / Next Steps
+* Not yet tested. The *first* build against this new digest will likely
+  still need the console (this exact reference was never pulled before,
+  even though its content may overlap with what's already cached from
+  earlier builds) -- but every build after that should work over SSH,
+  since the pinned digest never needs re-resolving. This is a one-time
+  cost to permanently fix future rebuilds, not a full solution to every
+  console-only case -- a genuinely new/updated base image (a real version
+  bump) would still need the console once, same as this.
+* `redis:alpine` and `docker.osgeo.org/geoserver:3.0.x` are unaffected --
+  those are `image:`-referenced (pulled, not built) in
+  `backend/docker-compose.yml`, and `docker compose up`/`restart`'s
+  default pull policy only contacts the registry if the tag isn't already
+  present locally at all (it is, for both) -- no equivalent freshness-check
+  behavior to BuildKit's build-time tag resolution applies to them.
 
