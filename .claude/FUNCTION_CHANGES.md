@@ -3313,13 +3313,56 @@ Docker Desktop itself.
     `192.168.1.41:8080`.
 
 #### Status / Next Steps
-* Not yet deployed -- adding the `GEOSERVER_ADMIN_USER`/`PASSWORD` lines to
-  the remote box's `backend/.env`, the new Windows Firewall rule for port
-  8080, `docker compose up -d` (console-only for the initial build/pull),
-  and the actual workspace/store/layer publishing (steps 2-6 of the
-  rewritten runbook) are all still pending handoff to Fabio's own
-  SSH/console session.
-* `frontend/.env`'s `VITE_GEOSERVER_URL` intentionally not changed yet --
-  will point at `192.168.1.41:8080` (or the Tailscale address) once
-  GeoServer is actually up and layers are published, not before.
+* **Deployed and verified 2026-08-11.** `.env` credentials, firewall rule,
+  `docker compose up -d` (needed the physical console the first time --
+  hit the same Docker Desktop credential-helper/logon-session bug as the
+  `backend` image, same fix), workspace/datastore, and both layers are
+  all live. WMS/WFS endpoints confirmed responding; frontend confirmed
+  loading boundaries from GeoServer with the overlay toggle working.
+* Hit and worked around a `docker.osgeo.org/geoserver:3.0.x`-specific bug:
+  "Compute from native bounds" corrupts the Lat/Lon Bounding Box (garbage
+  `0`/`-1` values) even though native SRS is already EPSG:4326 and no real
+  reprojection is needed. Workaround: use "Compute from data" only, then
+  manually copy those same values into the Lat/Lon Bounding Box fields.
+  `tbl_farms` also needed a real GPX uploaded first (this DB had zero
+  farms with `location_geom`) before it had any geometry to compute a bbox
+  from at all -- used a `backend/mock_data/gpx/` test file. See
+  `project_geoserver_deployed` memory for full details.
+* `frontend/.env`'s `VITE_GEOSERVER_URL` now set to
+  `http://100.80.128.92:8080/geoserver` (Tailscale address, matching
+  `VITE_API_BASE_URL`) -- gitignored, local-only change.
+
+## [2026-08-11] - Spatial Analysis map: remove approximate-placement circle markers for unsurveyed farms
+
+Fabio flagged solid gray blob shapes on the map (screenshot around
+Manolo Fortich, Bukidnon) suspecting they weren't real farm locations.
+Confirmed: `GISLeafletMap.tsx`'s `MUNICIPALITY_CENTERS` only defines real
+coordinates for 2 municipalities (`Talakag`, `Claveria`); every farm in
+any other municipality fell back to one shared `DEFAULT_CENTER` point.
+With ~48,588 farms and only 1 having a real GPX boundary (see the
+GeoServer deployment entry above), nearly the entire table collapsed onto
+2-3 shared points, rendered as a small grid of `<CircleMarker>`s dense
+enough to look like solid blobs rather than individual farm positions.
+
+Confirmed with Fabio: remove the circle-marker rendering entirely rather
+than improve the placement algorithm — the map now only shows farms with
+real GPX-surveyed boundaries.
+
+#### Files
+* `frontend/src/app/components/GISLeafletMap.tsx`:
+  - Removed the `visibleUnsurveyedFarms.map(...)` `<CircleMarker>` render
+    loop (was the "click to select as an upload target" affordance for
+    unsurveyed farms) and the now-unused `visibleUnsurveyedFarms` `useMemo`
+    + `pointInBounds()` helper it alone depended on.
+  - Kept `unsurveyedFarms`, `approxPlacements`, and `approximateFarmPosition()`
+    intact -- selecting an unsurveyed farm via the farm-records table still
+    flies the map to its approximate town-center position
+    (`FlyToSelectedFarm`'s `approxPos` prop), just without drawing a marker
+    there. Selecting one for GPX upload still works via the table's row
+    click, unaffected by this change.
+  - Removed the now-stale "Approximate (no GPX yet)" legend row and the
+    `CircleMarker` import (both otherwise-unused after the above).
+
+#### Status / Next Steps
+* Not yet verified in the browser -- handed off to Fabio.
 

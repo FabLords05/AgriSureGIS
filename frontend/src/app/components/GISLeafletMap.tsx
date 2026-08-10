@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { MapContainer, TileLayer, WMSTileLayer, GeoJSON, CircleMarker, Marker, Popup, useMap, useMapEvents } from "react-leaflet";
+import { MapContainer, TileLayer, WMSTileLayer, GeoJSON, Marker, Popup, useMap, useMapEvents } from "react-leaflet";
 import type { Layer } from "leaflet";
 import type { Feature, FeatureCollection } from "geojson";
 import L from "leaflet";
@@ -168,11 +168,11 @@ function FlyToMunicipality({ municipality, boundaries }: { municipality: string 
 // table (see useFarmsData.ts), and giving every one of those farms its own
 // live Leaflet layer regardless of what's actually on screen is what made
 // panning/zooming (and every background page landing) visibly janky. Each
-// farm's position is reduced once to a cheap bounding box (surveyed, real
-// GPX polygon) or reuses the existing approximate lat/lng (unsurveyed), and
-// only farms whose position currently intersects the map's visible bounds
-// get a real <GeoJSON>/<CircleMarker> layer -- see surveyedBBoxByFarmId,
-// visibleSurveyedFarms, visibleUnsurveyedFarms below. Recomputed only on
+// surveyed farm's position is reduced once to a cheap bounding box, and only
+// farms whose position currently intersects the map's visible bounds get a
+// real <GeoJSON> layer -- see surveyedBBoxByFarmId, visibleSurveyedFarms
+// below. (Unsurveyed farms are no longer rendered on the map at all -- see
+// the "removed 2026-08-11" comment further down.) Recomputed only on
 // moveend/zoomend, Leaflet's own discrete end-of-gesture events, not on
 // every continuous move/zoom tick during a drag -- no extra debounce needed.
 // ---------------------------------------------------------------------------
@@ -205,10 +205,6 @@ function computeGeoJsonBBox(geom: GeoJsonMultiPolygon): BBox {
 function bboxIntersects(bbox: BBox, bounds: SimpleBounds): boolean {
   const [minLng, minLat, maxLng, maxLat] = bbox;
   return maxLng >= bounds.west && minLng <= bounds.east && maxLat >= bounds.south && minLat <= bounds.north;
-}
-
-function pointInBounds(lat: number, lng: number, bounds: SimpleBounds): boolean {
-  return lat >= bounds.south && lat <= bounds.north && lng >= bounds.west && lng <= bounds.east;
 }
 
 // Reports the map's current bounds on mount (the real, pixel-derived initial
@@ -317,15 +313,14 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
   const [mapBounds, setMapBounds] = useState<SimpleBounds | null>(null);
   const handleBoundsChange = useCallback((b: L.LatLngBounds) => setMapBounds(toSimpleBounds(b)), []);
 
-  // Rendered-layer sets -- viewport-culled subsets of surveyedFarms/
-  // unsurveyedFarms, used ONLY by the two render loops below. Deliberately
-  // NOT used for `selectedFarm`, `approxPlacements`, FlyToSelectedFarm, or
-  // the legend -- those must keep working against the full farm set
-  // regardless of what's currently panned into view (e.g. clicking a table
-  // row for a farm outside the current viewport still needs to resolve and
-  // fly to it; flyTo's own moveend at the end of that animation is what
-  // brings the farm into visibleSurveyedFarms/visibleUnsurveyedFarms once
-  // the camera actually lands on it).
+  // Rendered-layer set -- viewport-culled subset of surveyedFarms, used ONLY
+  // by the polygon render loop below. Deliberately NOT used for
+  // `selectedFarm`, `approxPlacements`, FlyToSelectedFarm, or the legend --
+  // those must keep working against the full farm set regardless of what's
+  // currently panned into view (e.g. clicking a table row for a farm outside
+  // the current viewport still needs to resolve and fly to it; flyTo's own
+  // moveend at the end of that animation is what brings the farm into
+  // visibleSurveyedFarms once the camera actually lands on it).
   const visibleSurveyedFarms = useMemo(() => {
     if (!mapBounds) return [];
     return surveyedFarms.filter(f => {
@@ -333,14 +328,6 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
       return bbox ? bboxIntersects(bbox, mapBounds) : false;
     });
   }, [surveyedFarms, surveyedBBoxByFarmId, mapBounds]);
-
-  const visibleUnsurveyedFarms = useMemo(() => {
-    if (!mapBounds) return [];
-    return unsurveyedFarms.filter(f => {
-      const pos = approxPlacements.get(f.farm_id);
-      return pos ? pointInBounds(pos[0], pos[1], mapBounds) : false;
-    });
-  }, [unsurveyedFarms, approxPlacements, mapBounds]);
 
   const selectedFarm = selectedFarmId != null ? farms.find(f => f.farm_id === selectedFarmId) : null;
   const uniqueAffectedAreas = Array.from(new Set(affectedAreas.map(s => s.area_name)));
@@ -448,28 +435,13 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
           );
         })}
 
-        {/* Farms without a GPX boundary yet — approximate placement, click to select as an upload target */}
-        {visibleUnsurveyedFarms.map(farm => {
-          const pos = approxPlacements.get(farm.farm_id);
-          if (!pos) return null;
-          const isSelected = farm.farm_id === selectedFarmId;
-          return (
-            <CircleMarker
-              key={farm.farm_id}
-              center={pos}
-              radius={isSelected ? 8 : 6}
-              pathOptions={{
-                color: isSelected ? "#ffffff" : "#9ca3af",
-                fillColor: isSelected ? "#f59e0b" : "#9ca3af",
-                fillOpacity: isSelected ? 0.9 : 0.6,
-                weight: isSelected ? 3 : 1.5,
-              }}
-              eventHandlers={{
-                click: () => onSelectFarm(farm.farm_id === selectedFarmId ? null : farm.farm_id),
-              }}
-            />
-          );
-        })}
+        {/* Farms without a GPX boundary yet are intentionally not rendered here
+            (removed 2026-08-11 -- with almost the entire farm table lacking real
+            geometry, MUNICIPALITY_CENTERS' shared fallback points meant thousands
+            of farms collapsed into a few solid-looking blobs, not real locations).
+            approxPlacements (below) is kept -- selecting one of these farms from
+            the table still flies the map to its approximate town-center position,
+            just without drawing a marker there. */}
       </MapContainer>
 
       {/* GeoServer WMS overlay toggle — only shown when VITE_GEOSERVER_URL is configured */}
@@ -487,13 +459,9 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
       {/* Legend */}
       <div className="absolute bottom-3 left-3 bg-card/90 border border-border rounded-lg px-3 py-2 shadow-md z-[1000]">
         <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5">Farm Boundary</p>
-        <div className="flex items-center gap-1.5 mb-0.5">
+        <div className="flex items-center gap-1.5">
           <span className="w-3 h-3 rounded-sm inline-block" style={{ backgroundColor: "#1e3a5f" }} />
           <span className="text-[10px]">Surveyed (GPX)</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 rounded-full inline-block" style={{ backgroundColor: "#9ca3af" }} />
-          <span className="text-[10px]">Approximate (no GPX yet)</span>
         </div>
       </div>
 
