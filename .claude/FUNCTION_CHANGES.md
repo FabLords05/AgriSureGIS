@@ -3154,3 +3154,52 @@ implementing.
   on whichever DB(s) still have the old `polling_interval_hours` column
   (both Fabio's local dev DB and the newly-provisioned remote server's DB).
 
+## [2026-08-10] - Containerize backend + Redis for the remote mock server
+
+Fabio's plan: run the backend and Redis (the optional page cache from the
+2026-08-09 performance pass, still never confirmed working anywhere) as
+Docker containers on the remote mock server (192.168.1.41), instead of the
+bare `uvicorn --reload` process it runs today, so that a `redis:alpine`
+sibling container finally activates `backend/app/core/farms_cache.py` for
+real. Postgres stays native on that machine (already `pg_restore`'d with
+~48,588 farms / 49,588 insurance records) -- only the backend app and
+Redis move into containers. Chose Redis-as-a-container over the
+earlier-discussed Memurai-on-bare-Windows alternative once Docker was
+already going to be introduced for the backend anyway.
+
+#### Files
+* `backend/requirements.txt`: committed the `redis==8.1.0` line (added
+  locally earlier but not yet committed) -- without this, `pip install -r
+  requirements.txt` inside the image wouldn't install `redis`, and
+  `farms_cache.py`'s `import redis` would fail silently inside its
+  `except Exception` guard, reproducing the exact "caching never actually
+  engages" gap this change exists to close.
+* `backend/Dockerfile` (new): `python:3.13-slim` base (placeholder --
+  must be confirmed against the remote venv's actual Python version before
+  building), installs `requirements.txt`, copies `app/` (including the
+  bundled `app/data/psgc_region10_boundaries.csv` PSGC lookup), no
+  `--reload` (deployed service now, not live-edited -- a code change means
+  `git pull` + `docker compose up --build`).
+* `backend/docker-compose.yml` (new): `backend` service (builds from the
+  Dockerfile, publishes `8000:8000`, reads `backend/.env` via `env_file:`
+  rather than inlining secrets in a tracked file, `depends_on: redis`) +
+  `redis` service (`redis:alpine`, named volume for restart persistence,
+  port intentionally not published -- only `backend` talks to it over
+  compose's internal DNS as `redis://redis:6379/0`).
+* `backend/.dockerignore` (new): excludes `venv/`/`.venv/` (hundreds of MB
+  with geopandas/numpy/pandas that would otherwise re-upload into the
+  Docker build context on every build), `__pycache__/`, `.env`, etc.
+
+#### Status / Next Steps
+* Not yet deployed -- remote-box steps (Postgres `listen_addresses`/
+  `pg_hba.conf`/firewall changes to let the container reach native
+  Postgres via `host.docker.internal`, `backend/.env` edit, `docker
+  compose build`/`up`, and updating `C:\Users\admin\check_backend.ps1`'s
+  restart action from spawning bare `uvicorn` to `docker compose restart
+  backend`) are all pending handoff to Fabio's own SSH session, one
+  command at a time.
+* Full plan: `/home/fabio/.claude/plans/so-this-is-the-happy-whisper.md`.
+* Separately, Tailscale is being set up on the same remote box for
+  outside-LAN SSH access -- independent of this containerization work,
+  no code/repo changes involved.
+
