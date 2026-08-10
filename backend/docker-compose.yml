@@ -19,5 +19,31 @@ services:
     # ports:
     #   - "127.0.0.1:6379:6379"
 
+  geoserver:
+    image: docker.osgeo.org/geoserver:3.0.x
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    # GEOSERVER_ADMIN_USER/PASSWORD live in .env (gitignored, remote-box-only
+    # edit) -- same reasoning as DATABASE_URL/REDIS_URL not being inlined
+    # here: this is a tracked file, real credentials never belong in it.
+    # WEBAPP_CONTEXT defaults to "geoserver", matching the /geoserver path
+    # frontend/.env's VITE_GEOSERVER_URL already expects -- not overridden.
+    env_file:
+      - .env
+    environment:
+      GEOSERVER_DATA_DIR: /opt/geoserver_data
+      # Conservative heap for this mock/staging box, alongside backend,
+      # redis, native Postgres, and Docker Desktop itself all sharing the
+      # same machine -- raise if WMS rendering shows memory pressure under
+      # real concurrent use (see docker compose logs geoserver).
+      EXTRA_JAVA_OPTS: "-Xms512m -Xmx1g"
+      # Skips GeoServer's bundled demo layers/workspaces on first boot --
+      # this data dir only needs our own agrisuregis workspace.
+      SKIP_DEMO_DATA: "true"
+    volumes:
+      - geoserver-data:/opt/geoserver_data
+
 volumes:
   redis-data:
+  geoserver-data:

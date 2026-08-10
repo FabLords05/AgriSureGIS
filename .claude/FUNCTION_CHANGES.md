@@ -3269,3 +3269,57 @@ markers, not the polygon-heavy surveyed-farm case, and this needed no
   dataset, unrelated to the reported slowness, left for a separate cleanup
   if wanted later.
 
+## [2026-08-11] - GeoServer setup rewritten for Docker on the remote mock server
+
+`.claude/GEOSERVER_SETUP.md` previously documented a native/JDK GeoServer
+install on Fabio's local machine. Rewritten to run GeoServer as a third
+Docker service on the remote mock server (192.168.1.41), alongside the
+`backend`/`redis` containers from the 2026-08-10/11 containerization work
+-- colocating it with the native Postgres it queries (avoids a network hop
+per internal PostGIS query GeoServer makes) and reusing the
+`host.docker.internal` reachability + Docker-subnet `pg_hba.conf`/firewall
+rules already set up for `backend`, rather than opening new surface area.
+Chose `docker.osgeo.org/geoserver:3.0.x` (current stable line, released
+June 2026) over the 2.x line, with a conservative `-Xms512m -Xmx1g` JVM
+heap given this box already runs `backend`, `redis`, native Postgres, and
+Docker Desktop itself.
+
+#### Files
+* `backend/docker-compose.yml`: added a `geoserver` service
+  (`docker.osgeo.org/geoserver:3.0.x`, port `8080:8080`, `env_file: .env`
+  for `GEOSERVER_ADMIN_USER`/`PASSWORD` -- kept out of this tracked file
+  same as `DATABASE_URL`/`REDIS_URL` -- `GEOSERVER_DATA_DIR`,
+  `EXTRA_JAVA_OPTS`, `SKIP_DEMO_DATA=true` to skip bundled demo layers) +
+  a `geoserver-data` named volume for persistence across restarts.
+* `.claude/GEOSERVER_SETUP.md`: full rewrite --
+  - Prerequisites/install section now points at the existing Docker Desktop
+    setup instead of a JDK, with an explicit note that building/pulling
+    this image needs the physical console on 192.168.1.41 (the same
+    Windows Credential Manager/DPAPI-over-SSH limitation hit building the
+    `backend` image), while day-to-day `restart`/`logs`/`ps` work fine
+    over SSH.
+  - Schema-change/backfill steps (`ALTER TABLE`, `backfill_admin_boundary_geom.py`)
+    changed from "your local venv" to "the remote box's venv over SSH,"
+    since `agrisure_db` lives there now, not locally.
+  - GeoServer's PostGIS datastore connection host changed from `localhost`
+    to `host.docker.internal` (GeoServer-in-a-container reaching
+    native Postgres, same indirection `backend`'s `DATABASE_URL` uses).
+  - CORS section kept the existing "handled by the Vite dev proxy, not
+    GeoServer" design (`CORS_ENABLED` is available on this image but
+    deliberately left off) -- added a new step 8 documenting the
+    `VITE_GEOSERVER_URL` value pointing at the remote box's LAN or
+    Tailscale address instead of `localhost`.
+  - All admin-UI/WMS/WFS URLs updated from `localhost:8080` to
+    `192.168.1.41:8080`.
+
+#### Status / Next Steps
+* Not yet deployed -- adding the `GEOSERVER_ADMIN_USER`/`PASSWORD` lines to
+  the remote box's `backend/.env`, the new Windows Firewall rule for port
+  8080, `docker compose up -d` (console-only for the initial build/pull),
+  and the actual workspace/store/layer publishing (steps 2-6 of the
+  rewritten runbook) are all still pending handoff to Fabio's own
+  SSH/console session.
+* `frontend/.env`'s `VITE_GEOSERVER_URL` intentionally not changed yet --
+  will point at `192.168.1.41:8080` (or the Tailscale address) once
+  GeoServer is actually up and layers are published, not before.
+
