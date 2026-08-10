@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { MapContainer, TileLayer, WMSTileLayer, GeoJSON, CircleMarker, Marker, Popup, useMap } from "react-leaflet";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { MapContainer, TileLayer, WMSTileLayer, GeoJSON, CircleMarker, Marker, Popup, useMap, useMapEvents } from "react-leaflet";
 import type { Layer } from "leaflet";
 import type { Feature, FeatureCollection } from "geojson";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import "leaflet.gridlayer.googlemutant";
-import { Farm, Assessment, Bulletin, TcbSignal, getBulletinSignals } from "@/lib/api";
+import { Farm, Assessment, Bulletin, TcbSignal, GeoJsonMultiPolygon, getBulletinSignals } from "@/lib/api";
 
 const GOOGLE_MAPS_API_KEY: string | undefined = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
 
@@ -163,6 +163,71 @@ function FlyToMunicipality({ municipality, boundaries }: { municipality: string 
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Viewport culling -- the shared farms cache can hold the entire ~48,588-row
+// table (see useFarmsData.ts), and giving every one of those farms its own
+// live Leaflet layer regardless of what's actually on screen is what made
+// panning/zooming (and every background page landing) visibly janky. Each
+// farm's position is reduced once to a cheap bounding box (surveyed, real
+// GPX polygon) or reuses the existing approximate lat/lng (unsurveyed), and
+// only farms whose position currently intersects the map's visible bounds
+// get a real <GeoJSON>/<CircleMarker> layer -- see surveyedBBoxByFarmId,
+// visibleSurveyedFarms, visibleUnsurveyedFarms below. Recomputed only on
+// moveend/zoomend, Leaflet's own discrete end-of-gesture events, not on
+// every continuous move/zoom tick during a drag -- no extra debounce needed.
+// ---------------------------------------------------------------------------
+interface SimpleBounds { south: number; west: number; north: number; east: number; }
+
+function toSimpleBounds(b: L.LatLngBounds): SimpleBounds {
+  return { south: b.getSouth(), west: b.getWest(), north: b.getNorth(), east: b.getEast() };
+}
+
+// [minLng, minLat, maxLng, maxLat] -- plain numbers, not a Leaflet object, so
+// caching one per farm (up to ~48,588) doesn't mean allocating that many
+// Leaflet LatLngBounds instances.
+type BBox = [number, number, number, number];
+
+function computeGeoJsonBBox(geom: GeoJsonMultiPolygon): BBox {
+  let minLng = Infinity, minLat = Infinity, maxLng = -Infinity, maxLat = -Infinity;
+  for (const polygon of geom.coordinates) {
+    for (const ring of polygon) {
+      for (const [lng, lat] of ring) {
+        if (lng < minLng) minLng = lng;
+        if (lng > maxLng) maxLng = lng;
+        if (lat < minLat) minLat = lat;
+        if (lat > maxLat) maxLat = lat;
+      }
+    }
+  }
+  return [minLng, minLat, maxLng, maxLat];
+}
+
+function bboxIntersects(bbox: BBox, bounds: SimpleBounds): boolean {
+  const [minLng, minLat, maxLng, maxLat] = bbox;
+  return maxLng >= bounds.west && minLng <= bounds.east && maxLat >= bounds.south && minLat <= bounds.north;
+}
+
+function pointInBounds(lat: number, lng: number, bounds: SimpleBounds): boolean {
+  return lat >= bounds.south && lat <= bounds.north && lng >= bounds.west && lng <= bounds.east;
+}
+
+// Reports the map's current bounds on mount (the real, pixel-derived initial
+// viewport for MapContainer's center/zoom props -- not a guessed one, since
+// by the time this child mounts inside MapContainer the underlying Leaflet
+// map instance already exists) and again on every moveend/zoomend.
+function MapBoundsWatcher({ onBoundsChange }: { onBoundsChange: (b: L.LatLngBounds) => void }) {
+  const map = useMap();
+  useEffect(() => {
+    onBoundsChange(map.getBounds());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [map]);
+  useMapEvents({
+    moveend: () => onBoundsChange(map.getBounds()),
+    zoomend: () => onBoundsChange(map.getBounds()),
+  });
+  return null;
+}
+
 // Spreads farms without real geometry into a small grid around their
 // municipality's real town center, so they don't overlap on the map.
 function approximateFarmPosition(municipality: string | null, indexInMunicipality: number): [number, number] {
@@ -208,8 +273,8 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
       .catch(loadStaticFallback);
   }, []);
 
-  const surveyedFarms = farms.filter(f => f.location_geom != null);
-  const unsurveyedFarms = farms.filter(f => f.location_geom == null);
+  const surveyedFarms = useMemo(() => farms.filter(f => f.location_geom != null), [farms]);
+  const unsurveyedFarms = useMemo(() => farms.filter(f => f.location_geom == null), [farms]);
 
   const municipalityCounters: Record<string, number> = {};
   const approxPlacements = useMemo(() => {
@@ -223,6 +288,59 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
     return placements;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [unsurveyedFarms]);
+
+  // Bbox cache -- see the "Viewport culling" comment block above. Keyed by
+  // farm_id in a ref so it survives across renders and only redoes real bbox
+  // math for farms not already cached (or whose location_geom reference
+  // changed, e.g. after a CSV/GPX refresh) -- not for the whole set on every
+  // background page landing.
+  const bboxCacheRef = useRef(new Map<number, { geom: GeoJsonMultiPolygon; bbox: BBox }>());
+  const surveyedBBoxByFarmId = useMemo(() => {
+    const cache = bboxCacheRef.current;
+    const result = new Map<number, BBox>();
+    for (const f of surveyedFarms) {
+      const geom = f.location_geom as GeoJsonMultiPolygon;
+      const cached = cache.get(f.farm_id);
+      const bbox = cached && cached.geom === geom ? cached.bbox : computeGeoJsonBBox(geom);
+      if (!cached || cached.geom !== geom) cache.set(f.farm_id, { geom, bbox });
+      result.set(f.farm_id, bbox);
+    }
+    return result;
+  }, [surveyedFarms]);
+
+  // The map's current visible bounds -- null until MapBoundsWatcher's mount
+  // effect reports the real initial viewport (see its comment). While null,
+  // both visible-* lists below resolve to [] rather than "everything," since
+  // showing nothing for the single commit before that effect fires is
+  // imperceptible, whereas a brief "everything" render would reintroduce
+  // exactly the perf problem this fix removes.
+  const [mapBounds, setMapBounds] = useState<SimpleBounds | null>(null);
+  const handleBoundsChange = useCallback((b: L.LatLngBounds) => setMapBounds(toSimpleBounds(b)), []);
+
+  // Rendered-layer sets -- viewport-culled subsets of surveyedFarms/
+  // unsurveyedFarms, used ONLY by the two render loops below. Deliberately
+  // NOT used for `selectedFarm`, `approxPlacements`, FlyToSelectedFarm, or
+  // the legend -- those must keep working against the full farm set
+  // regardless of what's currently panned into view (e.g. clicking a table
+  // row for a farm outside the current viewport still needs to resolve and
+  // fly to it; flyTo's own moveend at the end of that animation is what
+  // brings the farm into visibleSurveyedFarms/visibleUnsurveyedFarms once
+  // the camera actually lands on it).
+  const visibleSurveyedFarms = useMemo(() => {
+    if (!mapBounds) return [];
+    return surveyedFarms.filter(f => {
+      const bbox = surveyedBBoxByFarmId.get(f.farm_id);
+      return bbox ? bboxIntersects(bbox, mapBounds) : false;
+    });
+  }, [surveyedFarms, surveyedBBoxByFarmId, mapBounds]);
+
+  const visibleUnsurveyedFarms = useMemo(() => {
+    if (!mapBounds) return [];
+    return unsurveyedFarms.filter(f => {
+      const pos = approxPlacements.get(f.farm_id);
+      return pos ? pointInBounds(pos[0], pos[1], mapBounds) : false;
+    });
+  }, [unsurveyedFarms, approxPlacements, mapBounds]);
 
   const selectedFarm = selectedFarmId != null ? farms.find(f => f.farm_id === selectedFarmId) : null;
   const uniqueAffectedAreas = Array.from(new Set(affectedAreas.map(s => s.area_name)));
@@ -260,6 +378,7 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
           approxPos={selectedFarm ? approxPlacements.get(selectedFarm.farm_id) ?? null : null}
         />
         <FlyToMunicipality municipality={focusMunicipality ?? null} boundaries={regionXBoundaries} />
+        <MapBoundsWatcher onBoundsChange={handleBoundsChange} />
 
         {GOOGLE_MAPS_API_KEY ? (
           <GoogleSatelliteLayer apiKey={GOOGLE_MAPS_API_KEY} />
@@ -310,7 +429,7 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
             Farm Info Panel overlay already shows this same (and more) detail,
             so clicking just selects/highlights instead of also popping up a
             duplicate info box. */}
-        {surveyedFarms.map(farm => {
+        {visibleSurveyedFarms.map(farm => {
           const isSelected = farm.farm_id === selectedFarmId;
           return (
             <GeoJSON
@@ -330,7 +449,7 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
         })}
 
         {/* Farms without a GPX boundary yet — approximate placement, click to select as an upload target */}
-        {unsurveyedFarms.map(farm => {
+        {visibleUnsurveyedFarms.map(farm => {
           const pos = approxPlacements.get(farm.farm_id);
           if (!pos) return null;
           const isSelected = farm.farm_id === selectedFarmId;

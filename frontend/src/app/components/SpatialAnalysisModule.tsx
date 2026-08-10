@@ -139,17 +139,24 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
     f.effectivity_date != null && f.expiry_date != null &&
     parseMDY(f.effectivity_date) <= today && today <= parseMDY(f.expiry_date);
 
-  const filteredFarms = farmRows
-    .filter(f => filterMuni === "All" || f.municipality === filterMuni)
-    .filter(f => !activeInsuranceOnly || isActiveInsurance(f))
-    .sort((a, b) => {
-      const va = a[sortField] ?? "";
-      const vb = b[sortField] ?? "";
-      const cmp = typeof va === "number" && typeof vb === "number"
-        ? va - vb
-        : String(va).localeCompare(String(vb));
-      return sortDir === "asc" ? cmp : -cmp;
-    });
+  // Memoized: this now also feeds the map (see the GISLeafletMap `farms`
+  // prop below), so an unmemoized version would hand it a new array
+  // reference on every unrelated re-render (e.g. typing in the
+  // municipality search box), defeating the map's own memo chain.
+  const filteredFarms = useMemo(
+    () => farmRows
+      .filter(f => filterMuni === "All" || f.municipality === filterMuni)
+      .filter(f => !activeInsuranceOnly || isActiveInsurance(f))
+      .sort((a, b) => {
+        const va = a[sortField] ?? "";
+        const vb = b[sortField] ?? "";
+        const cmp = typeof va === "number" && typeof vb === "number"
+          ? va - vb
+          : String(va).localeCompare(String(vb));
+        return sortDir === "asc" ? cmp : -cmp;
+      }),
+    [farmRows, filterMuni, activeInsuranceOnly, sortField, sortDir]
+  );
 
   const handleSort = (field: SortField) => {
     if (sortField === field) setSortDir(d => d === "asc" ? "desc" : "asc");
@@ -309,7 +316,7 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
         {/* Map canvas + SAR panel overlay */}
         <div className="flex-1 overflow-hidden p-2 relative">
           <GISLeafletMap
-            farms={filterMuni === "All" ? farmRows : farmRows.filter(f => f.municipality === filterMuni)}
+            farms={filteredFarms}
             selectedFarmId={selectedFarmId}
             onSelectFarm={setSelectedFarmId}
             selectedBulletin={selectedBulletin}

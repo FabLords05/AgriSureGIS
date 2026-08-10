@@ -3203,3 +3203,69 @@ already going to be introduced for the backend anyway.
   outside-LAN SSH access -- independent of this containerization work,
   no code/repo changes involved.
 
+## [2026-08-11] - Spatial Analysis tab: fix map ignoring the Active Insurance filter + add viewport culling
+
+Fabio reported the "Spatial Analysis & Data Import" tab (one component,
+despite the two-part label -- there's no separate Data Import module) is
+slow to click into. Investigation (two parallel Explore passes) found the
+farms data-fetching layer (`useFarmsData.ts`: shared, keyset-paginated,
+IndexedDB-cached) is already well-optimized and NOT the cause -- the
+slowness is entirely client-side map rendering:
+
+1. A real bug: the farm-records table respects the "Active Insurance Only"
+   toggle via `filteredFarms`, but the map was fed a separate, unfiltered
+   `farmRows` expression -- so the map silently ignored that toggle and
+   tried to render every farm in the shared cache (growing toward the full
+   ~48,588 rows as `useFarmsData`'s background "all" phase completes).
+2. No viewport limiting: `GISLeafletMap` gave every farm its own live
+   Leaflet layer (`<GeoJSON>` polygon or `<CircleMarker>`) with no
+   clustering and no bounds-based culling, so the map kept re-rendering
+   with more layers as more farms streamed into the shared cache.
+
+Fix direction chosen with Fabio: fix the filter bug, and add
+viewport-based culling directly in `GISLeafletMap.tsx` (only render farms
+currently within the visible map bounds) rather than adding a
+marker-clustering npm dependency -- clustering libraries only help point
+markers, not the polygon-heavy surveyed-farm case, and this needed no
+`npm install` handoff.
+
+#### Files
+* `frontend/src/app/components/SpatialAnalysisModule.tsx`:
+  `filteredFarms` (used by both the table and, now, the map) wrapped in
+  `useMemo` -- needed once it also feeds the map, since an unmemoized
+  version would hand `GISLeafletMap` a new array reference on every
+  unrelated re-render (e.g. typing in the municipality search box),
+  defeating the map's own memo chain. The `GISLeafletMap` `farms` prop
+  changed from a separate unfiltered `farmRows`/`.filter(municipality)`
+  expression to `filteredFarms` directly, so the map now respects
+  `activeInsuranceOnly` exactly like the table does.
+* `frontend/src/app/components/GISLeafletMap.tsx`:
+  - `surveyedFarms`/`unsurveyedFarms` (the has-geometry/no-geometry split)
+    wrapped in `useMemo` (was recomputed every render).
+  - Added `computeGeoJsonBBox()`/`bboxIntersects()`/`pointInBounds()`
+    helpers and a `surveyedBBoxByFarmId` cache (`useRef` Map, keyed by
+    `farm_id`, incremental -- only recomputes bbox math for farms not
+    already cached or whose `location_geom` reference changed).
+  - Added `MapBoundsWatcher` (mounted inside `MapContainer`, uses
+    react-leaflet's `useMapEvents`) reporting the map's current bounds on
+    mount and on every `moveend`/`zoomend` -- Leaflet's own discrete
+    end-of-gesture events, so no extra debounce timer was needed.
+  - Added `visibleSurveyedFarms`/`visibleUnsurveyedFarms` -- viewport-
+    culled subsets used only by the two `<GeoJSON>`/`<CircleMarker>`
+    render loops. Deliberately kept as *additional* derived arrays rather
+    than replacing `surveyedFarms`/`unsurveyedFarms`/`farms` in place,
+    since `selectedFarm` (`farms.find(...)`), `approxPlacements`,
+    `FlyToSelectedFarm`, and the legend all still need to resolve/operate
+    against the full farm set regardless of current viewport (e.g.
+    selecting an off-screen farm from the table must still fly to it).
+
+#### Status / Next Steps
+* Not yet verified end-to-end (frontend build/typecheck + manual browser
+  check) -- handed off to Fabio per the frontend-local-environment rule.
+* Full plan: `/home/fabio/.claude/plans/so-this-is-the-happy-whisper.md`.
+* Deliberately not addressed: a duplicate `getAssessments()` call between
+  `SpatialAnalysisModule` and `MonitoringModule` (each fetches
+  independently on mount, unlike the shared `farmsData`) -- low-cost
+  dataset, unrelated to the reported slowness, left for a separate cleanup
+  if wanted later.
+
