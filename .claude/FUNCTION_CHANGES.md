@@ -3396,14 +3396,12 @@ exact digest.
   (linux/amd64, confirmed via Docker Hub's public API, not guessed).
 
 #### Status / Next Steps
-* Not yet tested. The *first* build against this new digest will likely
-  still need the console (this exact reference was never pulled before,
-  even though its content may overlap with what's already cached from
-  earlier builds) -- but every build after that should work over SSH,
-  since the pinned digest never needs re-resolving. This is a one-time
-  cost to permanently fix future rebuilds, not a full solution to every
-  console-only case -- a genuinely new/updated base image (a real version
-  bump) would still need the console once, same as this.
+* **Verified 2026-08-11.** First build against the new digest ran at the
+  console as expected (one-time cost); a second build immediately after,
+  from an SSH session, succeeded with no credential error -- confirms
+  ordinary backend code rebuilds are now fully SSH-workable. A genuinely
+  new/updated base image (a real version bump, not this exact digest)
+  would still need the console once, same reasoning as before.
 * `redis:alpine` and `docker.osgeo.org/geoserver:3.0.x` are unaffected --
   those are `image:`-referenced (pulled, not built) in
   `backend/docker-compose.yml`, and `docker compose up`/`restart`'s
