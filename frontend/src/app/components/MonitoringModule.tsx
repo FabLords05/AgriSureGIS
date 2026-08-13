@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { toast } from "sonner";
 import {
   Activity, Download, FileDown,
   RefreshCw, Eye, BarChart2, TrendingUp, Zap,
@@ -587,13 +588,17 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin,
 
   const handleParseLatest = async () => {
     setIsParsing(true);
-    setLoadError(null);
     try {
-      await parseBulletins();
+      const result = await parseBulletins();
       await loadBulletins();
       await loadActiveTyphoons();
+      toast.success(
+        result.parsed_count > 0
+          ? `Parsed ${result.parsed_count} new bulletin(s).`
+          : "No new bulletins to parse — already up to date."
+      );
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : "Failed to parse latest bulletin.");
+      toast.error(error instanceof Error ? error.message : "Failed to parse latest bulletin.");
     } finally {
       setIsParsing(false);
     }
@@ -744,7 +749,7 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin,
       {/* Stat Cards */}
       <div className="grid grid-cols-5 gap-3 shrink-0">
         {statCards.map((c, i) => (
-          <div key={i} className={`bg-card border rounded-xl p-4 ${c.border}`}>
+          <div key={i} className={`bg-card border rounded-xl p-4 transition-shadow hover:shadow-md ${c.border}`}>
             <div className="flex items-start justify-between">
               <div>
                 <p className="text-[11px] text-muted-foreground uppercase tracking-wide">{c.label}</p>

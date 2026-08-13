@@ -3409,6 +3409,57 @@ exact digest.
   present locally at all (it is, for both) -- no equivalent freshness-check
   behavior to BuildKit's build-time tag resolution applies to them.
 
+## [2026-08-11] - UX Pass: Toast Notifications + Subtle Hover Polish
+
+Fabio asked for the app to feel more "lively"/interactive, referencing an
+external PCIC reference system (Sir Dave's) not available to compare
+against directly. Investigated the existing design system first rather
+than inventing new UI: confirmed the app's colors already match the
+prototype's official `--brand-green`/`--brand-blue`/`--brand-gold` tokens
+(`#166534`/`#1e3a5f`/`#ca8a04`), and found `sonner` toast notifications are
+already installed, imported, and mounted app-wide (`<Toaster richColors />`
+in `App.tsx`, already used for the typhoon-status notification bell) but
+unused by most success/error messages, which were still static inline
+banners. Used what was already approved/mounted rather than adding
+anything new.
+
+### 1. File: `frontend/src/app/components/MonitoringModule.tsx`
+* "Parse Latest Bulletin" (`handleParseLatest`) now shows `toast.success()`
+  (with the real `parsed_count` from `parseBulletins()`, previously
+  discarded) or `toast.error()` instead of setting `loadError` -- the
+  initial bulletin-list load error on mount is untouched (kept as an inline
+  banner, since that's persistent context for why the list is empty, not a
+  transient action result).
+* Stat cards: added `transition-shadow hover:shadow-md` -- were completely
+  flat/static before.
+
+### 2. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* Replaced the `uploadStatus` inline banner (CSV/GPX upload
+  success/failure) entirely with `toast.success()`/`toast.error()`. The GPX
+  batch-failure case keeps its "View details" action (now a toast action
+  button) opening the same `UploadFailuresModal` added earlier today --
+  `uploadStatus` state renamed to `uploadFailureDetails` (just the failure
+  list, since the toast itself now carries the summary message).
+
+### 3. File: `frontend/src/app/components/AssessmentModule.tsx`
+* "Compute Assessments" (`handleComputeAssessments`) now shows
+  `toast.success()`/`toast.error()` instead of the
+  `computeAssessmentsError`/`computeAssessmentsMessage` inline banners --
+  both states removed entirely, including their reset calls in
+  `handleSelectTyphoon`.
+
+### Status / Next Steps
+* Verified working directly with the user.
+* Scoped deliberately narrow (toasts for transient status + one hover
+  affordance) per explicit confirmation before implementing -- did not
+  touch layout, add new screens, or introduce colors outside the existing
+  brand tokens, per `CLAUDE.md`'s scope-guard rules.
+* Not pushed yet -- awaiting the user's own push per `CLAUDE.md`'s
+  git-handoff rules.
+* Separately noted: `backend/temp_bulletins/` has ~56MB of leftover PDFs
+  from earlier debugging (not gitignored) -- flagged to the user, not yet
+  cleaned up or added to `.gitignore`.
+
 ## [2026-08-13] - Virtualize the Farm Records table (fixes 5-7GB RAM usage at ~50K farms)
 
 Fabio reported the frontend consuming 5-7GB RAM once the farms dataset

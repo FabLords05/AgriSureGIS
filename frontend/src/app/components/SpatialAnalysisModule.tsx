@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo, useRef } from "react";
+import { toast } from "sonner";
 import {
   Map as MapIcon, ChevronUp, ChevronDown,
-  Filter, ArrowUpDown, UploadCloud, CheckCircle2, Table2, Satellite, ShieldCheck
+  Filter, ArrowUpDown, UploadCloud, CheckCircle2, Table2, Satellite, ShieldCheck, X, AlertCircle
 } from "lucide-react";
 import { GISLeafletMap } from "./GISLeafletMap";
 import { AOISARPanel } from "./AOISARPanel";
@@ -47,6 +48,42 @@ interface SpatialAnalysisModuleProps {
   farmsData: FarmsData;
 }
 
+// ─── Upload Failures Modal ───────────────────────────────────────────────────
+// A batch GPX upload can produce dozens of per-file failures -- these used to
+// get joined into one giant string and dumped straight into the status
+// banner with no size limit, which could balloon to the point of visually
+// swallowing the whole page (reported by Fabio). Each failure is now its own
+// row in a scrollable, height-capped panel instead.
+function UploadFailuresModal({ failures, onClose }: { failures: string[]; onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+      <div className="bg-card border border-border rounded-2xl shadow-2xl w-[560px] max-h-[70vh] flex flex-col overflow-hidden">
+        <div className="flex items-center justify-between px-5 py-3 border-b border-border shrink-0" style={{ background: "#0f1e0f" }}>
+          <div className="flex items-center gap-2.5">
+            <AlertCircle size={15} className="text-red-400" />
+            <p className="text-[12px] font-bold text-white">{failures.length} file(s) failed to upload</p>
+          </div>
+          <button onClick={onClose} className="w-6 h-6 flex items-center justify-center rounded hover:bg-white/10 text-white/60 hover:text-white transition-colors">
+            <X size={13} />
+          </button>
+        </div>
+        <div className="flex-1 overflow-auto p-3">
+          <ul className="space-y-1.5">
+            {failures.map((f, i) => (
+              <li key={i} className="text-[11px] px-3 py-2 rounded-lg bg-red-50 dark:bg-red-950/30 text-red-700 dark:text-red-300 border border-red-100 dark:border-red-900">
+                {f}
+              </li>
+            ))}
+          </ul>
+        </div>
+        <div className="flex items-center justify-end px-5 py-3 border-t border-border shrink-0">
+          <button onClick={onClose} className="px-3 py-1.5 rounded-lg border border-border text-xs hover:bg-muted transition-colors">Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }: SpatialAnalysisModuleProps) {
   const {
     farms,
@@ -75,7 +112,11 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
   const [sortField, setSortField] = useState<SortField>("farm_id");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [topPanelH, setTopPanelH] = useState(55);
-  const [uploadStatus, setUploadStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  // Transient success/failure now goes through toast() (see handlers below);
+  // this state only sticks around to feed the failure-details modal, which
+  // needs to stay open after the toast itself has faded.
+  const [uploadFailureDetails, setUploadFailureDetails] = useState<string[] | null>(null);
+  const [showUploadDetails, setShowUploadDetails] = useState(false);
   const csvInputRef = useRef<HTMLInputElement>(null);
   const gpxInputRef = useRef<HTMLInputElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -224,17 +265,11 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
     uploadCsv(file)
       .then(result => {
         const failedSuffix = result.rows_failed > 0 ? `, ${result.rows_failed} failed` : "";
-        setUploadStatus({
-          type: "success",
-          message: `${result.message} (${result.rows_inserted} inserted, ${result.rows_skipped} skipped${failedSuffix})`,
-        });
+        toast.success(`${result.message} (${result.rows_inserted} inserted, ${result.rows_skipped} skipped${failedSuffix})`);
         refreshFarms();
       })
       .catch(error => {
-        setUploadStatus({
-          type: "error",
-          message: error instanceof Error ? error.message : "CSV upload failed.",
-        });
+        toast.error(error instanceof Error ? error.message : "CSV upload failed.");
       });
   };
 
@@ -257,11 +292,16 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
       }
     }
 
-    setUploadStatus(
-      failures.length === 0
-        ? { type: "success", message: `Uploaded ${succeeded} GPX file(s) successfully.` }
-        : { type: "error", message: `${succeeded} succeeded, ${failures.length} failed — ${failures.join("; ")}` }
-    );
+    if (failures.length === 0) {
+      toast.success(`Uploaded ${succeeded} GPX file(s) successfully.`);
+    } else {
+      toast.error(`${succeeded} succeeded, ${failures.length} failed.`, {
+        action: {
+          label: "View details",
+          onClick: () => { setUploadFailureDetails(failures); setShowUploadDetails(true); },
+        },
+      });
+    }
     refreshFarms();
   };
 
@@ -354,16 +394,8 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
           </div>
         </div>
 
-        {uploadStatus && (
-          <div
-            className="mx-4 mt-2 text-[10px] p-2 rounded-lg shrink-0"
-            style={{
-              backgroundColor: uploadStatus.type === "success" ? "var(--sidebar-accent)" : "var(--destructive)",
-              color: uploadStatus.type === "success" ? "var(--sidebar-accent-foreground)" : "white",
-            }}
-          >
-            {uploadStatus.message}
-          </div>
+        {showUploadDetails && uploadFailureDetails && (
+          <UploadFailuresModal failures={uploadFailureDetails} onClose={() => setShowUploadDetails(false)} />
         )}
 
         {/* Map canvas + SAR panel overlay */}

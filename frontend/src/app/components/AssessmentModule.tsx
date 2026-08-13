@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect } from "react";
+import { toast } from "sonner";
 import {
   Download, Eye, ChevronDown, ChevronUp, ArrowUpDown,
   FileSpreadsheet, RefreshCw, AlertCircle, Calculator, MapPin,
@@ -285,8 +286,6 @@ export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
   const [showAreasModal, setShowAreasModal] = useState(false);
 
   const [isComputingAssessments, setIsComputingAssessments] = useState(false);
-  const [computeAssessmentsError, setComputeAssessmentsError] = useState<string | null>(null);
-  const [computeAssessmentsMessage, setComputeAssessmentsMessage] = useState<string | null>(null);
 
   const handleSelectTyphoon = (typhoonId: number) => {
     setShowAreasModal(false);
@@ -299,8 +298,6 @@ export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
     setSelectedTyphoonId(typhoonId);
     setTyphoonSummary(null);
     setTyphoonSummaryError(null);
-    setComputeAssessmentsError(null);
-    setComputeAssessmentsMessage(null);
     setIsLoadingTyphoonSummary(true);
     getTyphoonSummary(typhoonId)
       .then(setTyphoonSummary)
@@ -321,14 +318,12 @@ export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
     if (!latest) return;
 
     setIsComputingAssessments(true);
-    setComputeAssessmentsError(null);
-    setComputeAssessmentsMessage(null);
     calculateAssessments(selectedTyphoonId, latest.tcb_id)
       .then(res => {
-        setComputeAssessmentsMessage(`Computed ${res.assessments_computed} assessment(s) for this typhoon.`);
+        toast.success(`Computed ${res.assessments_computed} assessment(s) for this typhoon.`);
         loadSummary();
       })
-      .catch(error => setComputeAssessmentsError(error instanceof Error ? error.message : "Failed to compute assessments."))
+      .catch(error => toast.error(error instanceof Error ? error.message : "Failed to compute assessments."))
       .finally(() => setIsComputingAssessments(false));
   };
 
@@ -531,12 +526,6 @@ export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
 
       {typhoonSummaryError && (
         <p className="mx-3 mt-2 px-3 py-2 text-[10px] text-red-600 border border-border rounded-xl shrink-0">{typhoonSummaryError}</p>
-      )}
-      {computeAssessmentsError && (
-        <p className="mx-3 mt-2 px-3 py-2 text-[10px] text-red-600 border border-border rounded-xl shrink-0">{computeAssessmentsError}</p>
-      )}
-      {computeAssessmentsMessage && (
-        <p className="mx-3 mt-2 px-3 py-2 text-[10px] text-[#166534] border border-border rounded-xl shrink-0">{computeAssessmentsMessage}</p>
       )}
 
       {showAreasModal && selectedTyphoonId !== null && (
