@@ -3571,3 +3571,121 @@ ingested rows.
 * No backfill script for already-ingested rows, per Fabio's explicit
   choice -- existing data keeps whatever casing it was ingested with.
 
+---
+
+## [2026-08-13] - Real Auth + Admin-Exclusive Panel (branch: gayla/frontend/admin-user-management)
+
+Fabio (via Discord) asked for three related UI changes: remove the "Access
+Level" role picker from Login (keep it on Registration, where it already
+was); move User Account Management out of the general Calibration &
+Settings screen into an admin-exclusive dedicated panel; and give System
+Administrators a different nav altogether, focused on admin
+privileges/maintenance instead of the regular GIS Specialist tabs. Confirmed
+scope with the user before starting: (1) only 2 real roles (GIS
+Specialist/System Administrator) supported, not the UI prototype's wider
+4-option dropdown (Data Analyst/Field Supervisor had no backing permission
+logic anywhere); (2) the *entire* Calibration & Settings screen (including
+User Management) becomes the admin-exclusive panel, not just the User
+Management section in isolation.
+
+Investigation before writing code found: login/registration were **entirely
+mocked** (`LoginScreen.tsx` compared credentials against a hardcoded
+`DEMO_ACCOUNTS` dict client-side; Registration's submit was a bare
+`setTimeout`, never persisted anywhere), `tbl_system_users`/`SystemUser`
+already existed as a DB model with zero backend API routes, and
+`CalibrationModule.tsx`'s "User Account Management" section already existed
+as a pixel-perfect port of the UI prototype's design (add/edit/deactivate
+modals, table) -- just wired to local mock state instead of a backend. So
+this is real end-to-end auth wiring, not new UI invention.
+
+### 1. File: `backend/app/api/users.py` (new)
+* `POST /users/register`: public self-registration, creates a pending
+  (`is_active=False`) `SystemUser` row awaiting admin approval.
+* `POST /users/login`: real credential check (`passlib` bcrypt), replaces
+  the old client-side `DEMO_ACCOUNTS` comparison. Rejects inactive
+  (pending/deactivated) accounts with 403. Returns the same `{name, role,
+  email}` shape `App.tsx`/`authStorage.ts` already expect, so nothing
+  downstream of a successful login needed to change.
+* `GET /users/`, `POST /users/` (admin-created, active immediately),
+  `PATCH /users/{id}` (edit / activate / deactivate) -- back Calibration's
+  User Account Management table.
+* `ALLOWED_ROLES` restricted to the 2 real roles, rejecting anything else
+  with 400.
+
+### 2. File: `backend/requirements.txt` / `requirements-win.txt`
+* Added `passlib==1.7.4` + `bcrypt==4.2.0` -- no password-hashing library
+  existed in this codebase before now.
+
+### 3. File: `backend/app/main.py`
+* Registered `users_router` under `/api`.
+
+### 4. File: `backend/seed_system_users.py` (new)
+* Seeds the two former `DEMO_ACCOUNTS` (Ana Reyes/GIS Specialist, Ramon
+  Santos/System Administrator) as real, active, bcrypt-hashed rows so the
+  same demo credentials shown on the login screen keep working end-to-end.
+  Idempotent (skips existing emails). Same raw-`psycopg2` script pattern as
+  `seed_active_insurance.py`. No schema change needed -- `tbl_system_users`
+  already existed.
+
+### 5. File: `frontend/src/lib/api.ts`
+* Added `SystemUser` type + `loginUser()`, `registerUser()`, `getUsers()`,
+  `createUser()`, `updateUser()`.
+
+### 6. File: `frontend/src/app/components/LoginScreen.tsx`
+* Removed the "Access Level" (GIS Specialist/Administrator) selector from
+  the login step entirely -- role now comes back from the server based on
+  which account matches, not a pre-selected client-side toggle. Kept on
+  `RegistrationPanel` (unchanged there, was already correct).
+* Login's `handleSubmit` now calls `loginUser()`; `RegistrationPanel`'s
+  `handleSubmit` now calls `registerUser()` -- both replace their previous
+  mock logic (`DEMO_ACCOUNTS` comparison / bare `setTimeout`).
+* `DEMO_ACCOUNTS` kept only as a small array driving the "Demo Credentials"
+  hint box (now shows both seeded accounts with per-account Auto-fill,
+  since there's no role toggle to key off of anymore).
+
+### 7. File: `frontend/src/app/components/CalibrationModule.tsx`
+* User Account Management section: replaced the local mock
+  `useState<UserEntry[]>([...])` with a real `getUsers()` fetch on mount
+  (`loadUsers()`, alongside the existing `getParserSettings()` call) plus
+  loading/error states.
+* `handleAddUser`/`handleSaveEditUser`/`handleDeleteUser` now call
+  `createUser()`/`updateUser()` instead of mutating local state directly --
+  each still updates the local `users` array from the real response so the
+  table reflects the server's state, not an optimistic guess.
+* Role `<select>` options (both Add and Edit modals) now come from the
+  shared `USER_ROLES` constant (2 roles), not the prototype's hardcoded
+  4-option list.
+* Layout/design otherwise untouched -- this section was already a faithful
+  port of the UI prototype.
+
+### 8. File: `frontend/src/app/components/Header.tsx`
+* `MODULES` split into `SPECIALIST_MODULES` (Monitoring/Spatial/Assessment)
+  and `ADMIN_MODULES` (a single "Admin Panel" entry, id still
+  `"calibration"` so `App.tsx`'s existing render branch didn't need a new
+  `ModuleId`) -- picked by `currentUser.role === "System Administrator"`.
+* The user-menu "Account Settings" shortcut (previously always routed to
+  `"calibration"`) is now only rendered for admins, relabeled "Admin
+  Panel" -- Specialists have no path to a tab that no longer exists for
+  them.
+
+### 9. File: `frontend/src/app/App.tsx`
+* Default `activeModule` now derived from role at both initial mount
+  (covers a refreshed/persisted admin session) and in `handleLogin` (covers
+  a fresh login) -- admins land on `"calibration"` directly instead of
+  `"monitoring"`, which isn't even a navigable tab for them.
+* Main content render gated by `currentUser.role` directly (not just
+  `activeModule`), as defense in depth -- a stale/mismatched
+  `activeModule` value can never render a Specialist tab for an Admin or
+  vice versa.
+
+### Status / Next Steps
+* Branch: `gayla/frontend/admin-user-management`, off `develop` -- per
+  Fabio's explicit request, **not** pushed straight to `develop` like some
+  recent work; this one goes through a PR for review.
+* Not yet tested end-to-end -- needs `pip install -r requirements-win.txt`
+  (passlib/bcrypt), `python seed_system_users.py`, then a real
+  login/registration/admin-CRUD pass in the running app before opening
+  the PR.
+* No DB schema/migration needed -- `tbl_system_users` already existed;
+  only new data (the seed script), not new structure.
+

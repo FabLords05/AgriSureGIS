@@ -328,3 +328,80 @@ export interface PabsAssessmentRow {
 export function getAssessmentsPabsSummary(): Promise<{ status: string; data: PabsAssessmentRow[] }> {
   return request<{ status: string; data: PabsAssessmentRow[] }>('/api/assessments/pabs-summary');
 }
+
+// ─── System Users (real auth, replacing LoginScreen's old client-side
+// DEMO_ACCOUNTS check) ────────────────────────────────────────────────────
+
+export interface SystemUser {
+  user_id: number;
+  name: string;
+  email: string;
+  role: string;
+  is_active: boolean;
+  last_login: string | null;
+  created_at: string | null;
+}
+
+export interface LoginResult {
+  status: string;
+  user: { name: string; role: string; email: string };
+}
+
+export function loginUser(email: string, password: string): Promise<LoginResult> {
+  return request<LoginResult>('/api/users/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+}
+
+export interface RegisterUserPayload {
+  full_name: string;
+  email: string;
+  employee_id: string;
+  role: string;
+  password: string;
+  division?: string;
+}
+
+export function registerUser(payload: RegisterUserPayload): Promise<{ status: string; message: string }> {
+  return request<{ status: string; message: string }>('/api/users/register', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+export function getUsers(): Promise<{ status: string; data: SystemUser[] }> {
+  return request<{ status: string; data: SystemUser[] }>('/api/users/');
+}
+
+export interface CreateUserPayload {
+  name: string;
+  email: string;
+  role: string;
+  password: string;
+}
+
+export function createUser(payload: CreateUserPayload): Promise<{ status: string; data: SystemUser }> {
+  return request<{ status: string; data: SystemUser }>('/api/users/', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
+export interface UpdateUserPayload {
+  name?: string;
+  email?: string;
+  role?: string;
+  is_active?: boolean;
+}
+
+export function updateUser(userId: number, payload: UpdateUserPayload): Promise<{ status: string; data: SystemUser }> {
+  return request<{ status: string; data: SystemUser }>(`/api/users/${userId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
