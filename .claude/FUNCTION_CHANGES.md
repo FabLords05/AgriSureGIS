@@ -3571,3 +3571,68 @@ ingested rows.
 * No backfill script for already-ingested rows, per Fabio's explicit
   choice -- existing data keeps whatever casing it was ingested with.
 
+## [2026-08-13] - PSGC boundary-name alias resolution on CSV ingest
+
+A ~48k-row CSV upload against the remote server logged hundreds of "No
+PSGC code on file" failures (`upload.py`'s per-row `ValueError`) for
+Caraga-area rows (Surigao del Norte/Sur, Agusan del Norte/Sur, Dinagat
+Islands). Investigated against `psgc_region10_boundaries.csv`: every
+failing province/municipality/barangay combination was **already present
+in the file** under a different spelling -- the file wasn't missing
+regions, `_boundary_key()`'s exact-match lookup just had no tolerance for
+common PH PSGC naming variants. Confirmed by manually diffing every
+distinct failure pattern from the log against the CSV's actual entries:
+- Municipality form: `"SURIGAO CITY"` vs. file's `"City of Surigao"`,
+  `"BAYUGAN CITY"` vs. `"City of Bayugan"`, `"BUTUAN CITY"` vs. `"City of
+  Butuan"`, `"STA. JOSEFA"` vs. `"Santa Josefa"`, `"STA. MONICA"` vs.
+  `"Santa Monica"`.
+- Trailing parenthetical qualifiers on municipality and/or barangay:
+  `"LIBJO (ALBOR)"` vs. `"Libjo"`, `"POBLACION (TUBOD)"` vs.
+  `"Poblacion"`, `"DIAZ (ROMUALDEZ)"` vs. `"Diaz"`.
+
+Considered and rejected: expanding to the full national PSGC dataset, or
+adding Region XI (Davao) -- neither addresses a naming-format mismatch,
+and both are out of scope per `.claude/PROJECT_CONTEXT.md`'s explicit
+PCIC Regional Office X-only deployment target.
+
+Scope, confirmed with Fabio: resolve municipality-form and
+parenthetical-qualifier variants (covers all 17 distinct failure patterns
+seen in the log); leave `seed_database.py`'s separate, non-normalized
+lookup path untouched for now.
+
+#### Files
+* `backend/app/api/upload.py`:
+  - Added `_strip_trailing_parenthetical()`: drops a trailing `"(...)"`
+    qualifier from a name. Verified against the full 2,258-row CSV that no
+    municipality has two distinct barangays differing only by such a
+    suffix, so this can't collapse two real places together.
+  - Added `_municipality_alias_variants()`: generates `"X CITY"` <->
+    `"City of X"` and `"Sta./Santo"` <-> `"Santa/Santo"` alternate
+    spellings for a municipality name.
+  - Added `_resolve_psgc_code()`: tries the exact `(province, municipality,
+    barangay)` key first, then retries with municipality alias variants
+    and/or the parenthetical stripped from municipality and/or barangay,
+    before reporting a miss. Every fallback stays scoped to the row's own
+    province (matching is always done within one already-identified
+    province), so it can never match across two different provinces.
+  - `_ingest_row()`'s PSGC lookup now calls `_resolve_psgc_code(boundary_key,
+    _load_psgc_lookup())` instead of a bare dict `.get()`.
+
+#### Status / Next Steps
+* Verified by Fabio -- `cd backend && python -m pytest -v` passes.
+* Verified all 17 distinct failure patterns from the actual upload log
+  resolve correctly against the real CSV data (standalone check, not
+  committed as a test fixture).
+* Still open, separate issue: the same upload run left the remote DB at
+  0 farms despite thousands of rows processing without incident in the
+  log -- `upload_csv()` does one `db.commit()` for the entire file (only
+  per-row `SAVEPOINT`s roll back individually), so whatever ended the
+  request after the logged rows rolled back everything, not just the
+  failed rows. Pending `docker compose ps` / `docker compose logs backend`
+  output from the remote box to identify the actual cause (crash/OOM vs.
+  timeout vs. an uncaught exception) before deciding on a fix (e.g.
+  periodic intermediate commits).
+* `seed_database.py` still reads `psgc_region10_boundaries.csv` through
+  its own separate lookup with no case-folding or alias resolution --
+  flagged, not fixed, per agreed scope.
+
