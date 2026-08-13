@@ -3514,3 +3514,60 @@ separately per Sprint 3's Scope Guard, not bundled into this fix.
 * Backend-assisted bbox + lazy-geometry-fetch (see above) is a candidate
   follow-up task, not started.
 
+## [2026-08-13] - Normalize farmer-name and boundary casing to ALL CAPS on CSV ingest
+
+Fabio noticed farmer names coming out of `tbl_farmers_profile` show
+inconsistent capitalization (some ALL CAPS, some Title Case). Root cause:
+`prepare_row_payload()` in `upload.py` only ever stripped/None-coerced
+these fields via `_normalize_value()` -- it never changed case -- so
+`last_name`/`first_name`/`middle_name` and
+`AdminBoundary.province/municipality/barangay` were persisted exactly as
+the source PABS export typed them, and real exports are confirmed to mix
+ALL CAPS and Title Case within the same file. The only case-folding that
+existed was at *comparison* time (`_boundary_key()`'s `.upper()` for the
+AdminBoundary lookup, `func.lower(...)` in `GpxFarmerMatcherService`),
+never on the stored value.
+
+Scope, confirmed with Fabio: farmer names + boundary fields, normalized to
+ALL CAPS (matching `_boundary_key()`'s existing convention).
+Insurance/crop text fields (`program_type`, `product_name`, `crop_stage`)
+are explicitly out of scope. Forward-only -- no backfill of already-
+ingested rows.
+
+#### Files
+* `backend/app/api/upload.py`:
+  - Added `_normalize_text_upper()`: same cleanup as `_normalize_value()`,
+    plus `.upper()` on the result if it's a string. Applied to `farmer`
+    payload's `last_name`, `first_name`, `middle_name` in
+    `prepare_row_payload()`.
+  - `prepare_row_payload()`'s `boundary` dict (`province`/`municipality`/
+    `barangay`) is now built by feeding the raw normalized values through
+    `_boundary_key()` and using its output directly, instead of a
+    separate, un-uppercased `_normalize_value(...)` call -- removes the
+    previous duplication where the persisted row and the lookup key were
+    two independent normalizations of the same three fields (and could
+    diverge on casing). The downstream `_boundary_key()` call that builds
+    the get-or-create lookup key (unchanged) is now effectively a no-op
+    re-uppercase of already-uppercase values, kept as a safety net for
+    rows from any other path.
+* `backend/tests/test_upload_csv_ingestion.py`:
+  - Added `test_mixed_case_source_values_are_normalized_to_upper_on_ingest`:
+    feeds a mixed-case row (`"bukidnon,Malaybalay,CasiSang"` /
+    `"Abao"` / `"jonel"`) through `upload_csv()` and asserts the persisted
+    `FarmerProfile`/`AdminBoundary` rows come back as `"BUKIDNON"`,
+    `"MALAYBALAY"`, `"CASISANG"`, `"ABAO"`, `"JONEL"`.
+  - Existing `test_latin1_encoded_csv_with_accented_surname_is_ingested`
+    (asserts `farmer.last_name == "SEÑERES"`) is unaffected -- fixture
+    was already all-caps.
+
+#### Status / Next Steps
+* Verified by Fabio -- `cd backend && python -m pytest
+  tests/test_upload_csv_ingestion.py -v` passes, including the new casing
+  test and the existing `SEÑERES` test.
+* `GpxFarmerMatcherService` was confirmed read/match-only (never writes a
+  `FarmerProfile`/`Farm` row), so no change was needed there; its
+  case-insensitive `func.lower(func.trim(...))` matching continues to work
+  unchanged against ALL-CAPS-stored names.
+* No backfill script for already-ingested rows, per Fabio's explicit
+  choice -- existing data keeps whatever casing it was ingested with.
+
