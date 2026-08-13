@@ -3409,3 +3409,57 @@ exact digest.
   present locally at all (it is, for both) -- no equivalent freshness-check
   behavior to BuildKit's build-time tag resolution applies to them.
 
+## [2026-08-13] - Virtualize the Farm Records table (fixes 5-7GB RAM usage at ~50K farms)
+
+Fabio reported the frontend consuming 5-7GB RAM once the farms dataset
+loads close to its full ~48,588-row size. Root cause: the Farm Records
+table in `SpatialAnalysisModule.tsx` rendered one real `<tr>` (12 `<td>`s)
+per row via a bare `filteredFarms.map()`, with no virtualization -- once
+"Active Insurance Only" is off, or the background loader finishes filling
+in the complete farms set, that's tens of thousands of live DOM nodes plus
+their matching React fiber/VDOM objects mounted at once. This is separate
+from `GISLeafletMap.tsx`, which already got viewport-bbox culling in the
+2026-08-11 pass and was not the driver here -- only the table lacked any
+windowing.
+
+Also researched (not implemented, deliberately deferred as a separate,
+bigger follow-up): whether farm `location_geom` itself could be kept out
+of memory until needed. Conclusion: not without a backend change --
+`GISLeafletMap`'s viewport culling needs a bounding box for *every*
+surveyed farm (not just visible ones) to know what's currently on screen,
+and today that bbox is computed client-side from the full GeoJSON
+geometry, so the full polygon for every farm has to already be loaded
+before it can be reduced to a bbox. A real fix would move bbox computation
+to PostGIS (`GET /api/farms/` returning a cheap 4-number bbox instead of
+full geometry) and fetch full polygon geometry lazily, only for farms
+actually in the current viewport -- a real API-contract change, scoped
+separately per Sprint 3's Scope Guard, not bundled into this fix.
+
+#### Files
+* `frontend/src/app/components/SpatialAnalysisModule.tsx`:
+  - Added `ROW_HEIGHT` (33px, matches the table's current `px-2.5 py-2` /
+    `text-[11px]` row styling) and `OVERSCAN` (10 rows) constants.
+  - Added `tableScrollTop`/`tableViewportH` state, populated by a new
+    mount effect that measures `scrollContainerRef`'s `clientHeight` via
+    `ResizeObserver`, and an `onScroll` handler on the scroll container.
+  - Added `tableStartIndex`/`tableEndIndex`/`windowedFarms`/
+    `topSpacerHeight`/`bottomSpacerHeight`, derived from `filteredFarms`,
+    `tableScrollTop`, and `tableViewportH` -- same bbox-culling idea as
+    `GISLeafletMap`, applied to table scroll position instead of map
+    bounds. Falls back to rendering the first 50 rows before the first
+    viewport-height measurement lands, instead of "everything."
+  - `<tbody>` now renders `windowedFarms` (instead of all of
+    `filteredFarms`) as real `<tr>`s, bracketed by a top and bottom spacer
+    `<tr>` (empty `<td colSpan={12}>` sized via inline `height`) so the
+    scrollbar's size/position stays correct for the full row count. The
+    infinite-scroll sentinel row (`hasMore`) is unchanged, now placed
+    after the bottom spacer.
+
+#### Status / Next Steps
+* Not yet verified by Fabio -- frontend build/run is his local environment
+  per this file's execution rules; awaiting his confirmation that the
+  table scrolls/sorts/filters correctly and that RAM usage during a full
+  farms load actually drops.
+* Backend-assisted bbox + lazy-geometry-fetch (see above) is a candidate
+  follow-up task, not started.
+
