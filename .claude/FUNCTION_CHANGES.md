@@ -3688,4 +3688,14 @@ this is real end-to-end auth wiring, not new UI invention.
   the PR.
 * No DB schema/migration needed -- `tbl_system_users` already existed;
   only new data (the seed script), not new structure.
+* **Follow-up same day:** dropped `passlib` entirely in favor of calling
+  `bcrypt` directly in both `users.py` and `seed_system_users.py` --
+  `passlib==1.7.4` (unmaintained since 2020) has a documented compatibility
+  bug with `bcrypt>=4.1.0` (reads a `__about__.__version__` attribute
+  bcrypt removed) that can silently break hashing/verification depending on
+  exact installed versions. Found while investigating an unconfirmed
+  "something's off" report from the user during testing -- not proven to be
+  the actual cause, but a real, well-documented risk worth eliminating
+  regardless. `passlib` removed from both requirements files; `bcrypt` was
+  already present.
 

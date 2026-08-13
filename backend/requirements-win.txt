@@ -29,7 +29,6 @@ mdurl==0.1.2
 numpy==2.5.1
 packaging==26.2
 pandas==3.0.3
-passlib==1.7.4
 pdfplumber==0.11.10
 psycopg2-binary==2.9.12
 pydantic==2.13.4

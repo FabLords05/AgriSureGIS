@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
+import bcrypt
 from fastapi import APIRouter, Depends, HTTPException
-from passlib.context import CryptContext
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 
@@ -10,7 +10,26 @@ from app.models.models import SystemUser
 
 router = APIRouter(prefix="/users", tags=["users"])
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# Calls bcrypt directly rather than through passlib's CryptContext -- passlib
+# 1.7.4 (last released 2020, effectively unmaintained) has a documented
+# compatibility bug with bcrypt>=4.1.0 (it reads an `__about__.__version__`
+# attribute bcrypt removed), which can silently break hashing/verification
+# depending on the exact installed versions. bcrypt's own API is stable and
+# simple enough not to need the wrapper.
+def _hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def _verify_password(password: str, password_hash: str) -> bool:
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
+    except ValueError:
+        # Malformed/foreign hash format (e.g. leftover passlib-produced hash
+        # from before this change) -- treat as a failed verification, not a
+        # crash.
+        return False
+
 
 # Only two roles actually mean anything anywhere else in this app (Login's
 # role toggle, Registration's own restriction to GIS Specialist/System
@@ -82,7 +101,7 @@ def register_user(payload: RegisterRequest, db: Session = Depends(get_db)):
     firstname, lastname = _split_name(payload.full_name)
     user = SystemUser(
         username=payload.employee_id,
-        password_hash=pwd_context.hash(payload.password),
+        password_hash=_hash_password(payload.password),
         email=payload.email,
         firstname=firstname,
         lastname=lastname,
@@ -108,7 +127,7 @@ def login_user(payload: LoginRequest, db: Session = Depends(get_db)):
     downstream of a successful login needs to change.
     """
     user = db.query(SystemUser).filter(SystemUser.email == payload.email).first()
-    if not user or not pwd_context.verify(payload.password, user.password_hash):
+    if not user or not _verify_password(payload.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials.")
     if not user.is_active:
         raise HTTPException(status_code=403, detail="This account is pending administrator approval.")
@@ -139,7 +158,7 @@ def create_user(payload: CreateUserRequest, db: Session = Depends(get_db)):
         # self-registration) -- email local-part is a reasonable stand-in,
         # still unique since email itself is unique.
         username=payload.email.split("@")[0],
-        password_hash=pwd_context.hash(payload.password),
+        password_hash=_hash_password(payload.password),
         email=payload.email,
         firstname=firstname,
         lastname=lastname,

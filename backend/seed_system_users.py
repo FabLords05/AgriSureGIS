@@ -8,12 +8,15 @@ email that already exists.
 Run against any already-provisioned DB (local or remote):
     python seed_system_users.py
 
-Requires passlib[bcrypt] (added to requirements.txt/requirements-win.txt --
-pip install -r requirements-win.txt first if you haven't already).
+Requires bcrypt (added to requirements.txt/requirements-win.txt -- pip
+install -r requirements-win.txt first if you haven't already). Hashes
+directly with bcrypt, not passlib -- see the comment in
+backend/app/api/users.py for why (a documented passlib/bcrypt version
+compatibility bug).
 """
 
+import bcrypt
 import psycopg2
-from passlib.context import CryptContext
 
 # Same connection convention as seed_active_insurance.py/seed_database.py.
 DB_CONFIG = {
@@ -24,7 +27,9 @@ DB_CONFIG = {
     "port": "5432",
 }
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+def _hash_password(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 # Matches LoginScreen.tsx's former DEMO_ACCOUNTS exactly, so the same demo
 # credentials shown on the login screen keep working end-to-end.
@@ -59,7 +64,7 @@ def run():
             print(f"  Skipping {u['email']} -- already exists.")
             continue
 
-        password_hash = pwd_context.hash(u["password"])
+        password_hash = _hash_password(u["password"])
         cur.execute(
             """
             INSERT INTO tbl_system_users (username, password_hash, email, firstname, lastname, role, is_active)
