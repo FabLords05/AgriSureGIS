@@ -15,6 +15,28 @@ interface FarmRow extends Farm {
 type SortField = "farm_id" | "farmer_name" | "municipality" | "barangay" | "area_size";
 type SortDir   = "asc" | "desc";
 
+// ---------------------------------------------------------------------------
+// Farm Records table virtualization -- the shared farms cache can hold the
+// entire ~48,588-row table (see useFarmsData.ts), and rendering all of them
+// as real <tr> elements (once the full dataset lands, or "Active Insurance
+// Only" is toggled off) meant tens of thousands of live DOM nodes + matching
+// React fiber nodes mounted at once -- this is what was driving the browser
+// tab's RAM into the 5-7GB range. Same idea as GISLeafletMap's viewport-bbox
+// culling, applied to table scroll position instead of map bounds: only the
+// rows currently scrolled into view (plus a small overscan buffer) are ever
+// mounted as real <tr>s.
+// ---------------------------------------------------------------------------
+// Fixed row height (px), matching the table body's current px-2.5 py-2 /
+// text-[11px] styling -- used only for the scroll-position math below, never
+// applied via CSS. If the row's visual styling changes, update this to
+// match; a slight mismatch only costs a few px of blank space at scroll
+// boundaries (self-corrects on the next scroll tick), it doesn't break
+// correctness.
+const ROW_HEIGHT = 33;
+// Extra rows rendered above/below the visible range so a fast scroll or key
+// repeat doesn't show a blank flash before the next scroll event lands.
+const OVERSCAN = 10;
+
 interface SpatialAnalysisModuleProps {
   darkMode: boolean;
   selectedBulletin: Bulletin | null;
@@ -58,6 +80,21 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
   const gpxInputRef = useRef<HTMLInputElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const sentinelRef = useRef<HTMLTableRowElement | null>(null);
+  // Drives the Farm Records table virtualization -- see the ROW_HEIGHT/
+  // OVERSCAN comment above. tableViewportH starts at 0 (unmeasured); the
+  // effect below fills it in as soon as scrollContainerRef exists and keeps
+  // it current across resizes.
+  const [tableScrollTop, setTableScrollTop] = useState(0);
+  const [tableViewportH, setTableViewportH] = useState(0);
+
+  useEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    setTableViewportH(el.clientHeight);
+    const observer = new ResizeObserver(() => setTableViewportH(el.clientHeight));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     getAssessments().then(res => setAssessments(res.data)).catch(() => setAssessments([]));
@@ -157,6 +194,22 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
       }),
     [farmRows, filterMuni, activeInsuranceOnly, sortField, sortDir]
   );
+
+  // Windowed slice of filteredFarms actually mounted as <tr>s -- see the
+  // virtualization comment near ROW_HEIGHT/OVERSCAN above. Before the first
+  // viewport-height measurement lands (tableViewportH still 0), falls back
+  // to a fixed first batch instead of "everything," so the initial paint
+  // never re-creates the DOM-blowup this is fixing.
+  const tableStartIndex = tableViewportH > 0
+    ? Math.max(0, Math.floor(tableScrollTop / ROW_HEIGHT) - OVERSCAN)
+    : 0;
+  const tableVisibleCount = tableViewportH > 0
+    ? Math.ceil(tableViewportH / ROW_HEIGHT) + OVERSCAN * 2
+    : Math.min(filteredFarms.length, 50);
+  const tableEndIndex = Math.min(filteredFarms.length, tableStartIndex + tableVisibleCount);
+  const windowedFarms = filteredFarms.slice(tableStartIndex, tableEndIndex);
+  const topSpacerHeight = tableStartIndex * ROW_HEIGHT;
+  const bottomSpacerHeight = (filteredFarms.length - tableEndIndex) * ROW_HEIGHT;
 
   const handleSort = (field: SortField) => {
     if (sortField === field) setSortDir(d => d === "asc" ? "desc" : "asc");
@@ -374,7 +427,11 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
             </div>
           </div>
 
-          <div className="flex-1 overflow-auto" ref={scrollContainerRef}>
+          <div
+            className="flex-1 overflow-auto"
+            ref={scrollContainerRef}
+            onScroll={e => setTableScrollTop(e.currentTarget.scrollTop)}
+          >
             {isLoadingFirstPage ? (
               <div className="flex items-center justify-center h-full text-[11px] text-muted-foreground">
                 Loading farm records…
@@ -410,7 +467,17 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
                 </tr>
               </thead>
               <tbody>
-                {filteredFarms.map(f => (
+                {/* Top spacer -- stands in for the rows scrolled past above
+                    the window, so the scrollbar's size/position stays
+                    correct for the full filteredFarms count even though only
+                    windowedFarms below are real <tr>s. See the
+                    virtualization comment near ROW_HEIGHT/OVERSCAN above. */}
+                {topSpacerHeight > 0 && (
+                  <tr aria-hidden style={{ height: topSpacerHeight }}>
+                    <td colSpan={12} />
+                  </tr>
+                )}
+                {windowedFarms.map(f => (
                   <tr
                     key={f.farm_id}
                     onClick={() => setSelectedFarmId(f.farm_id === selectedFarmId ? null : f.farm_id)}
@@ -439,6 +506,13 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
                     </td>
                   </tr>
                 ))}
+                {/* Bottom spacer -- same purpose as the top one, for rows not
+                    yet scrolled to below the window. */}
+                {bottomSpacerHeight > 0 && (
+                  <tr aria-hidden style={{ height: bottomSpacerHeight }}>
+                    <td colSpan={12} />
+                  </tr>
+                )}
                 {hasMore && (
                   <tr ref={sentinelRef} className="h-9">
                     <td colSpan={12} className="text-center text-[10px] text-muted-foreground">
