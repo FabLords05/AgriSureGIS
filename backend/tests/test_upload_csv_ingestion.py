@@ -340,6 +340,27 @@ class UploadCsvIngestionTests(unittest.TestCase):
         farmer = mock_db.tables[models.FarmerProfile].rows[0]
         self.assertEqual(farmer.last_name, "SEÑERES")
 
+    def test_mixed_case_source_values_are_normalized_to_upper_on_ingest(self):
+        # Real PABS exports mix ALL CAPS and Title Case for the same fields, even
+        # within one export -- upload_csv() should normalize farmer names and
+        # boundary fields to ALL CAPS on ingest regardless of source casing.
+        csv_text = _HEADER + "\n" + (
+            "bukidnon,Malaybalay,CasiSang,POL-1,RSBSA,,Abao,jonel,,"
+            "1.0,10000,1,111,,5001,Booting,500,\n"
+        )
+        mock_db = _build_mock_db()
+
+        result = upload_module.upload_csv(file=_fake_upload_file(csv_text), db=mock_db)
+
+        self.assertEqual(result["rows_inserted"], 1)
+        farmer = mock_db.tables[models.FarmerProfile].rows[0]
+        self.assertEqual(farmer.last_name, "ABAO")
+        self.assertEqual(farmer.first_name, "JONEL")
+        boundary = mock_db.tables[models.AdminBoundary].rows[0]
+        self.assertEqual(boundary.province, "BUKIDNON")
+        self.assertEqual(boundary.municipality, "MALAYBALAY")
+        self.assertEqual(boundary.barangay, "CASISANG")
+
     def test_purely_numeric_policy_no_ingests_successfully_end_to_end(self):
         # Regression test for a real failure hit against a live DB: a purely
         # numeric "Policy No." (e.g. 1192155, as in the real PABS export) made

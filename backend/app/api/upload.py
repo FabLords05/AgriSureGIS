@@ -88,6 +88,16 @@ def _normalize_value(value: Any) -> Any:
     return value
 
 
+def _normalize_text_upper(value: Any) -> str | None:
+    """Same cleanup as _normalize_value, plus uppercasing -- applied to farmer-name
+    fields so casing is consistent regardless of how the source CSV typed them (real
+    PABS exports mix ALL CAPS and Title Case surnames within the same file)."""
+    normalized = _normalize_value(value)
+    if isinstance(normalized, str):
+        return normalized.upper()
+    return normalized
+
+
 def _stringify_id(value: Any) -> str | None:
     """Coerces a pandas-inferred numeric ID column to text. Applies to every
     VARCHAR-mapped identifier read from the CSV (Policy No., FARMID, FarmersID,
@@ -153,18 +163,27 @@ def prepare_row_payload(row: Any) -> dict[str, Any]:
                 return normalized[key]
         return None
 
+    # Store the boundary fields pre-normalized via _boundary_key() itself, rather than
+    # separately re-deriving the same casing -- guarantees the persisted row always
+    # matches the case used to look it up, instead of two parallel normalizations that
+    # can (and did) diverge.
+    province, municipality, barangay = _boundary_key(
+        _normalize_value(get("Province")) or "",
+        _normalize_value(get("Municipality")) or "",
+        _normalize_value(get("Barangay")) or "",
+    )
     boundary = {
-        "province": _normalize_value(get("Province")) or "",
-        "municipality": _normalize_value(get("Municipality")) or "",
-        "barangay": _normalize_value(get("Barangay")) or "",
+        "province": province,
+        "municipality": municipality,
+        "barangay": barangay,
     }
 
     farmer = {
         "farmers_id": _stringify_id(_normalize_value(get("FarmersID"))),
         "rsbsa_no": _stringify_id(_normalize_value(get("RSBSA No."))),
-        "last_name": _normalize_value(get("Surname")) or "",
-        "first_name": _normalize_value(get("Firstname")) or "",
-        "middle_name": _normalize_value(get("Middlename")),
+        "last_name": _normalize_text_upper(get("Surname")) or "",
+        "first_name": _normalize_text_upper(get("Firstname")) or "",
+        "middle_name": _normalize_text_upper(get("Middlename")),
     }
 
     farm = {
