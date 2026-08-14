@@ -40,10 +40,14 @@ class CsvUploadPreparationTests(unittest.TestCase):
 
         payload = prepare_row_payload(df.iloc[0])
 
-        self.assertEqual(payload["boundary"], {"province": "Bohol", "municipality": "Tagbilaran", "barangay": "Poblacion"})
+        # Boundary and farmer-name fields are uppercased on ingest (_boundary_key()
+        # / _normalize_text_upper() in upload.py) -- see
+        # test_upload_csv_ingestion.py's dedicated casing test for the full
+        # rationale; IDs (rsbsa_no) are untouched since they're not free-text.
+        self.assertEqual(payload["boundary"], {"province": "BOHOL", "municipality": "TAGBILARAN", "barangay": "POBLACION"})
         self.assertEqual(
             payload["farmer"],
-            {"farmers_id": None, "rsbsa_no": "RSBSA-001", "last_name": "Dela Cruz", "first_name": "Juan", "middle_name": "Santos"},
+            {"farmers_id": None, "rsbsa_no": "RSBSA-001", "last_name": "DELA CRUZ", "first_name": "JUAN", "middle_name": "SANTOS"},
         )
         self.assertEqual(payload["farm"], {"csv_farm_reference": "FARM-100", "georef_id": "GEO-100", "area_size": Decimal("1200.50")})
         self.assertEqual(

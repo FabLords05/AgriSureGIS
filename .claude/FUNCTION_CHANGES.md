@@ -3863,4 +3863,43 @@ Design confirmed with Fabio:
   elsewhere (`users.py`, `bulletin_parser.py`, `pagasa_status_scraper.py`)
   instead of the deprecated form. Migration still not yet run against a
   real DB.
+* **Follow-up same day:** Fabio then ran the full suite (`python -m
+  pytest -v`) on `gayla/frontend/admin-user-management` (this feature
+  merged in for testing, per Fabio's explicit instruction to test there
+  before `develop`) -- 13 unrelated pre-existing failures surfaced,
+  none touching this feature's own files. Investigated and fixed all
+  three, in test files only (the underlying implementations were each
+  already correct/intentional):
+  - `tests/test_csv_upload.py`: `test_prepare_row_payload_normalizes_
+    missing_values_and_numeric_fields` asserted `payload["boundary"]`/
+    `payload["farmer"]`'s name fields in mixed case
+    (`"Bohol"`/`"Dela Cruz"`), but `upload.py`'s `_boundary_key()`/
+    `_normalize_text_upper()` uppercase both -- stale since the
+    2026-08-13 all-caps-on-ingest commit (`35e057f`). Updated the
+    expected values to `"BOHOL"`/`"DELA CRUZ"` etc.
+  - `tests/test_scheduler.py`: asserted `timedelta(hours=...)`, but
+    `build_scheduler(initial_interval_minutes)` takes minutes (see
+    `backend/migrations/2026-08-10_polling_interval_minutes.sql`) --
+    stale since that rename. Updated both assertions to
+    `timedelta(minutes=...)` and fixed the class docstring's leftover
+    "interval is always hours" comment.
+  - `tests/test_farms_api.py`: entirely written against `list_farms()`'s
+    old OFFSET/LIMIT signature (`offset=` kwarg, `.offset()` query chain,
+    `result["offset"]`), but `farms.py` was deliberately rewritten to
+    keyset (`after_id`) pagination on 2026-08-09 for performance (its own
+    docstring: OFFSET measured 54ms at offset=0 vs 264ms at offset=48000
+    on the real ~48,588-farm dev DB). Rewrote the whole file: `_ChainableQuery`
+    dropped `.offset()`/`offset_arg` (never called by the real code),
+    every test call switched from `offset=` to `after_id=`, and
+    `test_has_more_false_on_last_page` now asserts the `Farm.farm_id > 4`
+    keyset filter instead of an offset value. Also pinned
+    `mock_db.execute` to raise in `_build_mock_db()` -- an unconfigured
+    `MagicMock().execute(...).first()` returns a truthy non-`None` value,
+    which would make `materialized_view_available()`
+    (`app/core/farms_view.py`) wrongly report the view as available; since
+    a positive result there is memoized process-wide, that would corrupt
+    every test running after it in the same pytest session. Forcing the
+    exception routes every test through the same deterministic fallback
+    path (`InsuranceRecord` bulk fetch) these tests already assert
+    against.
 
