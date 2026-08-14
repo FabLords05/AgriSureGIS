@@ -18,16 +18,26 @@ interface HeaderProps {
   onLogout?: () => void;
 }
 
-const MODULES: { id: ModuleId; label: string; icon: React.ReactNode; shortLabel: string }[] = [
+const SPECIALIST_MODULES: { id: ModuleId; label: string; icon: React.ReactNode; shortLabel: string }[] = [
   { id:"monitoring",   label:"Monitoring & Extraction",        shortLabel:"Monitoring",    icon:<Home size={15} /> },
   { id:"spatial",      label:"Spatial Analysis & Data Import", shortLabel:"Spatial",       icon:<Map size={15} /> },
   { id:"assessment",   label:"Assessment & Reporting",         shortLabel:"Assessment",    icon:<FileText size={15} /> },
-  { id:"calibration",  label:"Calibration / Settings",         shortLabel:"Settings",      icon:<Settings size={15} /> },
+];
+
+// System Administrators get a single, dedicated panel (the whole
+// Calibration & Settings screen, including User Account Management)
+// instead of the 3 specialist-facing tabs -- per Fabio's explicit request
+// to keep admin focused on admin privileges/maintenance, not the regular
+// GIS workflow.
+const ADMIN_MODULES: { id: ModuleId; label: string; icon: React.ReactNode; shortLabel: string }[] = [
+  { id:"calibration",  label:"Admin Panel",                    shortLabel:"Admin",         icon:<Settings size={15} /> },
 ];
 
 export function Header({ activeModule, onModuleChange, darkMode, onToggleDark, notifications, onClearNotification, currentUser, onLogout }: HeaderProps) {
   const [showNotifs, setShowNotifs] = useState(false);
   const [showUser, setShowUser] = useState(false);
+  const isAdmin = currentUser?.role === "System Administrator";
+  const modules = isAdmin ? ADMIN_MODULES : SPECIALIST_MODULES;
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshDone, setRefreshDone] = useState(false);
   const unread = notifications.filter(n => !n.read).length;
@@ -67,7 +77,7 @@ export function Header({ activeModule, onModuleChange, darkMode, onToggleDark, n
 
       {/* Module Tabs */}
       <nav className="flex items-center h-full flex-1 px-1">
-        {MODULES.map(m => (
+        {modules.map(m => (
           <button
             key={m.id}
             onClick={() => onModuleChange(m.id)}
@@ -185,12 +195,14 @@ export function Header({ activeModule, onModuleChange, darkMode, onToggleDark, n
                 <p className="text-[10px] text-muted-foreground font-mono">{currentUser?.email ?? ""}</p>
               </div>
               <div className="py-1">
-                <button
-                  onClick={() => { setShowUser(false); onModuleChange("calibration"); }}
-                  className="w-full flex items-center gap-2 px-3 py-2 text-[11px] hover:bg-muted transition-colors"
-                >
-                  <Shield size={12} /> Account Settings
-                </button>
+                {isAdmin && (
+                  <button
+                    onClick={() => { setShowUser(false); onModuleChange("calibration"); }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-[11px] hover:bg-muted transition-colors"
+                  >
+                    <Shield size={12} /> Admin Panel
+                  </button>
+                )}
                 <button
                   onClick={() => { setShowUser(false); onLogout?.(); }}
                   className="w-full flex items-center gap-2 px-3 py-2 text-[11px] hover:bg-muted transition-colors text-destructive"

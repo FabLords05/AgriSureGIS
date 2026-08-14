@@ -3571,6 +3571,136 @@ ingested rows.
 * No backfill script for already-ingested rows, per Fabio's explicit
   choice -- existing data keeps whatever casing it was ingested with.
 
+---
+
+## [2026-08-13] - Real Auth + Admin-Exclusive Panel (branch: gayla/frontend/admin-user-management)
+
+Fabio (via Discord) asked for three related UI changes: remove the "Access
+Level" role picker from Login (keep it on Registration, where it already
+was); move User Account Management out of the general Calibration &
+Settings screen into an admin-exclusive dedicated panel; and give System
+Administrators a different nav altogether, focused on admin
+privileges/maintenance instead of the regular GIS Specialist tabs. Confirmed
+scope with the user before starting: (1) only 2 real roles (GIS
+Specialist/System Administrator) supported, not the UI prototype's wider
+4-option dropdown (Data Analyst/Field Supervisor had no backing permission
+logic anywhere); (2) the *entire* Calibration & Settings screen (including
+User Management) becomes the admin-exclusive panel, not just the User
+Management section in isolation.
+
+Investigation before writing code found: login/registration were **entirely
+mocked** (`LoginScreen.tsx` compared credentials against a hardcoded
+`DEMO_ACCOUNTS` dict client-side; Registration's submit was a bare
+`setTimeout`, never persisted anywhere), `tbl_system_users`/`SystemUser`
+already existed as a DB model with zero backend API routes, and
+`CalibrationModule.tsx`'s "User Account Management" section already existed
+as a pixel-perfect port of the UI prototype's design (add/edit/deactivate
+modals, table) -- just wired to local mock state instead of a backend. So
+this is real end-to-end auth wiring, not new UI invention.
+
+### 1. File: `backend/app/api/users.py` (new)
+* `POST /users/register`: public self-registration, creates a pending
+  (`is_active=False`) `SystemUser` row awaiting admin approval.
+* `POST /users/login`: real credential check (`passlib` bcrypt), replaces
+  the old client-side `DEMO_ACCOUNTS` comparison. Rejects inactive
+  (pending/deactivated) accounts with 403. Returns the same `{name, role,
+  email}` shape `App.tsx`/`authStorage.ts` already expect, so nothing
+  downstream of a successful login needed to change.
+* `GET /users/`, `POST /users/` (admin-created, active immediately),
+  `PATCH /users/{id}` (edit / activate / deactivate) -- back Calibration's
+  User Account Management table.
+* `ALLOWED_ROLES` restricted to the 2 real roles, rejecting anything else
+  with 400.
+
+### 2. File: `backend/requirements.txt` / `requirements-win.txt`
+* Added `passlib==1.7.4` + `bcrypt==4.2.0` -- no password-hashing library
+  existed in this codebase before now.
+
+### 3. File: `backend/app/main.py`
+* Registered `users_router` under `/api`.
+
+### 4. File: `backend/seed_system_users.py` (new)
+* Seeds the two former `DEMO_ACCOUNTS` (Ana Reyes/GIS Specialist, Ramon
+  Santos/System Administrator) as real, active, bcrypt-hashed rows so the
+  same demo credentials shown on the login screen keep working end-to-end.
+  Idempotent (skips existing emails). Same raw-`psycopg2` script pattern as
+  `seed_active_insurance.py`. No schema change needed -- `tbl_system_users`
+  already existed.
+
+### 5. File: `frontend/src/lib/api.ts`
+* Added `SystemUser` type + `loginUser()`, `registerUser()`, `getUsers()`,
+  `createUser()`, `updateUser()`.
+
+### 6. File: `frontend/src/app/components/LoginScreen.tsx`
+* Removed the "Access Level" (GIS Specialist/Administrator) selector from
+  the login step entirely -- role now comes back from the server based on
+  which account matches, not a pre-selected client-side toggle. Kept on
+  `RegistrationPanel` (unchanged there, was already correct).
+* Login's `handleSubmit` now calls `loginUser()`; `RegistrationPanel`'s
+  `handleSubmit` now calls `registerUser()` -- both replace their previous
+  mock logic (`DEMO_ACCOUNTS` comparison / bare `setTimeout`).
+* `DEMO_ACCOUNTS` kept only as a small array driving the "Demo Credentials"
+  hint box (now shows both seeded accounts with per-account Auto-fill,
+  since there's no role toggle to key off of anymore).
+
+### 7. File: `frontend/src/app/components/CalibrationModule.tsx`
+* User Account Management section: replaced the local mock
+  `useState<UserEntry[]>([...])` with a real `getUsers()` fetch on mount
+  (`loadUsers()`, alongside the existing `getParserSettings()` call) plus
+  loading/error states.
+* `handleAddUser`/`handleSaveEditUser`/`handleDeleteUser` now call
+  `createUser()`/`updateUser()` instead of mutating local state directly --
+  each still updates the local `users` array from the real response so the
+  table reflects the server's state, not an optimistic guess.
+* Role `<select>` options (both Add and Edit modals) now come from the
+  shared `USER_ROLES` constant (2 roles), not the prototype's hardcoded
+  4-option list.
+* Layout/design otherwise untouched -- this section was already a faithful
+  port of the UI prototype.
+
+### 8. File: `frontend/src/app/components/Header.tsx`
+* `MODULES` split into `SPECIALIST_MODULES` (Monitoring/Spatial/Assessment)
+  and `ADMIN_MODULES` (a single "Admin Panel" entry, id still
+  `"calibration"` so `App.tsx`'s existing render branch didn't need a new
+  `ModuleId`) -- picked by `currentUser.role === "System Administrator"`.
+* The user-menu "Account Settings" shortcut (previously always routed to
+  `"calibration"`) is now only rendered for admins, relabeled "Admin
+  Panel" -- Specialists have no path to a tab that no longer exists for
+  them.
+
+### 9. File: `frontend/src/app/App.tsx`
+* Default `activeModule` now derived from role at both initial mount
+  (covers a refreshed/persisted admin session) and in `handleLogin` (covers
+  a fresh login) -- admins land on `"calibration"` directly instead of
+  `"monitoring"`, which isn't even a navigable tab for them.
+* Main content render gated by `currentUser.role` directly (not just
+  `activeModule`), as defense in depth -- a stale/mismatched
+  `activeModule` value can never render a Specialist tab for an Admin or
+  vice versa.
+
+### Status / Next Steps
+* Branch: `gayla/frontend/admin-user-management`, off `develop` -- per
+  Fabio's explicit request, **not** pushed straight to `develop` like some
+  recent work; this one goes through a PR for review.
+* Not yet tested end-to-end -- needs `pip install -r requirements-win.txt`
+  (passlib/bcrypt), `python seed_system_users.py`, then a real
+  login/registration/admin-CRUD pass in the running app before opening
+  the PR.
+* No DB schema/migration needed -- `tbl_system_users` already existed;
+  only new data (the seed script), not new structure.
+* **Follow-up same day:** dropped `passlib` entirely in favor of calling
+  `bcrypt` directly in both `users.py` and `seed_system_users.py` --
+  `passlib==1.7.4` (unmaintained since 2020) has a documented compatibility
+  bug with `bcrypt>=4.1.0` (reads a `__about__.__version__` attribute
+  bcrypt removed) that can silently break hashing/verification depending on
+  exact installed versions. Found while investigating an unconfirmed
+  "something's off" report from the user during testing -- not proven to be
+  the actual cause, but a real, well-documented risk worth eliminating
+  regardless. `passlib` removed from both requirements files; `bcrypt` was
+  already present.
+
+---
+
 ## [2026-08-13] - PSGC boundary-name alias resolution on CSV ingest
 
 A ~48k-row CSV upload against the remote server logged hundreds of "No
@@ -3635,4 +3765,141 @@ lookup path untouched for now.
 * `seed_database.py` still reads `psgc_region10_boundaries.csv` through
   its own separate lookup with no case-folding or alias resolution --
   flagged, not fixed, per agreed scope.
+
+## [2026-08-14] - Per-typhoon insurance usage tracking
+
+Fabio's request: at the end of an assessment run, mark each farmer whose
+insurance already produced a payout for the specific typhoon being
+assessed, so the system can tell "used for typhoon A" apart from "still
+active/unused" instead of a new typhoon's assessment getting confused by
+a previous typhoon's usage.
+
+Design confirmed with Fabio:
+- **Grain:** tracked per individual `InsuranceRecord` (policy line) x
+  typhoon, not per farmer x typhoon -- matches how `RiskAssessment`
+  already links to `insurance_records_id`, and keeps a farmer's separate
+  farms/policies independently trackable.
+- **"Used" trigger:** `final_indemnity_payment > 0` for that
+  (insurance, typhoon) pair. An eligible-but-zero-payout assessment does
+  NOT mark the insurance as used.
+- **Storage:** a new `tbl_insurance_usage` table is the source of truth
+  (one row per insurance x typhoon, so history survives across multiple
+  typhoons), plus a denormalized `is_used`/`used_for_typhoon_id`/
+  `used_at` mirror directly on `tbl_insurance_records` per Fabio's
+  explicit request for a column on the insurance table itself, for quick
+  "is this currently used" lookups without a join. The mirror only ever
+  reflects the single most recent *actual usage* -- see
+  `AssessmentService._sync_insurance_usage`'s docstring for exactly how
+  it avoids one typhoon's non-usage clobbering a different typhoon's real
+  usage mark (the specific mixing this feature exists to prevent).
+- **Surface:** backend + API only this round, no frontend changes -- no
+  existing UI prototype element covers this status, so nothing was added
+  there per the Scope Guard.
+
+#### Files
+* `backend/app/models/models.py`:
+  - `InsuranceRecord`: added `is_used` (`Boolean`, default `False`),
+    `used_for_typhoon_id` (FK -> `tbl_typhoons`, `SET NULL`), `used_at`
+    (`DateTime`) -- the denormalized mirror described above.
+  - Added **`InsuranceUsage`** (`tbl_insurance_usage`): `usage_id` PK,
+    `insurance_records_id` (FK -> `tbl_insurance_records`, `CASCADE`),
+    `typhoon_id` (FK -> `tbl_typhoons`, `CASCADE`), `assessment_id` (FK ->
+    `tbl_risk_assessment`, `SET NULL`), `is_used`, `marked_at`. Unique
+    constraint on `(insurance_records_id, typhoon_id)`.
+* `backend/init_schema.sql`: added the three new `tbl_insurance_records`
+  columns (with the FK added via a post-`tbl_typhoons` `ALTER TABLE`,
+  since inline `REFERENCES` isn't possible before that table exists in
+  the script), `DROP TABLE IF EXISTS tbl_insurance_usage`, and the new
+  table's `CREATE TABLE`.
+* `backend/migrations/2026-08-14_insurance_typhoon_usage_tracking.sql`:
+  new standalone migration (same statements as the `init_schema.sql`
+  changes, via `ADD COLUMN IF NOT EXISTS`/`CREATE TABLE IF NOT EXISTS`)
+  for bringing an already-provisioned DB up to date without re-running
+  `init_schema.sql`. **Not yet run against any DB -- pending Fabio.**
+* `backend/app/services/assessment_service.py`:
+  - `calculate_for_bulletin()`: now calls `_sync_insurance_usage()` after
+    its existing commit/refresh step.
+  - Added **`_sync_insurance_usage()`**: for every `RiskAssessment` just
+    computed, upserts its `tbl_insurance_usage` row (`is_used` =
+    `final_indemnity_payment > 0`) and updates the `InsuranceRecord`
+    mirror columns, with the "don't clobber a different typhoon's real
+    usage" guard described above.
+* `backend/app/api/insurance.py`:
+  - Added **`get_insurance_usage()`** (`GET /api/insurance/usage`):
+    optional `typhoon_id`/`insurance_records_id` filters, returns
+    `tbl_insurance_usage` rows joined with policy/farmer info.
+* `backend/app/api/assessments.py`:
+  - `list_assessments()` (`GET /api/assessments/`): each row now includes
+    `typhoon_id` (resolved per-row through the assessment's
+    `AreaExposureSummary` when the `typhoon_id` query filter wasn't
+    already used to join it) and `insurance_used` (`true`/`false`/`null`
+    if no usage row exists yet for that typhoon).
+* `.claude/API_CONTRACT.md`: documented `GET /api/insurance/usage`, and
+  the new fields on `GET /api/assessments/` and the usage side-effect of
+  `POST /api/assessments/calculate`.
+
+#### Status / Next Steps
+* Not yet run/tested -- per `.claude/CLAUDE.md`'s venv/DB execution
+  rules, Fabio needs to run the migration himself
+  (`psql -U agrisure_admin -d agrisure_db -f
+  backend/migrations/2026-08-14_insurance_typhoon_usage_tracking.sql`)
+  against the existing dev DB, and the backend test suite, before this is
+  considered verified.
+* Committed on `fabio/backend/insurance-typhoon-usage-tracking`, branched
+  off `develop`. Per Fabio's revised instruction, merged first into local
+  `gayla/frontend/admin-user-management` (not `develop`) for testing via
+  the venv; `develop` itself is untouched until that testing passes.
+  Skips the PR/review step `.claude/GITHUB_WORKFLOW.md` normally requires
+  (Fabio + another developer) once it does reach `develop`. Not pushed to
+  the GitHub remote at any point in this process.
+* No frontend changes. `docs/ERD.drawio.png` was not updated to reflect
+  the new table/columns (it's a rendered `.drawio.png`, not something
+  editable here) -- flagged as now out of date, not fixed.
+* **Follow-up same day:** Fabio ran `tests/test_assessment_service.py`
+  in his venv -- all 8 tests passed (including the 4 new
+  `InsuranceUsageSyncTests`), with a `DeprecationWarning` on
+  `datetime.utcnow()`. Switched `_sync_insurance_usage()` to
+  `datetime.now(timezone.utc)`, matching the pattern already used
+  elsewhere (`users.py`, `bulletin_parser.py`, `pagasa_status_scraper.py`)
+  instead of the deprecated form. Migration still not yet run against a
+  real DB.
+* **Follow-up same day:** Fabio then ran the full suite (`python -m
+  pytest -v`) on `gayla/frontend/admin-user-management` (this feature
+  merged in for testing, per Fabio's explicit instruction to test there
+  before `develop`) -- 13 unrelated pre-existing failures surfaced,
+  none touching this feature's own files. Investigated and fixed all
+  three, in test files only (the underlying implementations were each
+  already correct/intentional):
+  - `tests/test_csv_upload.py`: `test_prepare_row_payload_normalizes_
+    missing_values_and_numeric_fields` asserted `payload["boundary"]`/
+    `payload["farmer"]`'s name fields in mixed case
+    (`"Bohol"`/`"Dela Cruz"`), but `upload.py`'s `_boundary_key()`/
+    `_normalize_text_upper()` uppercase both -- stale since the
+    2026-08-13 all-caps-on-ingest commit (`35e057f`). Updated the
+    expected values to `"BOHOL"`/`"DELA CRUZ"` etc.
+  - `tests/test_scheduler.py`: asserted `timedelta(hours=...)`, but
+    `build_scheduler(initial_interval_minutes)` takes minutes (see
+    `backend/migrations/2026-08-10_polling_interval_minutes.sql`) --
+    stale since that rename. Updated both assertions to
+    `timedelta(minutes=...)` and fixed the class docstring's leftover
+    "interval is always hours" comment.
+  - `tests/test_farms_api.py`: entirely written against `list_farms()`'s
+    old OFFSET/LIMIT signature (`offset=` kwarg, `.offset()` query chain,
+    `result["offset"]`), but `farms.py` was deliberately rewritten to
+    keyset (`after_id`) pagination on 2026-08-09 for performance (its own
+    docstring: OFFSET measured 54ms at offset=0 vs 264ms at offset=48000
+    on the real ~48,588-farm dev DB). Rewrote the whole file: `_ChainableQuery`
+    dropped `.offset()`/`offset_arg` (never called by the real code),
+    every test call switched from `offset=` to `after_id=`, and
+    `test_has_more_false_on_last_page` now asserts the `Farm.farm_id > 4`
+    keyset filter instead of an offset value. Also pinned
+    `mock_db.execute` to raise in `_build_mock_db()` -- an unconfigured
+    `MagicMock().execute(...).first()` returns a truthy non-`None` value,
+    which would make `materialized_view_available()`
+    (`app/core/farms_view.py`) wrongly report the view as available; since
+    a positive result there is memoized process-wide, that would corrupt
+    every test running after it in the same pytest session. Forcing the
+    exception routes every test through the same deterministic fallback
+    path (`InsuranceRecord` bulk fetch) these tests already assert
+    against.
 

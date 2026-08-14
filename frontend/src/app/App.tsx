@@ -18,7 +18,14 @@ export default function App() {
   // refresh never flashes the login screen before rehydrating -- the user
   // stays logged in until they explicitly log out (see handleLogout below).
   const [currentUser, setCurrentUser]     = useState<CurrentUser | null>(loadPersistedUser);
-  const [activeModule, setActiveModule]   = useState<ModuleId>("monitoring");
+  // System Administrators only ever see the Calibration/Admin panel (see
+  // Header.tsx's ADMIN_MODULES) -- default there directly instead of
+  // "monitoring", which isn't even a navigable tab for that role. Covers
+  // both a fresh admin login and a page refresh rehydrating a persisted
+  // admin session.
+  const [activeModule, setActiveModule]   = useState<ModuleId>(
+    () => loadPersistedUser()?.role === "System Administrator" ? "calibration" : "monitoring"
+  );
   const [darkMode, setDarkMode]           = useState(false);
   const [coverageRatePerHa, setCoverageRatePerHa] = useState(25000);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
@@ -34,6 +41,7 @@ export default function App() {
   const handleLogin = (user: CurrentUser) => {
     setCurrentUser(user);
     persistUser(user);
+    setActiveModule(user.role === "System Administrator" ? "calibration" : "monitoring");
   };
 
   const handleLogout = () => {
@@ -110,30 +118,36 @@ export default function App() {
           onLogout={handleLogout}
         />
 
+        {/* isAdmin gates rendering itself, not just Header's nav -- defense in
+            depth so a stale/mismatched activeModule value can never render a
+            Specialist tab for an Admin or vice versa. */}
         <main className="flex-1 overflow-hidden">
-          {activeModule === "monitoring"  && (
-            <MonitoringModule
-              darkMode={darkMode}
-              selectedBulletin={selectedBulletin}
-              onSelectBulletin={setSelectedBulletin}
-              farmsData={farmsData}
-            />
-          )}
-          {activeModule === "spatial"     && (
-            <SpatialAnalysisModule
-              darkMode={darkMode}
-              selectedBulletin={selectedBulletin}
-              farmsData={farmsData}
-            />
-          )}
-          {activeModule === "assessment"  && (
-            <AssessmentModule darkMode={darkMode} />
-          )}
-          {activeModule === "calibration" && (
+          {currentUser.role === "System Administrator" ? (
             <CalibrationModule
               coverageRatePerHa={coverageRatePerHa}
               onCoverageRateChange={setCoverageRatePerHa}
             />
+          ) : (
+            <>
+              {activeModule === "monitoring"  && (
+                <MonitoringModule
+                  darkMode={darkMode}
+                  selectedBulletin={selectedBulletin}
+                  onSelectBulletin={setSelectedBulletin}
+                  farmsData={farmsData}
+                />
+              )}
+              {activeModule === "spatial"     && (
+                <SpatialAnalysisModule
+                  darkMode={darkMode}
+                  selectedBulletin={selectedBulletin}
+                  farmsData={farmsData}
+                />
+              )}
+              {activeModule === "assessment"  && (
+                <AssessmentModule darkMode={darkMode} />
+              )}
+            </>
           )}
         </main>
 

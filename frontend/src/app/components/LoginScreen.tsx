@@ -1,26 +1,19 @@
 import { useState } from "react";
 import { Eye, EyeOff, LogIn, Shield, User, AlertCircle, Leaf, UserPlus, ArrowLeft, CheckCircle2 } from "lucide-react";
-
-type Role = "specialist" | "admin";
+import { loginUser, registerUser } from "@/lib/api";
 
 interface LoginScreenProps {
   onLogin: (user: { name: string; role: string; email: string }) => void;
 }
 
-const DEMO_ACCOUNTS: Record<Role, { email: string; password: string; name: string; label: string }> = {
-  specialist: {
-    email: "a.reyes@pcic.gov.ph",
-    password: "pcic1234",
-    name: "Ana L. Reyes",
-    label: "GIS Specialist",
-  },
-  admin: {
-    email: "r.santos@pcic.gov.ph",
-    password: "pcic1234",
-    name: "Ramon B. Santos",
-    label: "System Administrator",
-  },
-};
+// No more role selection at login -- the account's real role now comes back
+// from the server (GET /api/users/login), not a client-side toggle. These
+// two entries just drive the "Demo Credentials" hint box, matching the
+// accounts seeded by backend/seed_system_users.py.
+const DEMO_ACCOUNTS: { email: string; password: string; label: string }[] = [
+  { email: "a.reyes@pcic.gov.ph", password: "pcic1234", label: "GIS Specialist" },
+  { email: "r.santos@pcic.gov.ph", password: "pcic1234", label: "System Administrator" },
+];
 
 type RegRole = "GIS Specialist" | "System Administrator";
 
@@ -77,10 +70,17 @@ function RegistrationPanel({ onBack }: { onBack: () => void }) {
     }
 
     setLoading(true);
-    setTimeout(() => {
-      setLoading(false);
-      setSuccess(true);
-    }, 1200);
+    registerUser({
+      full_name: form.fullName,
+      email: form.email,
+      employee_id: form.employeeId,
+      role: form.role,
+      password: form.password,
+      division: form.division,
+    })
+      .then(() => setSuccess(true))
+      .catch(error => setError(error instanceof Error ? error.message : "Registration failed."))
+      .finally(() => setLoading(false));
   };
 
   if (success) {
@@ -272,7 +272,6 @@ function RegistrationPanel({ onBack }: { onBack: () => void }) {
 
 export function LoginScreen({ onLogin }: LoginScreenProps) {
   const [view, setView]         = useState<"login" | "register">("login");
-  const [role, setRole]         = useState<Role>("specialist");
   const [email, setEmail]       = useState("");
   const [password, setPassword] = useState("");
   const [showPw, setShowPw]     = useState(false);
@@ -288,23 +287,14 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
       return;
     }
 
-    const demo = DEMO_ACCOUNTS[role];
-    const emailMatch    = email.trim().toLowerCase() === demo.email.toLowerCase();
-    const passwordMatch = password === demo.password;
-
-    if (!emailMatch || !passwordMatch) {
-      setError("Invalid credentials. Check the demo account below and try again.");
-      return;
-    }
-
     setLoading(true);
-    setTimeout(() => {
-      onLogin({ name: demo.name, role: demo.label, email: demo.email });
-    }, 1000);
+    loginUser(email.trim(), password)
+      .then(result => onLogin(result.user))
+      .catch(error => setError(error instanceof Error ? error.message : "Invalid credentials."))
+      .finally(() => setLoading(false));
   };
 
-  const fillDemo = () => {
-    const demo = DEMO_ACCOUNTS[role];
+  const fillDemo = (demo: { email: string; password: string }) => {
     setEmail(demo.email);
     setPassword(demo.password);
     setError(null);
@@ -350,48 +340,11 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
               {/* Card Header */}
               <div className="px-6 pt-[clamp(0.75rem,2vh,1.5rem)] pb-[clamp(0.5rem,1.2vh,1rem)] border-b border-gray-100">
                 <p className="text-sm font-bold text-gray-800">Sign in to your account</p>
-                <p className="text-[11px] text-gray-400 mt-0.5">Select your role and enter your credentials</p>
-              </div>
-
-              {/* Role Selector */}
-              <div className="px-6 pt-[clamp(0.5rem,1.5vh,1rem)]">
-                <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Access Level</p>
-                <div className="grid grid-cols-2 gap-2">
-                  {(["specialist", "admin"] as Role[]).map(r => {
-                    const isActive = role === r;
-                    return (
-                      <button
-                        key={r}
-                        type="button"
-                        onClick={() => { setRole(r); setEmail(""); setPassword(""); setError(null); }}
-                        className={`flex items-center gap-2.5 p-3 rounded-xl border-2 transition-all text-left ${
-                          isActive
-                            ? "border-[#166534] bg-[#166534]/5"
-                            : "border-gray-200 hover:border-gray-300"
-                        }`}
-                      >
-                        <div className={`w-8 h-8 rounded-lg flex items-center justify-center shrink-0 ${isActive ? "bg-[#166534]" : "bg-gray-100"}`}>
-                          {r === "specialist"
-                            ? <User size={14} className={isActive ? "text-white" : "text-gray-400"} />
-                            : <Shield size={14} className={isActive ? "text-white" : "text-gray-400"} />
-                          }
-                        </div>
-                        <div>
-                          <p className={`text-[11px] font-bold leading-tight ${isActive ? "text-[#166534]" : "text-gray-600"}`}>
-                            {r === "specialist" ? "GIS Specialist" : "Administrator"}
-                          </p>
-                          <p className="text-[9px] text-gray-400 leading-tight">
-                            {r === "specialist" ? "Assessment access" : "Full system access"}
-                          </p>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
+                <p className="text-[11px] text-gray-400 mt-0.5">Enter your institutional email and password</p>
               </div>
 
               {/* Form */}
-              <form onSubmit={handleSubmit} className="px-6 pt-[clamp(0.5rem,1.5vh,1rem)] pb-[clamp(0.75rem,2vh,1.5rem)]">
+              <form onSubmit={handleSubmit} className="px-6 pt-[clamp(0.75rem,2vh,1.5rem)] pb-[clamp(0.75rem,2vh,1.5rem)]">
                 {/* Email */}
                 <div className="mb-[clamp(0.4rem,1.2vh,0.75rem)]">
                   <label className="block text-[11px] font-semibold text-gray-600 mb-1.5">Institutional Email</label>
@@ -446,17 +399,23 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
                 </button>
 
                 {/* Demo hint */}
-                <div className="mt-[clamp(0.4rem,1.2vh,0.75rem)] p-[clamp(0.4rem,1vh,0.625rem)] rounded-xl bg-amber-50 border border-amber-100">
-                  <p className="text-[10px] font-semibold text-amber-700 mb-1">Demo Credentials ({DEMO_ACCOUNTS[role].label})</p>
-                  <p className="text-[10px] text-amber-600 font-mono">{DEMO_ACCOUNTS[role].email}</p>
-                  <p className="text-[10px] text-amber-600 font-mono">Password: pcic1234</p>
-                  <button
-                    type="button"
-                    onClick={fillDemo}
-                    className="mt-1.5 text-[10px] text-amber-700 underline hover:text-amber-900"
-                  >
-                    Auto-fill credentials
-                  </button>
+                <div className="mt-[clamp(0.4rem,1.2vh,0.75rem)] p-[clamp(0.4rem,1vh,0.625rem)] rounded-xl bg-amber-50 border border-amber-100 space-y-1.5">
+                  <p className="text-[10px] font-semibold text-amber-700">Demo Credentials</p>
+                  {DEMO_ACCOUNTS.map(demo => (
+                    <div key={demo.email} className="flex items-center justify-between gap-2">
+                      <div>
+                        <p className="text-[10px] text-amber-600 font-mono leading-tight">{demo.email}</p>
+                        <p className="text-[9px] text-amber-500 leading-tight">{demo.label} · Password: {demo.password}</p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => fillDemo(demo)}
+                        className="shrink-0 text-[10px] text-amber-700 underline hover:text-amber-900"
+                      >
+                        Auto-fill
+                      </button>
+                    </div>
+                  ))}
                 </div>
 
                 {/* Register link */}
