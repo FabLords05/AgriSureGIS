@@ -3699,3 +3699,160 @@ this is real end-to-end auth wiring, not new UI invention.
   regardless. `passlib` removed from both requirements files; `bcrypt` was
   already present.
 
+---
+
+## [2026-08-13] - PSGC boundary-name alias resolution on CSV ingest
+
+A ~48k-row CSV upload against the remote server logged hundreds of "No
+PSGC code on file" failures (`upload.py`'s per-row `ValueError`) for
+Caraga-area rows (Surigao del Norte/Sur, Agusan del Norte/Sur, Dinagat
+Islands). Investigated against `psgc_region10_boundaries.csv`: every
+failing province/municipality/barangay combination was **already present
+in the file** under a different spelling -- the file wasn't missing
+regions, `_boundary_key()`'s exact-match lookup just had no tolerance for
+common PH PSGC naming variants. Confirmed by manually diffing every
+distinct failure pattern from the log against the CSV's actual entries:
+- Municipality form: `"SURIGAO CITY"` vs. file's `"City of Surigao"`,
+  `"BAYUGAN CITY"` vs. `"City of Bayugan"`, `"BUTUAN CITY"` vs. `"City of
+  Butuan"`, `"STA. JOSEFA"` vs. `"Santa Josefa"`, `"STA. MONICA"` vs.
+  `"Santa Monica"`.
+- Trailing parenthetical qualifiers on municipality and/or barangay:
+  `"LIBJO (ALBOR)"` vs. `"Libjo"`, `"POBLACION (TUBOD)"` vs.
+  `"Poblacion"`, `"DIAZ (ROMUALDEZ)"` vs. `"Diaz"`.
+
+Considered and rejected: expanding to the full national PSGC dataset, or
+adding Region XI (Davao) -- neither addresses a naming-format mismatch,
+and both are out of scope per `.claude/PROJECT_CONTEXT.md`'s explicit
+PCIC Regional Office X-only deployment target.
+
+Scope, confirmed with Fabio: resolve municipality-form and
+parenthetical-qualifier variants (covers all 17 distinct failure patterns
+seen in the log); leave `seed_database.py`'s separate, non-normalized
+lookup path untouched for now.
+
+#### Files
+* `backend/app/api/upload.py`:
+  - Added `_strip_trailing_parenthetical()`: drops a trailing `"(...)"`
+    qualifier from a name. Verified against the full 2,258-row CSV that no
+    municipality has two distinct barangays differing only by such a
+    suffix, so this can't collapse two real places together.
+  - Added `_municipality_alias_variants()`: generates `"X CITY"` <->
+    `"City of X"` and `"Sta./Santo"` <-> `"Santa/Santo"` alternate
+    spellings for a municipality name.
+  - Added `_resolve_psgc_code()`: tries the exact `(province, municipality,
+    barangay)` key first, then retries with municipality alias variants
+    and/or the parenthetical stripped from municipality and/or barangay,
+    before reporting a miss. Every fallback stays scoped to the row's own
+    province (matching is always done within one already-identified
+    province), so it can never match across two different provinces.
+  - `_ingest_row()`'s PSGC lookup now calls `_resolve_psgc_code(boundary_key,
+    _load_psgc_lookup())` instead of a bare dict `.get()`.
+
+#### Status / Next Steps
+* Verified by Fabio -- `cd backend && python -m pytest -v` passes.
+* Verified all 17 distinct failure patterns from the actual upload log
+  resolve correctly against the real CSV data (standalone check, not
+  committed as a test fixture).
+* Still open, separate issue: the same upload run left the remote DB at
+  0 farms despite thousands of rows processing without incident in the
+  log -- `upload_csv()` does one `db.commit()` for the entire file (only
+  per-row `SAVEPOINT`s roll back individually), so whatever ended the
+  request after the logged rows rolled back everything, not just the
+  failed rows. Pending `docker compose ps` / `docker compose logs backend`
+  output from the remote box to identify the actual cause (crash/OOM vs.
+  timeout vs. an uncaught exception) before deciding on a fix (e.g.
+  periodic intermediate commits).
+* `seed_database.py` still reads `psgc_region10_boundaries.csv` through
+  its own separate lookup with no case-folding or alias resolution --
+  flagged, not fixed, per agreed scope.
+
+## [2026-08-14] - Per-typhoon insurance usage tracking
+
+Fabio's request: at the end of an assessment run, mark each farmer whose
+insurance already produced a payout for the specific typhoon being
+assessed, so the system can tell "used for typhoon A" apart from "still
+active/unused" instead of a new typhoon's assessment getting confused by
+a previous typhoon's usage.
+
+Design confirmed with Fabio:
+- **Grain:** tracked per individual `InsuranceRecord` (policy line) x
+  typhoon, not per farmer x typhoon -- matches how `RiskAssessment`
+  already links to `insurance_records_id`, and keeps a farmer's separate
+  farms/policies independently trackable.
+- **"Used" trigger:** `final_indemnity_payment > 0` for that
+  (insurance, typhoon) pair. An eligible-but-zero-payout assessment does
+  NOT mark the insurance as used.
+- **Storage:** a new `tbl_insurance_usage` table is the source of truth
+  (one row per insurance x typhoon, so history survives across multiple
+  typhoons), plus a denormalized `is_used`/`used_for_typhoon_id`/
+  `used_at` mirror directly on `tbl_insurance_records` per Fabio's
+  explicit request for a column on the insurance table itself, for quick
+  "is this currently used" lookups without a join. The mirror only ever
+  reflects the single most recent *actual usage* -- see
+  `AssessmentService._sync_insurance_usage`'s docstring for exactly how
+  it avoids one typhoon's non-usage clobbering a different typhoon's real
+  usage mark (the specific mixing this feature exists to prevent).
+- **Surface:** backend + API only this round, no frontend changes -- no
+  existing UI prototype element covers this status, so nothing was added
+  there per the Scope Guard.
+
+#### Files
+* `backend/app/models/models.py`:
+  - `InsuranceRecord`: added `is_used` (`Boolean`, default `False`),
+    `used_for_typhoon_id` (FK -> `tbl_typhoons`, `SET NULL`), `used_at`
+    (`DateTime`) -- the denormalized mirror described above.
+  - Added **`InsuranceUsage`** (`tbl_insurance_usage`): `usage_id` PK,
+    `insurance_records_id` (FK -> `tbl_insurance_records`, `CASCADE`),
+    `typhoon_id` (FK -> `tbl_typhoons`, `CASCADE`), `assessment_id` (FK ->
+    `tbl_risk_assessment`, `SET NULL`), `is_used`, `marked_at`. Unique
+    constraint on `(insurance_records_id, typhoon_id)`.
+* `backend/init_schema.sql`: added the three new `tbl_insurance_records`
+  columns (with the FK added via a post-`tbl_typhoons` `ALTER TABLE`,
+  since inline `REFERENCES` isn't possible before that table exists in
+  the script), `DROP TABLE IF EXISTS tbl_insurance_usage`, and the new
+  table's `CREATE TABLE`.
+* `backend/migrations/2026-08-14_insurance_typhoon_usage_tracking.sql`:
+  new standalone migration (same statements as the `init_schema.sql`
+  changes, via `ADD COLUMN IF NOT EXISTS`/`CREATE TABLE IF NOT EXISTS`)
+  for bringing an already-provisioned DB up to date without re-running
+  `init_schema.sql`. **Not yet run against any DB -- pending Fabio.**
+* `backend/app/services/assessment_service.py`:
+  - `calculate_for_bulletin()`: now calls `_sync_insurance_usage()` after
+    its existing commit/refresh step.
+  - Added **`_sync_insurance_usage()`**: for every `RiskAssessment` just
+    computed, upserts its `tbl_insurance_usage` row (`is_used` =
+    `final_indemnity_payment > 0`) and updates the `InsuranceRecord`
+    mirror columns, with the "don't clobber a different typhoon's real
+    usage" guard described above.
+* `backend/app/api/insurance.py`:
+  - Added **`get_insurance_usage()`** (`GET /api/insurance/usage`):
+    optional `typhoon_id`/`insurance_records_id` filters, returns
+    `tbl_insurance_usage` rows joined with policy/farmer info.
+* `backend/app/api/assessments.py`:
+  - `list_assessments()` (`GET /api/assessments/`): each row now includes
+    `typhoon_id` (resolved per-row through the assessment's
+    `AreaExposureSummary` when the `typhoon_id` query filter wasn't
+    already used to join it) and `insurance_used` (`true`/`false`/`null`
+    if no usage row exists yet for that typhoon).
+* `.claude/API_CONTRACT.md`: documented `GET /api/insurance/usage`, and
+  the new fields on `GET /api/assessments/` and the usage side-effect of
+  `POST /api/assessments/calculate`.
+
+#### Status / Next Steps
+* Not yet run/tested -- per `.claude/CLAUDE.md`'s venv/DB execution
+  rules, Fabio needs to run the migration himself
+  (`psql -U agrisure_admin -d agrisure_db -f
+  backend/migrations/2026-08-14_insurance_typhoon_usage_tracking.sql`)
+  against the existing dev DB, and the backend test suite, before this is
+  considered verified.
+* Committed on `fabio/backend/insurance-typhoon-usage-tracking`, branched
+  off `develop`. Per Fabio's revised instruction, merged first into local
+  `gayla/frontend/admin-user-management` (not `develop`) for testing via
+  the venv; `develop` itself is untouched until that testing passes.
+  Skips the PR/review step `.claude/GITHUB_WORKFLOW.md` normally requires
+  (Fabio + another developer) once it does reach `develop`. Not pushed to
+  the GitHub remote at any point in this process.
+* No frontend changes. `docs/ERD.drawio.png` was not updated to reflect
+  the new table/columns (it's a rendered `.drawio.png`, not something
+  editable here) -- flagged as now out of date, not fixed.
+

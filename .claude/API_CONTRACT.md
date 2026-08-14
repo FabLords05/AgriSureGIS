@@ -31,8 +31,13 @@
 
 ## 4. Parametric Assessments
 * **POST `/api/assessments/calculate`**
-  - **Description:** Compute exposure hours, yield loss, and claim payouts for all active policies in the typhoon-affected area.
+  - **Description:** Compute exposure hours, yield loss, and claim payouts for all active policies in the typhoon-affected area. At the end of the run, each assessed policy's insurance is marked used/unused for that specific typhoon in `tbl_insurance_usage` (see `AssessmentService._sync_insurance_usage`) — scoped per typhoon so a different typhoon's assessment isn't affected.
   - **Payload:** `{ "typhoon_id": 1, "bulletin_id": 12 }`
-* **GET `/api/assessments/`** - Search and filter calculated risk assessments.
+* **GET `/api/assessments/`** - Search and filter calculated risk assessments. Each row includes `typhoon_id` and `insurance_used` (`true`/`false`/`null` if no usage row exists yet for that typhoon).
 * **GET `/api/assessments/export`**
-  - **Description:** Download payout-ready PCIC-formatted CSV file.\n
+  - **Description:** Download payout-ready PCIC-formatted CSV file.
+
+## 5. Insurance
+* **GET `/api/insurance/summary`** - Counts date-window-active vs. total policies.
+* **GET `/api/insurance/usage`**
+  - **Description:** Per-typhoon insurance usage status from `tbl_insurance_usage`. Optional `typhoon_id` and `insurance_records_id` query filters. Without `typhoon_id`, returns every typhoon a policy has been assessed against — the same policy can be used for one typhoon and unused for another, tracked independently.\n

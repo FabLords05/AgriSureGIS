@@ -69,6 +69,68 @@ def _load_psgc_lookup() -> dict[tuple[str, str, str], str]:
     }
 
 
+_TRAILING_PARENTHETICAL_RE = re.compile(r"\s*\([^)]*\)\s*$")
+
+
+def _strip_trailing_parenthetical(name: str) -> str:
+    """Drops a trailing '(...)' qualifier, e.g. 'POBLACION (TUBOD)' -> 'POBLACION',
+    'DIAZ (ROMUALDEZ)' -> 'DIAZ'. Only ever tried as a fallback after an exact match
+    already failed -- confirmed against the full psgc_region10_boundaries.csv that no
+    municipality has two distinct barangays whose only difference is such a suffix,
+    so this can't accidentally collapse two real places into one."""
+    return _TRAILING_PARENTHETICAL_RE.sub("", name).strip()
+
+
+def _municipality_alias_variants(municipality: str) -> list[str]:
+    """Real PABS exports and psgc_region10_boundaries.csv disagree on a couple of
+    common PH municipality-naming conventions ('Surigao City' vs 'City of Surigao',
+    'Sta. Josefa' vs 'Santa Josefa') -- generate the alternate spelling(s) so a
+    lookup miss on the literal name gets another shot before being reported as a
+    genuinely missing PSGC entry."""
+    variants = []
+    if municipality.endswith(" CITY"):
+        variants.append(f"CITY OF {municipality[: -len(' CITY')]}")
+    elif municipality.startswith("CITY OF "):
+        variants.append(f"{municipality[len('CITY OF '):]} CITY")
+    for abbrev, full in (("STA. ", "SANTA "), ("STO. ", "SANTO ")):
+        if municipality.startswith(abbrev):
+            variants.append(full + municipality[len(abbrev):])
+        elif municipality.startswith(full):
+            variants.append(abbrev + municipality[len(full):])
+    return variants
+
+
+def _resolve_psgc_code(boundary_key: tuple[str, str, str], lookup: dict[tuple[str, str, str], str]) -> str | None:
+    """Looks up a PSGC code for (province, municipality, barangay), retrying a
+    handful of known PABS-export naming variants -- city/municipality form, Sta./
+    Santo abbreviations, a trailing '(...)' qualifier on municipality and/or
+    barangay -- before reporting a genuine miss. Every fallback stays scoped to
+    the row's own province (and, for the parenthetical strip, its own municipality
+    once that's resolved) -- this never matches across two different provinces or
+    municipalities."""
+    if boundary_key in lookup:
+        return lookup[boundary_key]
+
+    province, municipality, barangay = boundary_key
+    municipality_candidates = [municipality, *_municipality_alias_variants(municipality)]
+    barangay_candidates = [barangay]
+    stripped_barangay = _strip_trailing_parenthetical(barangay)
+    if stripped_barangay != barangay:
+        barangay_candidates.append(stripped_barangay)
+
+    for muni in municipality_candidates:
+        muni_candidates = [muni]
+        stripped_muni = _strip_trailing_parenthetical(muni)
+        if stripped_muni != muni:
+            muni_candidates.append(stripped_muni)
+        for m in muni_candidates:
+            for b in barangay_candidates:
+                psgc_code = lookup.get((province, m, b))
+                if psgc_code is not None:
+                    return psgc_code
+    return None
+
+
 def _normalize_value(value: Any) -> Any:
     if value is None:
         return None
@@ -315,7 +377,7 @@ def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> 
             .first()
         )
         if boundary is None:
-            psgc_code = _load_psgc_lookup().get(boundary_key)
+            psgc_code = _resolve_psgc_code(boundary_key, _load_psgc_lookup())
             if psgc_code is None:
                 raise ValueError(
                     f"No PSGC code on file for {boundary_key}. Add it to "
