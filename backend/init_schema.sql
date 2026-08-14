@@ -5,6 +5,7 @@ CREATE EXTENSION IF NOT EXISTS postgis;
 DROP TABLE IF EXISTS tbl_area_exposure_summary CASCADE;
 DROP TABLE IF EXISTS tbl_tcb_signals CASCADE;
 DROP TABLE IF EXISTS tbl_tropical_cyclone_bulletins CASCADE;
+DROP TABLE IF EXISTS tbl_insurance_usage CASCADE;
 DROP TABLE IF EXISTS tbl_typhoons CASCADE;
 DROP TABLE IF EXISTS tbl_risk_assessment CASCADE;
 DROP TABLE IF EXISTS tbl_recsap_matrix CASCADE;
@@ -119,6 +120,13 @@ CREATE TABLE tbl_insurance_records (
     amount_cover NUMERIC(15,2) NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- Denormalized mirror of this record's most recent row in tbl_insurance_usage
+    -- (below) -- convenience snapshot only, not the source of truth for usage
+    -- history across multiple typhoons. See tbl_insurance_usage's comment and
+    -- models.py's InsuranceRecord docstring.
+    is_used BOOLEAN NOT NULL DEFAULT FALSE,
+    used_for_typhoon_id INT,
+    used_at TIMESTAMPTZ,
     CONSTRAINT uq_insurance_records_policy_no_farm_id UNIQUE (policy_no, farm_id)
 );
 
@@ -144,6 +152,28 @@ CREATE TABLE tbl_typhoons (
     name VARCHAR(100) NOT NULL,
     year INT NOT NULL,
     is_active BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+-- tbl_insurance_records.used_for_typhoon_id can't be declared REFERENCES inline
+-- above -- tbl_typhoons doesn't exist yet at that point in the script.
+ALTER TABLE tbl_insurance_records
+    ADD CONSTRAINT fk_insurance_records_used_for_typhoon
+    FOREIGN KEY (used_for_typhoon_id) REFERENCES tbl_typhoons(typhoon_id) ON DELETE SET NULL;
+
+-- Source of truth for "was this policy line used (paid out) for this specific
+-- typhoon" -- one row per (insurance_records_id, typhoon_id), so usage history
+-- survives across multiple typhoons instead of the single-row mirror on
+-- tbl_insurance_records getting overwritten by whichever typhoon assessed it
+-- last. Written by AssessmentService.calculate_for_bulletin at the end of
+-- computing payouts for a typhoon.
+CREATE TABLE tbl_insurance_usage (
+    usage_id SERIAL PRIMARY KEY,
+    insurance_records_id INT NOT NULL REFERENCES tbl_insurance_records(insurance_records_id) ON DELETE CASCADE,
+    typhoon_id INT NOT NULL REFERENCES tbl_typhoons(typhoon_id) ON DELETE CASCADE,
+    assessment_id INT REFERENCES tbl_risk_assessment(assessment_id) ON DELETE SET NULL,
+    is_used BOOLEAN NOT NULL DEFAULT TRUE,
+    marked_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_insurance_usage_insurance_typhoon UNIQUE (insurance_records_id, typhoon_id)
 );
 
 CREATE TABLE tbl_tropical_cyclone_bulletins (

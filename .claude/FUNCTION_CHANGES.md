@@ -3636,3 +3636,91 @@ lookup path untouched for now.
   its own separate lookup with no case-folding or alias resolution --
   flagged, not fixed, per agreed scope.
 
+## [2026-08-14] - Per-typhoon insurance usage tracking
+
+Fabio's request: at the end of an assessment run, mark each farmer whose
+insurance already produced a payout for the specific typhoon being
+assessed, so the system can tell "used for typhoon A" apart from "still
+active/unused" instead of a new typhoon's assessment getting confused by
+a previous typhoon's usage.
+
+Design confirmed with Fabio:
+- **Grain:** tracked per individual `InsuranceRecord` (policy line) x
+  typhoon, not per farmer x typhoon -- matches how `RiskAssessment`
+  already links to `insurance_records_id`, and keeps a farmer's separate
+  farms/policies independently trackable.
+- **"Used" trigger:** `final_indemnity_payment > 0` for that
+  (insurance, typhoon) pair. An eligible-but-zero-payout assessment does
+  NOT mark the insurance as used.
+- **Storage:** a new `tbl_insurance_usage` table is the source of truth
+  (one row per insurance x typhoon, so history survives across multiple
+  typhoons), plus a denormalized `is_used`/`used_for_typhoon_id`/
+  `used_at` mirror directly on `tbl_insurance_records` per Fabio's
+  explicit request for a column on the insurance table itself, for quick
+  "is this currently used" lookups without a join. The mirror only ever
+  reflects the single most recent *actual usage* -- see
+  `AssessmentService._sync_insurance_usage`'s docstring for exactly how
+  it avoids one typhoon's non-usage clobbering a different typhoon's real
+  usage mark (the specific mixing this feature exists to prevent).
+- **Surface:** backend + API only this round, no frontend changes -- no
+  existing UI prototype element covers this status, so nothing was added
+  there per the Scope Guard.
+
+#### Files
+* `backend/app/models/models.py`:
+  - `InsuranceRecord`: added `is_used` (`Boolean`, default `False`),
+    `used_for_typhoon_id` (FK -> `tbl_typhoons`, `SET NULL`), `used_at`
+    (`DateTime`) -- the denormalized mirror described above.
+  - Added **`InsuranceUsage`** (`tbl_insurance_usage`): `usage_id` PK,
+    `insurance_records_id` (FK -> `tbl_insurance_records`, `CASCADE`),
+    `typhoon_id` (FK -> `tbl_typhoons`, `CASCADE`), `assessment_id` (FK ->
+    `tbl_risk_assessment`, `SET NULL`), `is_used`, `marked_at`. Unique
+    constraint on `(insurance_records_id, typhoon_id)`.
+* `backend/init_schema.sql`: added the three new `tbl_insurance_records`
+  columns (with the FK added via a post-`tbl_typhoons` `ALTER TABLE`,
+  since inline `REFERENCES` isn't possible before that table exists in
+  the script), `DROP TABLE IF EXISTS tbl_insurance_usage`, and the new
+  table's `CREATE TABLE`.
+* `backend/migrations/2026-08-14_insurance_typhoon_usage_tracking.sql`:
+  new standalone migration (same statements as the `init_schema.sql`
+  changes, via `ADD COLUMN IF NOT EXISTS`/`CREATE TABLE IF NOT EXISTS`)
+  for bringing an already-provisioned DB up to date without re-running
+  `init_schema.sql`. **Not yet run against any DB -- pending Fabio.**
+* `backend/app/services/assessment_service.py`:
+  - `calculate_for_bulletin()`: now calls `_sync_insurance_usage()` after
+    its existing commit/refresh step.
+  - Added **`_sync_insurance_usage()`**: for every `RiskAssessment` just
+    computed, upserts its `tbl_insurance_usage` row (`is_used` =
+    `final_indemnity_payment > 0`) and updates the `InsuranceRecord`
+    mirror columns, with the "don't clobber a different typhoon's real
+    usage" guard described above.
+* `backend/app/api/insurance.py`:
+  - Added **`get_insurance_usage()`** (`GET /api/insurance/usage`):
+    optional `typhoon_id`/`insurance_records_id` filters, returns
+    `tbl_insurance_usage` rows joined with policy/farmer info.
+* `backend/app/api/assessments.py`:
+  - `list_assessments()` (`GET /api/assessments/`): each row now includes
+    `typhoon_id` (resolved per-row through the assessment's
+    `AreaExposureSummary` when the `typhoon_id` query filter wasn't
+    already used to join it) and `insurance_used` (`true`/`false`/`null`
+    if no usage row exists yet for that typhoon).
+* `.claude/API_CONTRACT.md`: documented `GET /api/insurance/usage`, and
+  the new fields on `GET /api/assessments/` and the usage side-effect of
+  `POST /api/assessments/calculate`.
+
+#### Status / Next Steps
+* Not yet run/tested -- per `.claude/CLAUDE.md`'s venv/DB execution
+  rules, Fabio needs to run the migration himself
+  (`psql -U agrisure_admin -d agrisure_db -f
+  backend/migrations/2026-08-14_insurance_typhoon_usage_tracking.sql`)
+  against the existing dev DB, and the backend test suite, before this is
+  considered verified.
+* Committed on `fabio/backend/insurance-typhoon-usage-tracking`,
+  branched off `develop`, then merged into local `develop` directly at
+  Fabio's explicit request -- skips the PR/review step
+  `.claude/GITHUB_WORKFLOW.md` normally requires (Fabio + another
+  developer). Not yet pushed to the GitHub remote.
+* No frontend changes. `docs/ERD.drawio.png` was not updated to reflect
+  the new table/columns (it's a rendered `.drawio.png`, not something
+  editable here) -- flagged as now out of date, not fixed.
+

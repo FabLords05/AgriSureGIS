@@ -96,8 +96,20 @@ class InsuranceRecord(Base):
     amount_cover = Column(Numeric(12, 2), nullable=False)
     created_at = Column(DateTime, server_default=func.now())
 
+    # Denormalized mirror of this record's MOST RECENT row in tbl_insurance_usage
+    # (see InsuranceUsage below) -- kept in sync by AssessmentService.calculate_for_bulletin
+    # every time it marks/unmarks usage. This is a convenience snapshot for "is this
+    # insurance currently used, and by which typhoon", not the source of truth: a
+    # policy assessed across multiple typhoons keeps its full per-typhoon history in
+    # tbl_insurance_usage, since these three columns can only ever reflect one typhoon
+    # at a time.
+    is_used = Column(Boolean, nullable=False, default=False)
+    used_for_typhoon_id = Column(Integer, ForeignKey("tbl_typhoons.typhoon_id", ondelete="SET NULL"))
+    used_at = Column(DateTime)
+
     farmer = relationship("FarmerProfile")
     farm = relationship("Farm")
+    used_for_typhoon = relationship("Typhoon", foreign_keys=[used_for_typhoon_id])
 
 
 class RecsapMatrix(Base):
@@ -153,6 +165,38 @@ class Typhoon(Base):
     name = Column(String(100), nullable=False)
     year = Column(Integer, nullable=False)
     is_active = Column(Boolean, nullable=False, default=True)
+
+
+class InsuranceUsage(Base):
+    """
+    Source of truth for "was this policy line used (paid out) for this specific
+    typhoon" -- one row per (insurance_records_id, typhoon_id), so a policy's
+    usage history survives across multiple typhoons instead of being overwritten.
+    tbl_insurance_records.is_used/used_for_typhoon_id/used_at is a denormalized
+    mirror of only the latest row here, kept for quick "is this currently used"
+    lookups -- see the docstring on those columns.
+
+    Written by AssessmentService.calculate_for_bulletin at the end of computing
+    payouts for a typhoon: is_used=True when final_indemnity_payment > 0 for that
+    (insurance, typhoon) pair, flipped back to False if a later recompute for the
+    same typhoon drops the payout back to zero.
+    """
+
+    __tablename__ = "tbl_insurance_usage"
+    __table_args__ = (
+        UniqueConstraint("insurance_records_id", "typhoon_id", name="uq_insurance_usage_insurance_typhoon"),
+    )
+
+    usage_id = Column(Integer, primary_key=True, index=True)
+    insurance_records_id = Column(Integer, ForeignKey("tbl_insurance_records.insurance_records_id", ondelete="CASCADE"), nullable=False)
+    typhoon_id = Column(Integer, ForeignKey("tbl_typhoons.typhoon_id", ondelete="CASCADE"), nullable=False)
+    assessment_id = Column(Integer, ForeignKey("tbl_risk_assessment.assessment_id", ondelete="SET NULL"))
+    is_used = Column(Boolean, nullable=False, default=True)
+    marked_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+    insurance_record = relationship("InsuranceRecord", foreign_keys=[insurance_records_id])
+    typhoon = relationship("Typhoon", foreign_keys=[typhoon_id])
+    assessment = relationship("RiskAssessment", foreign_keys=[assessment_id])
 
 
 class TropicalCycloneBulletin(Base):
