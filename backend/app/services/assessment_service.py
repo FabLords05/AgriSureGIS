@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
@@ -145,7 +145,7 @@ class AssessmentService:
         available again for a new one. This is the mixing this feature exists to
         prevent -- see .claude/FUNCTION_CHANGES.md.
         """
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         touched = False
 
         for result in results:

@@ -3855,4 +3855,12 @@ Design confirmed with Fabio:
 * No frontend changes. `docs/ERD.drawio.png` was not updated to reflect
   the new table/columns (it's a rendered `.drawio.png`, not something
   editable here) -- flagged as now out of date, not fixed.
+* **Follow-up same day:** Fabio ran `tests/test_assessment_service.py`
+  in his venv -- all 8 tests passed (including the 4 new
+  `InsuranceUsageSyncTests`), with a `DeprecationWarning` on
+  `datetime.utcnow()`. Switched `_sync_insurance_usage()` to
+  `datetime.now(timezone.utc)`, matching the pattern already used
+  elsewhere (`users.py`, `bulletin_parser.py`, `pagasa_status_scraper.py`)
+  instead of the deprecated form. Migration still not yet run against a
+  real DB.
 
