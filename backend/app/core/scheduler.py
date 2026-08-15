@@ -5,11 +5,19 @@ from apscheduler.schedulers.background import BackgroundScheduler
 
 from app.core.database import SessionLocal
 from app.services.bulletin_parser import BulletinParserService
+from app.services.email_alert_service import send_new_bulletin_alerts
 from app.services.pagasa_status_scraper import PagasaStatusService
 
 logger = logging.getLogger("agrisuregis.scheduler")
 
 BULLETIN_JOB_ID = "pagasa_bulletin_poll"
+
+# Fixed at PAGASA's fastest meaningful cadence -- no longer admin-configurable
+# via the Calibration screen (tbl_parser_settings/api/bulletins/settings still
+# exist and still work if called directly, but nothing in the UI calls the PUT
+# route anymore as of 2026-08-16; the GET route lives on purely as a backend
+# connectivity ping for CalibrationModule's System Status section).
+FIXED_POLL_INTERVAL_MINUTES = 15
 
 
 def run_scheduled_scrape() -> None:
@@ -23,6 +31,7 @@ def run_scheduled_scrape() -> None:
     the scheduler thread.
     """
     db = SessionLocal()
+    created: list[dict] = []
     try:
         created = asyncio.run(BulletinParserService.scrape_and_save_all(db))
         if created:
@@ -38,6 +47,14 @@ def run_scheduled_scrape() -> None:
         logger.info("Synced active-typhoon status: %s", ", ".join(active_names) or "none active")
     except Exception:
         logger.exception("PAGASA active-typhoon status sync failed.")
+
+    # Runs after the active-typhoon sync above (not inside the same try) so
+    # Typhoon.is_active reflects this cycle's freshest status, not the
+    # previous poll's -- see email_alert_service's module docstring.
+    try:
+        send_new_bulletin_alerts(created, db)
+    except Exception:
+        logger.exception("Bulletin alert email step failed.")
     finally:
         db.close()
 

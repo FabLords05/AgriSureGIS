@@ -2,9 +2,10 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.security import get_current_user
 from app.models.models import Typhoon
 
-router = APIRouter(prefix="/typhoons", tags=["typhoons"])
+router = APIRouter(prefix="/typhoons", tags=["typhoons"], dependencies=[Depends(get_current_user)])
 
 
 @router.get("/active")

@@ -67,10 +67,14 @@ export function SpatialModule() {
     setIsUploadingCsv(true);
     setCsvUploadStatus(null);
     try {
-      const result = await uploadCsv(file);
+      // uploadCsv() now only starts a backend job and returns immediately
+      // (2026-08-16, see SpatialAnalysisModule.tsx for the real polling
+      // implementation) -- this component is dead/unreachable code, not
+      // worth building that out here too, just kept type-compatible.
+      const { total_rows } = await uploadCsv(file);
       setCsvUploadStatus({
         type: 'success',
-        message: `${result.message} (${result.rows_inserted} inserted, ${result.rows_skipped} skipped)`,
+        message: `Upload started (${total_rows} row(s)).`,
       });
     } catch (error) {
       setCsvUploadStatus({

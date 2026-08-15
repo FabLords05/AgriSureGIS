@@ -3635,4 +3635,661 @@ lookup path untouched for now.
 * `seed_database.py` still reads `psgc_region10_boundaries.csv` through
   its own separate lookup with no case-folding or alias resolution --
   flagged, not fixed, per agreed scope.
+---
+
+## [2026-08-13] - Real Auth + Admin-Exclusive Panel (branch: gayla/frontend/admin-user-management)
+
+Fabio (via Discord) asked for three related UI changes: remove the "Access
+Level" role picker from Login (keep it on Registration, where it already
+was); move User Account Management out of the general Calibration &
+Settings screen into an admin-exclusive dedicated panel; and give System
+Administrators a different nav altogether, focused on admin
+privileges/maintenance instead of the regular GIS Specialist tabs. Confirmed
+scope with the user before starting: (1) only 2 real roles (GIS
+Specialist/System Administrator) supported, not the UI prototype's wider
+4-option dropdown (Data Analyst/Field Supervisor had no backing permission
+logic anywhere); (2) the *entire* Calibration & Settings screen (including
+User Management) becomes the admin-exclusive panel, not just the User
+Management section in isolation.
+
+Investigation before writing code found: login/registration were **entirely
+mocked** (`LoginScreen.tsx` compared credentials against a hardcoded
+`DEMO_ACCOUNTS` dict client-side; Registration's submit was a bare
+`setTimeout`, never persisted anywhere), `tbl_system_users`/`SystemUser`
+already existed as a DB model with zero backend API routes, and
+`CalibrationModule.tsx`'s "User Account Management" section already existed
+as a pixel-perfect port of the UI prototype's design (add/edit/deactivate
+modals, table) -- just wired to local mock state instead of a backend. So
+this is real end-to-end auth wiring, not new UI invention.
+
+### 1. File: `backend/app/api/users.py` (new)
+* `POST /users/register`: public self-registration, creates a pending
+  (`is_active=False`) `SystemUser` row awaiting admin approval.
+* `POST /users/login`: real credential check (`passlib` bcrypt), replaces
+  the old client-side `DEMO_ACCOUNTS` comparison. Rejects inactive
+  (pending/deactivated) accounts with 403. Returns the same `{name, role,
+  email}` shape `App.tsx`/`authStorage.ts` already expect, so nothing
+  downstream of a successful login needed to change.
+* `GET /users/`, `POST /users/` (admin-created, active immediately),
+  `PATCH /users/{id}` (edit / activate / deactivate) -- back Calibration's
+  User Account Management table.
+* `ALLOWED_ROLES` restricted to the 2 real roles, rejecting anything else
+  with 400.
+
+### 2. File: `backend/requirements.txt` / `requirements-win.txt`
+* Added `passlib==1.7.4` + `bcrypt==4.2.0` -- no password-hashing library
+  existed in this codebase before now.
+
+### 3. File: `backend/app/main.py`
+* Registered `users_router` under `/api`.
+
+### 4. File: `backend/seed_system_users.py` (new)
+* Seeds the two former `DEMO_ACCOUNTS` (Ana Reyes/GIS Specialist, Ramon
+  Santos/System Administrator) as real, active, bcrypt-hashed rows so the
+  same demo credentials shown on the login screen keep working end-to-end.
+  Idempotent (skips existing emails). Same raw-`psycopg2` script pattern as
+  `seed_active_insurance.py`. No schema change needed -- `tbl_system_users`
+  already existed.
+
+### 5. File: `frontend/src/lib/api.ts`
+* Added `SystemUser` type + `loginUser()`, `registerUser()`, `getUsers()`,
+  `createUser()`, `updateUser()`.
+
+### 6. File: `frontend/src/app/components/LoginScreen.tsx`
+* Removed the "Access Level" (GIS Specialist/Administrator) selector from
+  the login step entirely -- role now comes back from the server based on
+  which account matches, not a pre-selected client-side toggle. Kept on
+  `RegistrationPanel` (unchanged there, was already correct).
+* Login's `handleSubmit` now calls `loginUser()`; `RegistrationPanel`'s
+  `handleSubmit` now calls `registerUser()` -- both replace their previous
+  mock logic (`DEMO_ACCOUNTS` comparison / bare `setTimeout`).
+* `DEMO_ACCOUNTS` kept only as a small array driving the "Demo Credentials"
+  hint box (now shows both seeded accounts with per-account Auto-fill,
+  since there's no role toggle to key off of anymore).
+
+### 7. File: `frontend/src/app/components/CalibrationModule.tsx`
+* User Account Management section: replaced the local mock
+  `useState<UserEntry[]>([...])` with a real `getUsers()` fetch on mount
+  (`loadUsers()`, alongside the existing `getParserSettings()` call) plus
+  loading/error states.
+* `handleAddUser`/`handleSaveEditUser`/`handleDeleteUser` now call
+  `createUser()`/`updateUser()` instead of mutating local state directly --
+  each still updates the local `users` array from the real response so the
+  table reflects the server's state, not an optimistic guess.
+* Role `<select>` options (both Add and Edit modals) now come from the
+  shared `USER_ROLES` constant (2 roles), not the prototype's hardcoded
+  4-option list.
+* Layout/design otherwise untouched -- this section was already a faithful
+  port of the UI prototype.
+
+### 8. File: `frontend/src/app/components/Header.tsx`
+* `MODULES` split into `SPECIALIST_MODULES` (Monitoring/Spatial/Assessment)
+  and `ADMIN_MODULES` (a single "Admin Panel" entry, id still
+  `"calibration"` so `App.tsx`'s existing render branch didn't need a new
+  `ModuleId`) -- picked by `currentUser.role === "System Administrator"`.
+* The user-menu "Account Settings" shortcut (previously always routed to
+  `"calibration"`) is now only rendered for admins, relabeled "Admin
+  Panel" -- Specialists have no path to a tab that no longer exists for
+  them.
+
+### 9. File: `frontend/src/app/App.tsx`
+* Default `activeModule` now derived from role at both initial mount
+  (covers a refreshed/persisted admin session) and in `handleLogin` (covers
+  a fresh login) -- admins land on `"calibration"` directly instead of
+  `"monitoring"`, which isn't even a navigable tab for them.
+* Main content render gated by `currentUser.role` directly (not just
+  `activeModule`), as defense in depth -- a stale/mismatched
+  `activeModule` value can never render a Specialist tab for an Admin or
+  vice versa.
+
+### Status / Next Steps
+* Branch: `gayla/frontend/admin-user-management`, off `develop` -- per
+  Fabio's explicit request, **not** pushed straight to `develop` like some
+  recent work; this one goes through a PR for review.
+* Not yet tested end-to-end -- needs `pip install -r requirements-win.txt`
+  (passlib/bcrypt), `python seed_system_users.py`, then a real
+  login/registration/admin-CRUD pass in the running app before opening
+  the PR.
+* No DB schema/migration needed -- `tbl_system_users` already existed;
+  only new data (the seed script), not new structure.
+* **Follow-up same day:** dropped `passlib` entirely in favor of calling
+  `bcrypt` directly in both `users.py` and `seed_system_users.py` --
+  `passlib==1.7.4` (unmaintained since 2020) has a documented compatibility
+  bug with `bcrypt>=4.1.0` (reads a `__about__.__version__` attribute
+  bcrypt removed) that can silently break hashing/verification depending on
+  exact installed versions. Found while investigating an unconfirmed
+  "something's off" report from the user during testing -- not proven to be
+  the actual cause, but a real, well-documented risk worth eliminating
+  regardless. `passlib` removed from both requirements files; `bcrypt` was
+  already present.
+
+## [2026-08-16] - Admin Panel Split, Real Satellite Basemap, Real Backend-Driven Bulletin Alerts (branch: fabio/frontend/user-management-modal-polish)
+
+Testing the `gayla/frontend/admin-user-management` branch surfaced several
+follow-on requests from Fabio, all in the same direction: replace decorative/
+mock admin UI with either real backend behavior or nothing at all, and stop
+burying admin functions behind accordions. Branched off that work
+(`fabio/frontend/user-management-modal-polish`, not yet merged to `develop`)
+since it depends on the real-auth/admin-panel plumbing that branch adds.
+
+### 1. File: `frontend/src/app/components/CalibrationModule.tsx`
+* Restyled the Edit/Add User modals: `Users` icon in the modal header, form
+  fields wrapped in a `bg-muted/40` highlighted container (matching the
+  existing "Live Preview" callout convention), widened `400px` -> `420px`.
+  Same handlers/roles/checkbox, no behavior change.
+* Extracted "User Account Management" (state, handlers, both modals, table)
+  out entirely into a new standalone component/tab -- see file 4 below. No
+  longer a nested accordion section here.
+* Extracted "Database Backup & Restore" out entirely into a new standalone
+  component/tab -- see file 5 below.
+* Removed the "Google Earth Engine Credentials" section outright (not moved
+  anywhere) -- it was pure decorative UI: hardcoded demo `geeProjectId`/
+  `geeApiKey` state, no backend endpoint or real GEE integration existed
+  anywhere in `backend/`. Removed the now-unused `Key`/`Server`/`Eye`/
+  `EyeOff` icon imports with it.
+* Removed the entire "PAGASA Parser & Notification Settings" section (TCB
+  Polling Interval input, Alert Email Recipients input, Email Alerts
+  toggle, On-Screen Pop-up Alerts toggle) -- polling interval is now fixed
+  backend-side (file 6) and email alerts are now real backend automation
+  (file 7), so neither needs or has an admin-facing control anymore. The
+  in-app popup toggle was already decorative (no `onClick`, and the real
+  bulletin toast in `App.tsx` already fires unconditionally).
+* `getParserSettings()` on mount is now used purely as a backend-
+  connectivity ping for the System Status section -- no longer reads
+  `polling_interval_minutes` into local state.
+* `handleSave`/"Save All Settings" no longer calls `updateParserSettings`
+  (removed, see file 3) -- just shows the local "saved" toast.
+* Net effect: this screen now only covers System Status, RSBSA Coverage
+  Rate, Signal Damage Factor Table, Session & Security. Removed the now
+  fully-unused `ConfirmDialog` component/`confirm` state (Database Backup
+  was its only remaining caller) and `Users`/`Database`/`RefreshCw`/`Bell`/
+  `ToggleLeft`/`Plus`/`Trash2` icon imports.
+
+### 2. File: `frontend/src/app/components/UserManagementModule.tsx` (new)
+* Standalone admin page: the extracted User Account Management
+  state/handlers/modals/table from file 1, verbatim aside from no longer
+  being nested in an accordion (own page header + "+ Add User" button
+  where the section's inline button used to be). Own local `ConfirmDialog`
+  copy (small, no cross-file coupling needed for one dialog).
+
+### 3. File: `frontend/src/lib/api.ts`
+* Removed `updateParserSettings()` -- no longer called from anywhere now
+  that the TCB Polling Interval field is gone. `getParserSettings()` kept
+  (connectivity ping, see file 1).
+
+### 4. File: `frontend/src/app/components/DatabaseBackupModule.tsx` (new)
+* Standalone admin page: the extracted Database Backup & Restore
+  state/handlers/dialog from file 1, same treatment as file 2 (own
+  `ConfirmDialog` copy, own page header, no longer an accordion section).
+
+### 5. File: `frontend/src/app/components/Header.tsx`
+* `ADMIN_MODULES` grows from 1 entry to 3: "Admin Panel" (`calibration`),
+  "User Management" (new `"users"` `ModuleId`), "Database Backup" (new
+  `"backup"` `ModuleId`) -- admins now see three tabs instead of one.
+
+### 6. File: `frontend/src/app/App.tsx`
+* Admin render branch now switches on `activeModule` between
+  `CalibrationModule`/`UserManagementModule`/`DatabaseBackupModule`
+  (previously always rendered `CalibrationModule` for any admin, since
+  there was only one admin tab) -- falls back to `CalibrationModule` for
+  any unrecognized value, preserving the original "never render blank for
+  an admin" defensive intent.
+* New import: `UserManagementModule`, `DatabaseBackupModule`.
+
+### 7. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* Replaced the Google Maps/`googlemutant` satellite layer (gated behind an
+  unset `VITE_GOOGLE_MAPS_API_KEY`, so it was silently falling back to
+  OpenStreetMap street tiles -- Google Maps Platform needs a billing-
+  enabled GCP key that was never provisioned) with a single, always-on
+  **Esri World Imagery** `TileLayer` -- free, no API key/billing, high-
+  resolution (often sub-meter in populated/agricultural areas), a curated
+  best-available mosaic so it reads as cloud-free in practice. Removed the
+  `GoogleSatelliteLayer` component, its dynamic Google Maps script loader,
+  and the `GOOGLE_MAPS_API_KEY` env read entirely.
+* Removed `import "leaflet.gridlayer.googlemutant"`.
+
+### 8. File: `frontend/package.json`
+* Removed the now-unused `leaflet.gridlayer.googlemutant` dependency.
+  **Needs `npm install` to sync `node_modules`/lockfile.**
+
+### 9. File: `frontend/src/leaflet-plugins.d.ts` (dead, pending deletion)
+* Only declared types for the now-removed `googlemutant` plugin +
+  `Window.google`. Harmless if left (nothing imports it), but should be
+  deleted (`rm frontend/src/leaflet-plugins.d.ts`) -- blocked on Fabio's
+  own approval/environment, not run via tool call.
+
+### 10. File: `backend/app/core/scheduler.py`
+* New `FIXED_POLL_INTERVAL_MINUTES = 15` module constant -- TCB polling is
+  no longer admin-configurable (was `tbl_parser_settings.
+  polling_interval_minutes`, adjustable 15-1440 min via the now-removed
+  Calibration UI field). `tbl_parser_settings` and the
+  `/api/bulletins/settings` GET/PUT routes are left in place (GET still
+  used as a connectivity ping; PUT is just unreachable from the UI now,
+  not deleted) rather than touching schema/migrations without an explicit
+  ask.
+* `run_scheduled_scrape()`: `created` bulletins list is now initialized
+  before the scrape `try` block (so it's always defined even if the scrape
+  itself raises) and, after the existing active-typhoon sync step, calls
+  `send_new_bulletin_alerts(created, db)` (file 12) in its own try/except
+  -- runs *after* the sync so `Typhoon.is_active` reflects this cycle's
+  freshest status, not the previous poll's.
+
+### 11. File: `backend/app/main.py`
+* `lifespan()` no longer queries `ParserSettings` from the DB at startup --
+  passes `FIXED_POLL_INTERVAL_MINUTES` straight to `build_scheduler()`.
+  Dropped the now-unused `SessionLocal` import/session.
+
+### 12. File: `backend/app/services/email_alert_service.py` (new)
+* `send_new_bulletin_alerts(created, db)`: real SMTP email alerts, replacing
+  the old Calibration screen's decorative "Alert Email Recipients" text
+  field (hardcoded `defaultValue`, no `onChange`, never wired to anything)
+  and "Email Alerts" toggle. Per Fabio's explicit instructions:
+  - Recipients are **all** `tbl_system_users` rows with `is_active = true`
+    -- not a manually-maintained address list.
+  - Only fires for a newly-created bulletin whose `Typhoon.is_active` is
+    currently `True` (re-fetches each `created` dict's bulletin by
+    `tcb_id` to reach its `typhoon` relationship, since the scrape
+    function's return shape doesn't include `typhoon_id`) -- a bulletin
+    that parses successfully for a typhoon PAGASA no longer lists as
+    active is deliberately **not** alerted on.
+  - Same "no-op unless configured" convention as `farms_cache.py`'s
+    optional Redis cache: missing `SMTP_HOST`/`SMTP_USER`/`SMTP_PASSWORD`
+    means the function logs and returns, no error. Uses `smtplib`/
+    `email.mime.text` (stdlib) -- no new pip dependency.
+  - One BCC-style email per alert-worthy batch (recipients passed to
+    `smtplib.SMTP.sendmail()`'s envelope list, not a visible header, so
+    active users' addresses aren't exposed to each other); `To:`/`From:`
+    both set to `SMTP_USER`.
+  - Never raises -- SMTP failure is logged and swallowed, so it can't take
+    down the scrape/parse request or the scheduler thread.
+
+### 13. File: `backend/app/core/scheduler.py` / `backend/app/api/bulletins.py`
+* Both the scheduled background poll (`run_scheduled_scrape`) and the
+  manual "Parse Latest Bulletin" button's route (`trigger_pagasa_scrape`)
+  now call `send_new_bulletin_alerts()` after their respective
+  active-typhoon sync steps -- a manual parse notifies active users the
+  same as an automatic one, since the old UI copy never distinguished
+  "scheduled" vs "manual" for this ("Send email when new TCB is
+  downloaded").
+
+### 14. File: `backend/.env.example` / `.claude/ENV_GUIDE.md`
+* Added `SMTP_PORT` (default `587`, STARTTLS) -- `SMTP_HOST`/`SMTP_USER`/
+  `SMTP_PASSWORD` were already scaffolded as placeholders from an earlier
+  session but never had working code behind them until now. Documented the
+  "unset = no-op" behavior and that `SMTP_USER` doubles as the From/To
+  address.
+
+### Status / Next Steps
+* Not tested end-to-end -- needs, in Fabio's own environment: `npm install`
+  (dependency removal), a dev-server restart (structural frontend changes,
+  not hot-reloadable), and a real SMTP account's credentials in
+  `backend/.env` to actually exercise the email alert path (untestable
+  without them; the no-op path was the only one verifiable here).
+* `backend/app/services/email_alert_service.py` is new and unit-untested --
+  Fabio should run the backend test suite (`python -m pytest`) himself
+  once SMTP credentials are available, and ideally trigger one real manual
+  parse against a known-active typhoon to confirm delivery end-to-end.
+* `tbl_parser_settings` table and its API routes were deliberately left in
+  place rather than removed -- flagging in case Fabio wants that cleaned
+  up properly (schema/migration decision, out of scope for this pass).
+* `frontend/src/leaflet-plugins.d.ts` still needs manual deletion (see
+  file 9) -- blocked on tool sandboxing, not forgotten.
+
+## [2026-08-16] - Real Session-Token Auth, Per-Account Session Timeout, Activity Log (branch: fabio/frontend/user-management-modal-polish)
+
+Same-day follow-on from the entry above. Testing surfaced that the
+Calibration screen's "Session Timeout" dropdown was decorative (set local
+state, nothing read it) -- same category as the other mocks fixed earlier
+today. Investigating what a *real* session timeout would need surfaced a
+much bigger gap: **login issued no token at all**. `POST /api/users/login`
+returned a plain `{name, role, email}` object; the frontend trusted it
+forever in `localStorage`; and no backend route -- including the
+already-admin-gated user-management ones -- ever verified who (or whether
+anyone) was calling it. "Admin-only" was purely a frontend UI convention;
+any route was directly callable by anyone, logged in or not. Fabio confirmed
+scope to fix this for real rather than build session timeout on top of
+nothing: a real signed session token, checked on every route, plus (his
+separate, explicit request) a new admin-only Activity Log recording login,
+logout, and every mutating backend call.
+
+Key design decisions, confirmed with Fabio before implementing:
+- **Stateless JWT, not a DB session table.** Token is invalidated by the
+  frontend discarding it (explicit Logout, or the client-side idle timer)
+  -- not a server-side expiry/blocklist. The token's own `exp` claim (24h)
+  is a fixed safety-net upper bound, not the timeout mechanism.
+- **Session timeout is per-account (DB-backed), not per-browser.** Follows
+  a user to any device they log into, admin-editable from User Management
+  -- resolved after Fabio pointed out a client-only/localStorage-only
+  version wouldn't follow a user to a second PC.
+- **Enforcement is entirely client-side**, via real mouse/keyboard/scroll
+  activity tracking. No server-side heartbeat/last-seen call -- explicitly
+  dropped per Fabio's direction once it was clear the token itself doesn't
+  time out server-side, so a heartbeat wouldn't be doing any security work,
+  only cosmetic "last seen" tracking nobody asked for.
+- **Activity Log records login/logout + mutating calls only** (POST/PUT/
+  PATCH/DELETE), not GETs -- read traffic would drown the log in noise.
+
+### 1. File: `backend/requirements.txt` / `requirements-win.txt`
+* Added `PyJWT==2.10.1`. **Needs `pip install -r requirements(-win).txt`.**
+
+### 2. File: `backend/.env.example` / `.claude/ENV_GUIDE.md`
+* New **required** `JWT_SECRET_KEY` -- deliberately no insecure hardcoded
+  fallback like `DATABASE_URL` has (this is what makes tokens unforgeable).
+  Documented generating one via `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
+
+### 3. File: `backend/app/core/security.py` (new)
+* `create_access_token(user)` -- signs a JWT (`sub`=user_id, `role`, 24h
+  fixed `exp`) with `JWT_SECRET_KEY`. Raises `RuntimeError` at import time
+  if `JWT_SECRET_KEY` is unset, so the backend refuses to start without it
+  rather than silently signing tokens with a guessable default.
+* `get_current_user(request, authorization, db)` -- verifies the
+  `Authorization: Bearer <token>` header FastAPI dependency; re-checks
+  `is_active` on every request (not just at login), so deactivating a user
+  invalidates their token immediately instead of waiting for it to expire.
+  Stamps `request.state.user` -- read back by main.py's activity-log
+  middleware after the route finishes.
+* `require_admin(user)` -- layers a `role == "System Administrator"` check
+  on top, for the genuinely admin-exclusive routes.
+
+### 4. File: `backend/migrations/2026-08-16_session_timeout_minutes.sql` (new) / `backend/init_schema.sql`
+* `ALTER TABLE tbl_system_users ADD COLUMN session_timeout_minutes INT NOT NULL DEFAULT 5`.
+  0 = disabled. `init_schema.sql` updated to create it directly for fresh installs.
+
+### 5. File: `backend/migrations/2026-08-16_activity_log.sql` (new) / `backend/init_schema.sql`
+* New `tbl_activity_log` table (`log_id`, `user_id` FK **nullable** -- a
+  failed/anonymous login attempt has no confirmed identity but is still
+  worth recording, `action`, `endpoint`, `status_code`, `created_at`) +
+  indexes on `created_at DESC` and `user_id`.
+
+### 6. File: `backend/app/models/models.py`
+* `SystemUser`: new `session_timeout_minutes` column (default 5, matches
+  the migration).
+* New `ActivityLog` model (`tbl_activity_log`), with a `user` relationship
+  for the admin-only list endpoint's join.
+
+### 7. File: `backend/app/core/activity_log.py` (new)
+* `record_activity(db, user_id, action, endpoint, status_code)` -- shared
+  write helper used by both main.py's generic middleware (file 9) and
+  `users.py`'s explicit LOGIN/LOGOUT logging (file 8). Never raises -- a
+  logging failure must not break the request it's describing; each write
+  is its own short-lived commit, not sharing a transaction with whatever
+  the route itself is doing.
+
+### 8. File: `backend/app/api/users.py`
+* `POST /login` now returns a real `token` (via `create_access_token`)
+  alongside `user`, which also grew a `session_timeout_minutes` field.
+  Explicitly logs a `LOGIN` activity-log entry on every outcome (invalid
+  credentials, pending-approval, and success) -- not left to the generic
+  middleware, since a failed login has no bearer token yet for
+  `get_current_user` to have resolved an acting user from.
+* New `POST /logout` -- does nothing to the token itself (stateless, no
+  blocklist), exists purely so a `LOGOUT` entry gets recorded before the
+  frontend clears local storage.
+* `GET /`, `POST /`, `PATCH /{user_id}` now require `Depends(require_admin)`
+  -- previously callable by anyone. `POST /register` and `POST /login`
+  stay public (that's how a token is obtained in the first place).
+* `UpdateUserRequest` gained `session_timeout_minutes` (0-120, validated);
+  `update_user` applies it; `_user_to_dict` serializes it.
+
+### 9. File: `backend/app/api/bulletins.py` / `farms.py` / `assessments.py` / `insurance.py` / `typhoons.py` / `upload.py`
+* Each router now declares `dependencies=[Depends(get_current_user)]` at
+  the `APIRouter(...)` level -- one line per file, requires a valid token
+  for every route in that router at once. This is the change that actually
+  closes the "anyone can call any endpoint directly" gap app-wide, not just
+  for user management.
+
+### 10. File: `backend/app/main.py`
+* New `activity_log_middleware` (`@app.middleware("http")`) -- logs every
+  POST/PUT/PATCH/DELETE request after it completes, resolving the acting
+  user from `request.state.user`. Skips `/api/users/login` and
+  `/api/users/logout` (self-logged, see file 8) to avoid double-logging
+  them as a generic `"POST"`.
+* Registers the new `activity_log_router` (file 11).
+
+### 11. File: `backend/app/api/activity_log.py` (new)
+* `GET /api/activity-log/` (admin-only via router-level `Depends(require_admin)`)
+  -- newest-first, capped at `limit` (default/max 200/1000; this table has
+  no upper bound on growth, so an unbounded query isn't safe long-term),
+  optional `user_id` filter. Joins `ActivityLog.user` for display name/email.
+
+### 12. File: `frontend/src/lib/authStorage.ts`
+* `CurrentUser` gained `session_timeout_minutes`. New `persistToken()`/
+  `loadPersistedToken()` (separate `localStorage` key from the user object)
+  -- `clearPersistedUser()` now also clears the token.
+
+### 13. File: `frontend/src/lib/api.ts`
+* `request()` now attaches `Authorization: Bearer <token>` to every call
+  (harmless no-op on the two public routes) and force-clears storage +
+  reloads to the login screen on a `401` from anywhere except login/register
+  (a failed login 401 is a normal wrong-password case, not "your session
+  died," so it's excluded from the force-logout path).
+* `LoginResult` gained `token` + `user.session_timeout_minutes`.
+* New `logoutUser()` (`POST /api/users/logout`) and `getActivityLog()`
+  (`GET /api/activity-log/`, new `ActivityLogEntry` type).
+* `SystemUser`/`UpdateUserPayload` gained `session_timeout_minutes`.
+
+### 14. File: `frontend/src/app/components/LoginScreen.tsx`
+* `onLogin` now passes `(user, token)` instead of just `user`.
+
+### 15. File: `frontend/src/app/App.tsx`
+* `handleLogin` persists the token too (`persistToken`); `handleLogout`
+  fire-and-forgets `logoutUser()` (records the LOGOUT entry) *before*
+  clearing storage, so the call still has a valid token to authenticate
+  with -- logout itself must never be blocked by a slow/failed request.
+* New idle-timeout `useEffect`: real `mousemove`/`keydown`/`mousedown`/
+  `scroll`/`touchstart` listeners only -- deliberately **not** the existing
+  60s background bulletin poll, which is a fetch the app makes on its own,
+  not the user doing anything; counting it would mean a tab left open and
+  genuinely untouched never actually goes idle. Resets a `setTimeout` on
+  activity; fires `handleLogout()` after `currentUser.session_timeout_minutes`
+  idle minutes (skipped entirely if `0`/disabled).
+* Admin render branch now also handles `activeModule === "activity"` ->
+  `ActivityLogModule`.
+
+### 16. File: `frontend/src/app/components/UserManagementModule.tsx`
+* Edit User modal: replaced nothing, *added* a "Session Timeout" `<select>`
+  (same `[0,5,10,15,30]`/"Disabled" convention as the old decorative
+  Calibration dropdown) wired to the real field via `handleSaveEditUser`.
+
+### 17. File: `frontend/src/app/components/ActivityLogModule.tsx` (new)
+* New admin tab: read-only table (timestamp, user, action, endpoint,
+  status) backed by `getActivityLog()`, action-colored badges, manual
+  Refresh button. No auto-poll -- admin-initiated refresh only.
+
+### 18. File: `frontend/src/app/components/Header.tsx`
+* `ADMIN_MODULES` grows to 4 entries: Admin Panel / User Management /
+  Database Backup / **Activity Log** (new `"activity"` `ModuleId`).
+
+### Status / Next Steps
+* **Not tested end-to-end at all** -- this is the largest, highest-risk
+  change of the session. Before this ships anywhere near `develop`, Fabio
+  needs to, in his own environment: `pip install -r requirements(-win).txt`
+  (PyJWT), generate and set `JWT_SECRET_KEY` in `backend/.env` (backend
+  **will not start** without it), apply both new migrations (local *and*
+  remote -- the 2026-08-10 polling-interval migration was previously only
+  applied to remote, don't repeat that split here), `npm install`/restart
+  the frontend, and then a real login/logout/idle-timeout/admin-CRUD/
+  Activity-Log pass in the running app.
+* Every existing frontend `fetch`-based call now depends on a valid token
+  being attached -- if anything was calling `fetch()` directly instead of
+  through `api.ts`'s `request()`, it will start getting 401s. Worth a
+  search before merging.
+* `python -m pytest` has not been run against any of this.
+* Token expiry is a fixed 24h from issuance, every login -- a user who
+  logs in and leaves their session open (not idle, just open) past 24h
+  will be force-logged-out by the `401` handler regardless of activity.
+  Not raised as a problem, just flagging it's a real behavior, not a bug,
+  if it comes up in testing.
+
+## [2026-08-16] - Real Upload Progress: CSV Job Polling + GPX Batch Counter (branch: fabio/frontend/user-management-modal-polish)
+
+Same-day follow-on. Asked whether ingestion progress could be tracked and
+where a loading bar would best go in Spatial Analysis. Investigated both
+upload paths first rather than assuming: GPX already uploads one file at a
+time in a loop, so "file 3 of 12" was trivially trackable client-side with
+no backend change. CSV was a single synchronous request that fully
+processed the file (parse -> farmer-match -> insert, row by row) before
+responding at all -- zero progress visibility, and a real percentage would
+need the row loop's actual position exposed somehow, not a fake/simulated
+bar. Fabio confirmed he wanted the real thing for CSV too, not just a
+spinner, which meant moving that row loop off the request thread entirely.
+
+### 1. File: `backend/app/core/upload_jobs.py` (new)
+* In-memory job registry (`create_job`/`update_progress`/`mark_done`/
+  `mark_error`/`get_job`), lock-protected dict keyed by a UUID job id.
+  Deliberately plain in-process memory, not Redis/a DB table -- same
+  single-worker assumption already documented for the APScheduler job in
+  `scheduler.py` (this repo's dev setup is one `uvicorn` process). Jobs are
+  never explicitly cleaned up -- not worth the complexity at this scale.
+
+### 2. File: `backend/app/api/upload.py`
+* Split `upload_csv`'s body: file validation + parsing stays synchronous
+  in the route (fast); the row-by-row ingestion loop (previously the whole
+  function body) moved into a new `_run_csv_ingestion()`, run in a
+  `threading.Thread` with its **own** `SessionLocal()` session -- the
+  request's `Depends(get_db)` session closes the moment the route returns,
+  long before a real multi-thousand-row export's loop finishes. Logic
+  inside the loop is otherwise unchanged; it now calls
+  `upload_jobs.update_progress(job_id, progress_count)` every row (cheap
+  in-memory write) and `mark_done()`/`mark_error()` at the end instead of
+  `return`ing/raising directly, since there's no request left to return
+  into by the time it finishes.
+* `POST /csv` now returns immediately: `{status: "processing", job_id,
+  total_rows}`, instead of blocking until ingestion completes.
+* New `GET /csv/status/{job_id}` -- `{status, processed, total, result,
+  error}`, polled by the frontend. 404s if the job_id is unknown (e.g. a
+  backend restart wiped the in-memory registry mid-upload).
+
+### 3. File: `frontend/src/lib/api.ts`
+* `uploadCsv()` return type changed from the final ingestion result to
+  `StartCsvUploadResult` (`{status, job_id, total_rows}`).
+* New `getCsvUploadStatus(jobId)` (`GET /api/upload/csv/status/{jobId}`)
+  and `CsvUploadStatus` type -- `result` is the same `UploadCsvResult`
+  shape the old synchronous response used to return directly.
+
+### 4. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* `handleCsvFileSelected` now starts the job, then polls
+  `getCsvUploadStatus()` every 500ms, updating `csvUploadProgress`
+  (`{processed, total}`) until `status: "done"` (shows the same success
+  toast as before, from `status.result`) or `"error"`.
+* `handleGpxFilesSelected` now tracks `gpxUploadProgress`
+  (`{current, total}`), updated after each file in the existing
+  upload-one-at-a-time loop -- no backend change needed, each completed
+  file already was the progress signal.
+* Both "Upload CSV"/"Upload GPX" buttons in the map toolbar (chosen over a
+  separate bar under the toolbar -- the row is already a tight single-line
+  strip of compact controls, and swapping the button's own contents needed
+  no new layout space) now show a spinner + real progress
+  (`Uploading… 47%` / `Uploading 3/12…`) and disable themselves while
+  their respective upload is in flight.
+
+### 5. File: `frontend/src/app/components/SpatialModule.tsx`
+* Dead/unreachable code (confirmed earlier -- nothing imports this
+  component), but still part of the TypeScript build, so `uploadCsv()`'s
+  changed return shape would have broken compilation. Minimally patched
+  to stay type-compatible (reports "Upload started (N rows)" instead of a
+  final result) rather than investing in building out real polling for
+  code nothing renders.
+
+### Status / Next Steps
+* Not tested -- needs a real large-ish CSV upload against a running
+  backend+frontend to confirm the progress bar actually moves smoothly and
+  the final toast/refresh still fires correctly.
+* The in-memory job registry does not survive a backend restart -- an
+  upload in progress when the backend restarts (e.g. `--reload` picking up
+  an unrelated code change) will leave the frontend polling a job_id that
+  now 404s; the row loop itself would also be killed mid-thread, so the
+  ingestion is genuinely incomplete in that case, not just the progress
+  display. Not handled specially -- surfaces as a normal upload-failed
+  toast.
+* No per-user ownership check on `GET /csv/status/{job_id}` -- any
+  authenticated user who knows a job_id (a UUID, not guessable) can poll
+  its status. Acceptable for this app's scale/threat model, not flagged
+  as something to fix now.
+
+---
+
+## [2026-08-16] - Self-Service Account Settings Tab (branch: fabio/frontend/user-management-modal-polish)
+
+Same-day follow-on. Fabio asked for a window where any logged-in user (not
+just an admin editing others) can edit their own session timeout, plus
+"similar features" -- confirmed via follow-up: full name, email, password,
+and session timeout, surfaced as a new dedicated nav tab available to every
+role (not a dropdown modal, not admin-only). No UI-prototype precedent for
+this screen existed; placement/scope were confirmed with Fabio first per
+the Required Process before writing any code. Distinct from
+`UserManagementModule.tsx`, which remains the admin-only screen for editing
+*other* accounts (role/active status included) -- this new route/component
+deliberately cannot touch either of those on yourself.
+
+### 1. File: `backend/app/api/users.py`
+* New **`UpdateMeRequest`** Pydantic model -- `name`, `email`,
+  `session_timeout_minutes`, `current_password`, `new_password`. No
+  `role`/`is_active` fields exist on this model at all (not just left
+  optional/unset), so there is no payload shape that could ever let a user
+  promote or reactivate/deactivate themselves.
+* New **`update_me()`** -- `PATCH /api/users/me`, gated by
+  `Depends(get_current_user)` (any authenticated user), not
+  `require_admin`. Registered in the file **before** the existing
+  `PATCH /{user_id}` route so the static `/me` path is matched first,
+  rather than being swallowed by the int-typed `{user_id}` path parameter.
+  Password change requires `current_password` to verify correctly via the
+  existing `_verify_password()` before `_hash_password()` overwrites
+  `password_hash` -- reuses the same helpers `login_user()`/`update_user()`
+  already use, no new hashing logic. Reuses `_split_name()`/`_user_to_dict()`
+  too. Falls through to the generic activity-log middleware in `main.py`
+  for audit logging (a mutating PATCH call) -- no special-casing needed
+  like `login_user()`/`logout_user()` required.
+
+### 2. File: `frontend/src/lib/api.ts`
+* New `UpdateMePayload` type and `updateMe(payload)` (`PATCH /api/users/me`),
+  alongside the existing admin-only `updateUser(userId, payload)`.
+
+### 3. File: `frontend/src/app/components/AccountSettingsModule.tsx` (new)
+* Self-service tab, styled to match `UserManagementModule.tsx`'s existing
+  modal conventions (`bg-muted/40` field containers, same input/button
+  classes) but rendered inline as a tab, not a modal overlay, per Fabio's
+  placement choice. Two independent sections/save actions:
+  - **Profile & Preferences** -- Full Name, Email, Session Timeout
+    (same `[0, 5, 10, 15, 30]` dropdown convention as the admin Edit User
+    modal). Single "Save Changes" button, disabled unless something
+    actually changed.
+  - **Change Password** -- Current/New/Confirm Password, with client-side
+    length and match validation before the request is even sent. Separate
+    "Update Password" button/flow from the profile save, since it is a
+    materially different, more sensitive action.
+* Both actions call `onUpdated(res.data)` on success so the parent
+  (`App.tsx`) can reconcile the change into `currentUser` immediately.
+
+### 4. File: `frontend/src/app/components/Header.tsx`
+* `ModuleId` gained `"account"`.
+* New `ACCOUNT_MODULE` entry (icon: `UserCog`) appended to whichever list
+  (`ADMIN_MODULES`/`SPECIALIST_MODULES`) is active, rather than duplicated
+  into both arrays -- this tab is the one nav item every role gets
+  regardless of admin/specialist split.
+
+### 5. File: `frontend/src/app/App.tsx`
+* New **`handleAccountUpdate(updated: SystemUser)`** -- maps the backend's
+  full user row back down to the `CurrentUser` shape and calls
+  `setCurrentUser()`/`persistUser()`, the same pair `handleLogin()` uses.
+  Needed so a changed `session_timeout_minutes` is picked up immediately by
+  the existing idle-timeout `useEffect` (keyed on
+  `currentUser?.session_timeout_minutes`) without forcing a re-login, and
+  so a changed name/email shows up in `Header.tsx`'s user menu right away.
+  A changed email does not require re-login either -- the JWT only encodes
+  `user_id`/`role`, not email, so the existing token stays valid.
+* Main-content render now checks `activeModule === "account"` **before**
+  branching on `currentUser.role`, since this is the one tab both branches
+  share -- avoided duplicating the render call into both the admin and
+  specialist branches.
+
+### Status / Next Steps
+* Not tested -- needs a real click-through: profile save reflecting
+  immediately in the header, a session-timeout change actually shortening
+  the idle-logout window without a re-login, a wrong-current-password
+  attempt correctly rejected, and a successful password change actually
+  working on the next login.
+* No new migration -- `name`/`email`/`session_timeout_minutes`/
+  `password_hash` all already exist on `tbl_system_users` from earlier
+  work this session.
 

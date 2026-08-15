@@ -4,9 +4,10 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.security import get_current_user
 from app.models.models import InsuranceRecord
 
-router = APIRouter(prefix="/insurance", tags=["insurance"])
+router = APIRouter(prefix="/insurance", tags=["insurance"], dependencies=[Depends(get_current_user)])
 
 
 @router.get("/summary")

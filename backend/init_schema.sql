@@ -15,6 +15,7 @@ DROP TABLE IF EXISTS tbl_admin_boundaries CASCADE;
 DROP TABLE IF EXISTS tbl_farmers_profile CASCADE;
 DROP TABLE IF EXISTS tbl_system_users CASCADE;
 DROP TABLE IF EXISTS tbl_parser_settings CASCADE;
+DROP TABLE IF EXISTS tbl_activity_log CASCADE;
 
 -- 3. Build the Core Lookup Tables First (Parents)
 CREATE TABLE tbl_system_users (
@@ -27,7 +28,13 @@ CREATE TABLE tbl_system_users (
     role VARCHAR(50) NOT NULL,
     is_active BOOLEAN NOT NULL DEFAULT TRUE,
     last_login TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- Per-account idle-logout policy (2026-08-16 -- see
+    -- backend/migrations/2026-08-16_session_timeout_minutes.sql), admin-set
+    -- per user from User Management, enforced client-side in App.tsx.
+    -- 0 = disabled. Not tied to any server-side token expiry (see
+    -- app/core/security.py's module docstring for why).
+    session_timeout_minutes INT NOT NULL DEFAULT 5
 );
 
 CREATE TABLE tbl_farmers_profile (
@@ -193,6 +200,21 @@ CREATE TABLE tbl_parser_settings (
 );
 
 INSERT INTO tbl_parser_settings (polling_interval_minutes) VALUES (180);
+
+-- 5c. Activity log (2026-08-16) -- backs the admin-only Activity Log tab.
+-- user_id nullable: a failed/anonymous login attempt has no authenticated
+-- user yet, but is still worth recording.
+CREATE TABLE tbl_activity_log (
+    log_id BIGSERIAL PRIMARY KEY,
+    user_id INT REFERENCES tbl_system_users(user_id) ON DELETE SET NULL,
+    action VARCHAR(20) NOT NULL, -- LOGIN, LOGOUT, POST, PUT, PATCH, DELETE
+    endpoint VARCHAR(255) NOT NULL,
+    status_code INT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_activity_log_created_at ON tbl_activity_log (created_at DESC);
+CREATE INDEX idx_activity_log_user_id ON tbl_activity_log (user_id);
 
 -- 6. Optimize Spatial Queries
 CREATE INDEX idx_farms_location_geom ON tbl_farms USING GIST(location_geom);

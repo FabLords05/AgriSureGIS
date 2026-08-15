@@ -4,52 +4,7 @@ import type { Layer } from "leaflet";
 import type { Feature, FeatureCollection } from "geojson";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import "leaflet.gridlayer.googlemutant";
 import { Farm, Assessment, Bulletin, TcbSignal, GeoJsonMultiPolygon, getBulletinSignals } from "@/lib/api";
-
-const GOOGLE_MAPS_API_KEY: string | undefined = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
-
-// Bridges the real Google Maps JavaScript API into Leaflet via the googlemutant
-// plugin, per Fabio's request for real satellite imagery instead of street tiles.
-// The API key is added later by the team that owns it (Fabio's side) -- falls
-// back to the existing OpenStreetMap TileLayer whenever no key is set, so the
-// map never breaks in the meantime.
-function GoogleSatelliteLayer({ apiKey }: { apiKey: string }) {
-  const map = useMap();
-
-  useEffect(() => {
-    let cancelled = false;
-    let layer: L.Layer | null = null;
-
-    const addLayer = () => {
-      if (cancelled) return;
-      layer = (L as any).gridLayer.googleMutant({ type: "satellite" }).addTo(map);
-    };
-
-    if (window.google?.maps) {
-      addLayer();
-    } else {
-      const existing = document.getElementById("google-maps-script") as HTMLScriptElement | null;
-      if (existing) {
-        existing.addEventListener("load", addLayer);
-      } else {
-        const script = document.createElement("script");
-        script.id = "google-maps-script";
-        script.src = `https://maps.googleapis.com/maps/api/js?key=${apiKey}`;
-        script.async = true;
-        script.addEventListener("load", addLayer);
-        document.head.appendChild(script);
-      }
-    }
-
-    return () => {
-      cancelled = true;
-      if (layer) map.removeLayer(layer);
-    };
-  }, [map, apiKey]);
-
-  return null;
-}
 
 interface FarmRow extends Farm {
   assessment: Assessment | null;
@@ -367,14 +322,16 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
         <FlyToMunicipality municipality={focusMunicipality ?? null} boundaries={regionXBoundaries} />
         <MapBoundsWatcher onBoundsChange={handleBoundsChange} />
 
-        {GOOGLE_MAPS_API_KEY ? (
-          <GoogleSatelliteLayer apiKey={GOOGLE_MAPS_API_KEY} />
-        ) : (
-          <TileLayer
-            attribution='&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a>'
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-          />
-        )}
+        {/* Esri World Imagery -- free, no API key/billing required. High-resolution
+            (often sub-meter in populated/agricultural areas), curated best-available
+            mosaic so it reads as cloud-free in practice. Replaced the earlier
+            Google Maps/googlemutant satellite layer (needed a billing-enabled GCP
+            key that was never provisioned) and the OpenStreetMap street tiles it
+            fell back to. */}
+        <TileLayer
+          attribution='Tiles &copy; <a href="https://www.esri.com/" target="_blank" rel="noopener noreferrer">Esri</a> — Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community'
+          url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
+        />
 
         {/* Optional GeoServer WMS reference overlay for farm boundaries — additive only,
             the interactive farm layer below (click/popup, from FastAPI) is unaffected. */}
