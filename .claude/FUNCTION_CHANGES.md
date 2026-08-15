@@ -3699,3 +3699,175 @@ this is real end-to-end auth wiring, not new UI invention.
   regardless. `passlib` removed from both requirements files; `bcrypt` was
   already present.
 
+## [2026-08-16] - Admin Panel Split, Real Satellite Basemap, Real Backend-Driven Bulletin Alerts (branch: fabio/frontend/user-management-modal-polish)
+
+Testing the `gayla/frontend/admin-user-management` branch surfaced several
+follow-on requests from Fabio, all in the same direction: replace decorative/
+mock admin UI with either real backend behavior or nothing at all, and stop
+burying admin functions behind accordions. Branched off that work
+(`fabio/frontend/user-management-modal-polish`, not yet merged to `develop`)
+since it depends on the real-auth/admin-panel plumbing that branch adds.
+
+### 1. File: `frontend/src/app/components/CalibrationModule.tsx`
+* Restyled the Edit/Add User modals: `Users` icon in the modal header, form
+  fields wrapped in a `bg-muted/40` highlighted container (matching the
+  existing "Live Preview" callout convention), widened `400px` -> `420px`.
+  Same handlers/roles/checkbox, no behavior change.
+* Extracted "User Account Management" (state, handlers, both modals, table)
+  out entirely into a new standalone component/tab -- see file 4 below. No
+  longer a nested accordion section here.
+* Extracted "Database Backup & Restore" out entirely into a new standalone
+  component/tab -- see file 5 below.
+* Removed the "Google Earth Engine Credentials" section outright (not moved
+  anywhere) -- it was pure decorative UI: hardcoded demo `geeProjectId`/
+  `geeApiKey` state, no backend endpoint or real GEE integration existed
+  anywhere in `backend/`. Removed the now-unused `Key`/`Server`/`Eye`/
+  `EyeOff` icon imports with it.
+* Removed the entire "PAGASA Parser & Notification Settings" section (TCB
+  Polling Interval input, Alert Email Recipients input, Email Alerts
+  toggle, On-Screen Pop-up Alerts toggle) -- polling interval is now fixed
+  backend-side (file 6) and email alerts are now real backend automation
+  (file 7), so neither needs or has an admin-facing control anymore. The
+  in-app popup toggle was already decorative (no `onClick`, and the real
+  bulletin toast in `App.tsx` already fires unconditionally).
+* `getParserSettings()` on mount is now used purely as a backend-
+  connectivity ping for the System Status section -- no longer reads
+  `polling_interval_minutes` into local state.
+* `handleSave`/"Save All Settings" no longer calls `updateParserSettings`
+  (removed, see file 3) -- just shows the local "saved" toast.
+* Net effect: this screen now only covers System Status, RSBSA Coverage
+  Rate, Signal Damage Factor Table, Session & Security. Removed the now
+  fully-unused `ConfirmDialog` component/`confirm` state (Database Backup
+  was its only remaining caller) and `Users`/`Database`/`RefreshCw`/`Bell`/
+  `ToggleLeft`/`Plus`/`Trash2` icon imports.
+
+### 2. File: `frontend/src/app/components/UserManagementModule.tsx` (new)
+* Standalone admin page: the extracted User Account Management
+  state/handlers/modals/table from file 1, verbatim aside from no longer
+  being nested in an accordion (own page header + "+ Add User" button
+  where the section's inline button used to be). Own local `ConfirmDialog`
+  copy (small, no cross-file coupling needed for one dialog).
+
+### 3. File: `frontend/src/lib/api.ts`
+* Removed `updateParserSettings()` -- no longer called from anywhere now
+  that the TCB Polling Interval field is gone. `getParserSettings()` kept
+  (connectivity ping, see file 1).
+
+### 4. File: `frontend/src/app/components/DatabaseBackupModule.tsx` (new)
+* Standalone admin page: the extracted Database Backup & Restore
+  state/handlers/dialog from file 1, same treatment as file 2 (own
+  `ConfirmDialog` copy, own page header, no longer an accordion section).
+
+### 5. File: `frontend/src/app/components/Header.tsx`
+* `ADMIN_MODULES` grows from 1 entry to 3: "Admin Panel" (`calibration`),
+  "User Management" (new `"users"` `ModuleId`), "Database Backup" (new
+  `"backup"` `ModuleId`) -- admins now see three tabs instead of one.
+
+### 6. File: `frontend/src/app/App.tsx`
+* Admin render branch now switches on `activeModule` between
+  `CalibrationModule`/`UserManagementModule`/`DatabaseBackupModule`
+  (previously always rendered `CalibrationModule` for any admin, since
+  there was only one admin tab) -- falls back to `CalibrationModule` for
+  any unrecognized value, preserving the original "never render blank for
+  an admin" defensive intent.
+* New import: `UserManagementModule`, `DatabaseBackupModule`.
+
+### 7. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* Replaced the Google Maps/`googlemutant` satellite layer (gated behind an
+  unset `VITE_GOOGLE_MAPS_API_KEY`, so it was silently falling back to
+  OpenStreetMap street tiles -- Google Maps Platform needs a billing-
+  enabled GCP key that was never provisioned) with a single, always-on
+  **Esri World Imagery** `TileLayer` -- free, no API key/billing, high-
+  resolution (often sub-meter in populated/agricultural areas), a curated
+  best-available mosaic so it reads as cloud-free in practice. Removed the
+  `GoogleSatelliteLayer` component, its dynamic Google Maps script loader,
+  and the `GOOGLE_MAPS_API_KEY` env read entirely.
+* Removed `import "leaflet.gridlayer.googlemutant"`.
+
+### 8. File: `frontend/package.json`
+* Removed the now-unused `leaflet.gridlayer.googlemutant` dependency.
+  **Needs `npm install` to sync `node_modules`/lockfile.**
+
+### 9. File: `frontend/src/leaflet-plugins.d.ts` (dead, pending deletion)
+* Only declared types for the now-removed `googlemutant` plugin +
+  `Window.google`. Harmless if left (nothing imports it), but should be
+  deleted (`rm frontend/src/leaflet-plugins.d.ts`) -- blocked on Fabio's
+  own approval/environment, not run via tool call.
+
+### 10. File: `backend/app/core/scheduler.py`
+* New `FIXED_POLL_INTERVAL_MINUTES = 15` module constant -- TCB polling is
+  no longer admin-configurable (was `tbl_parser_settings.
+  polling_interval_minutes`, adjustable 15-1440 min via the now-removed
+  Calibration UI field). `tbl_parser_settings` and the
+  `/api/bulletins/settings` GET/PUT routes are left in place (GET still
+  used as a connectivity ping; PUT is just unreachable from the UI now,
+  not deleted) rather than touching schema/migrations without an explicit
+  ask.
+* `run_scheduled_scrape()`: `created` bulletins list is now initialized
+  before the scrape `try` block (so it's always defined even if the scrape
+  itself raises) and, after the existing active-typhoon sync step, calls
+  `send_new_bulletin_alerts(created, db)` (file 12) in its own try/except
+  -- runs *after* the sync so `Typhoon.is_active` reflects this cycle's
+  freshest status, not the previous poll's.
+
+### 11. File: `backend/app/main.py`
+* `lifespan()` no longer queries `ParserSettings` from the DB at startup --
+  passes `FIXED_POLL_INTERVAL_MINUTES` straight to `build_scheduler()`.
+  Dropped the now-unused `SessionLocal` import/session.
+
+### 12. File: `backend/app/services/email_alert_service.py` (new)
+* `send_new_bulletin_alerts(created, db)`: real SMTP email alerts, replacing
+  the old Calibration screen's decorative "Alert Email Recipients" text
+  field (hardcoded `defaultValue`, no `onChange`, never wired to anything)
+  and "Email Alerts" toggle. Per Fabio's explicit instructions:
+  - Recipients are **all** `tbl_system_users` rows with `is_active = true`
+    -- not a manually-maintained address list.
+  - Only fires for a newly-created bulletin whose `Typhoon.is_active` is
+    currently `True` (re-fetches each `created` dict's bulletin by
+    `tcb_id` to reach its `typhoon` relationship, since the scrape
+    function's return shape doesn't include `typhoon_id`) -- a bulletin
+    that parses successfully for a typhoon PAGASA no longer lists as
+    active is deliberately **not** alerted on.
+  - Same "no-op unless configured" convention as `farms_cache.py`'s
+    optional Redis cache: missing `SMTP_HOST`/`SMTP_USER`/`SMTP_PASSWORD`
+    means the function logs and returns, no error. Uses `smtplib`/
+    `email.mime.text` (stdlib) -- no new pip dependency.
+  - One BCC-style email per alert-worthy batch (recipients passed to
+    `smtplib.SMTP.sendmail()`'s envelope list, not a visible header, so
+    active users' addresses aren't exposed to each other); `To:`/`From:`
+    both set to `SMTP_USER`.
+  - Never raises -- SMTP failure is logged and swallowed, so it can't take
+    down the scrape/parse request or the scheduler thread.
+
+### 13. File: `backend/app/core/scheduler.py` / `backend/app/api/bulletins.py`
+* Both the scheduled background poll (`run_scheduled_scrape`) and the
+  manual "Parse Latest Bulletin" button's route (`trigger_pagasa_scrape`)
+  now call `send_new_bulletin_alerts()` after their respective
+  active-typhoon sync steps -- a manual parse notifies active users the
+  same as an automatic one, since the old UI copy never distinguished
+  "scheduled" vs "manual" for this ("Send email when new TCB is
+  downloaded").
+
+### 14. File: `backend/.env.example` / `.claude/ENV_GUIDE.md`
+* Added `SMTP_PORT` (default `587`, STARTTLS) -- `SMTP_HOST`/`SMTP_USER`/
+  `SMTP_PASSWORD` were already scaffolded as placeholders from an earlier
+  session but never had working code behind them until now. Documented the
+  "unset = no-op" behavior and that `SMTP_USER` doubles as the From/To
+  address.
+
+### Status / Next Steps
+* Not tested end-to-end -- needs, in Fabio's own environment: `npm install`
+  (dependency removal), a dev-server restart (structural frontend changes,
+  not hot-reloadable), and a real SMTP account's credentials in
+  `backend/.env` to actually exercise the email alert path (untestable
+  without them; the no-op path was the only one verifiable here).
+* `backend/app/services/email_alert_service.py` is new and unit-untested --
+  Fabio should run the backend test suite (`python -m pytest`) himself
+  once SMTP credentials are available, and ideally trigger one real manual
+  parse against a known-active typhoon to confirm delivery end-to-end.
+* `tbl_parser_settings` table and its API routes were deliberately left in
+  place rather than removed -- flagging in case Fabio wants that cleaned
+  up properly (schema/migration decision, out of scope for this pass).
+* `frontend/src/leaflet-plugins.d.ts` still needs manual deletion (see
+  file 9) -- blocked on tool sandboxing, not forgotten.
+
