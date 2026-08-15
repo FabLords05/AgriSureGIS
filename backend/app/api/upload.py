@@ -2,6 +2,7 @@ import functools
 import io
 import logging
 import re
+import threading
 import time
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
@@ -15,14 +16,16 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.core.database import get_db
+from app.core import upload_jobs
+from app.core.database import SessionLocal, get_db
 from app.core.farms_cache import invalidate_farms_cache
 from app.core.farms_view import refresh_farm_latest_insurance_view
+from app.core.security import get_current_user
 from app.models import models
 from app.services.gpx_farmer_matcher import GpxFarmerMatcherService
 from app.services.gpx_parser import GpxParserService
 
-router = APIRouter(prefix="/api/upload", tags=["upload"])
+router = APIRouter(prefix="/api/upload", tags=["upload"], dependencies=[Depends(get_current_user)])
 
 logger = logging.getLogger(__name__)
 
@@ -445,11 +448,158 @@ def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> 
     return _result("inserted")
 
 
+def _run_csv_ingestion(job_id: str, filename: str, dataframe: pd.DataFrame) -> None:
+    """
+    The actual row-by-row ingestion work, moved off the request thread
+    (2026-08-16) so the frontend can poll GET /csv/status/{job_id} for a
+    real percentage instead of the request just hanging until it's all
+    done. Runs in its own background thread with its own DB session --
+    the request's `Depends(get_db)` session is closed the moment
+    upload_csv() below returns, long before this finishes for a real
+    multi-thousand-row export.
+
+    Logic here is unchanged from before this split, just no longer able to
+    raise HTTPException (there's no request to raise it into) -- caught and
+    turned into upload_jobs.mark_error() instead.
+    """
+    db = SessionLocal()
+    try:
+        total_rows = len(dataframe)
+        logger.info("CSV ingestion started: %s (%d row(s))", filename, total_rows)
+        start_time = time.monotonic()
+
+        processed_rows = 0
+        inserted_rows = 0
+        skipped_rows = 0
+        failed_rows = 0
+        failures: list[dict[str, Any]] = []
+
+        # Parsing a row (prepare_row_payload) never touches the DB, so failures here
+        # are recorded up front without spending a SAVEPOINT on them. This also gives
+        # _prefetch_caches() every row's lookup keys before any DB work starts.
+        prepared_rows: list[tuple[int, dict[str, Any]]] = []
+        for row_number, (_, row) in enumerate(dataframe.iterrows(), start=1):
+            processed_rows += 1
+            try:
+                prepared_rows.append((row_number, prepare_row_payload(row)))
+            except Exception as exc:
+                failed_rows += 1
+                failures.append({"row": row_number, "policy_no": None, "error": str(exc)})
+
+        caches = _prefetch_caches(prepared_rows, db)
+        logger.info(
+            "CSV ingestion prefetch complete for %s: %d boundary(ies), %d farmer(s) by ID, "
+            "%d farmer(s) by RSBSA, %d farm(s) cached",
+            filename, len(caches.boundaries), len(caches.farmers_by_farmers_id),
+            len(caches.farmers_by_rsbsa_no), len(caches.farms_by_reference),
+        )
+
+        try:
+            for progress_count, (row_number, payload) in enumerate(prepared_rows, start=1):
+                # Per-row SAVEPOINT: an unresolvable row (unmappable boundary, etc.) is
+                # rolled back and recorded without discarding every other
+                # already-processed row in this same upload -- a 23,917-row real
+                # export isn't going to be perfectly clean, and one bad row shouldn't
+                # cost every good one.
+                savepoint = db.begin_nested()
+                try:
+                    result = _ingest_row(payload, db, caches)
+                    if result.outcome == "inserted":
+                        inserted_rows += 1
+                    else:
+                        skipped_rows += 1
+                    savepoint.commit()
+                    caches.boundaries[result.boundary_key] = result.boundary
+                    if result.farmers_id:
+                        caches.farmers_by_farmers_id[result.farmers_id] = result.farmer
+                    if result.rsbsa_no:
+                        caches.farmers_by_rsbsa_no[result.rsbsa_no] = result.farmer
+                    if result.farm_reference:
+                        caches.farms_by_reference[result.farm_reference] = result.farm
+                except Exception as exc:
+                    savepoint.rollback()
+                    failed_rows += 1
+                    failures.append(
+                        {
+                            "row": row_number,
+                            "policy_no": payload["insurance"]["policy_no"],
+                            "error": str(exc),
+                        }
+                    )
+                    logger.warning("CSV ingestion row %d failed: %s", row_number, exc)
+
+                # Every row, not gated by _PROGRESS_LOG_EVERY -- this is just an
+                # in-memory dict write behind a lock (see upload_jobs.py), cheap
+                # enough to do every row for a smooth-looking progress bar, unlike
+                # the log line below which stays throttled to avoid log spam.
+                upload_jobs.update_progress(job_id, progress_count)
+
+                if progress_count % _PROGRESS_LOG_EVERY == 0 or progress_count == len(prepared_rows):
+                    elapsed = time.monotonic() - start_time
+                    rate = progress_count / elapsed if elapsed > 0 else 0.0
+                    logger.info(
+                        "CSV ingestion progress for %s: %d/%d row(s) (%.1f rows/sec) -- %d inserted, %d skipped, %d failed",
+                        filename, progress_count, total_rows, rate, inserted_rows, skipped_rows, failed_rows,
+                    )
+
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            logger.exception("CSV ingestion for %s failed and was rolled back", filename)
+            upload_jobs.mark_error(job_id, f"CSV ingestion failed: {exc}")
+            return
+
+        # A no-op unless REDIS_URL is configured -- see app/core/farms_cache.py.
+        # Without this, a page cached before this ingest could keep serving
+        # stale data for up to the cache's TTL after a CSV upload just changed it.
+        invalidate_farms_cache()
+        # A no-op unless the migration in backend/migrations/2026-08-09_farms_perf.sql
+        # has been applied -- see app/core/farms_view.py. This CSV ingest can
+        # insert/update InsuranceRecord rows, which the view precomputes "most
+        # recent per farm" from.
+        refresh_farm_latest_insurance_view(db)
+
+        elapsed = time.monotonic() - start_time
+        logger.info(
+            "CSV ingestion finished: %s in %.1fs -- %d processed, %d inserted, %d skipped, %d failed",
+            filename, elapsed, processed_rows, inserted_rows, skipped_rows, failed_rows,
+        )
+
+        message = "CSV data ingested successfully."
+        if failed_rows:
+            message = f"CSV data ingested with {failed_rows} row(s) skipped due to errors."
+
+        upload_jobs.mark_done(job_id, {
+            "status": "success",
+            "message": message,
+            "rows_processed": processed_rows,
+            "rows_inserted": inserted_rows,
+            "rows_skipped": skipped_rows,
+            "rows_failed": failed_rows,
+            "failures": failures[:50],
+        })
+    except Exception as exc:
+        # Catch-all -- nothing else will surface an unexpected failure in a
+        # background thread; an unhandled exception here would otherwise just
+        # vanish into the thread's stderr and leave the job stuck "processing"
+        # forever from the frontend's point of view.
+        logger.exception("CSV ingestion for %s crashed unexpectedly", filename)
+        upload_jobs.mark_error(job_id, str(exc))
+    finally:
+        db.close()
+
+
 @router.post("/csv", status_code=status.HTTP_200_OK)
 def upload_csv(
     file: UploadFile = File(...),
-    db: Session = Depends(get_db),
 ):
+    """
+    Validates and parses the file synchronously (fast), then hands the slow
+    row-by-row ingestion off to a background thread (see
+    _run_csv_ingestion above) and returns immediately with a job_id --
+    poll GET /csv/status/{job_id} for real progress instead of the request
+    blocking until a large export finishes.
+    """
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Please upload a CSV file.")
 
@@ -478,7 +628,8 @@ def upload_csv(
         raise HTTPException(status_code=400, detail=f"Unable to decode CSV file: {last_error}")
 
     if dataframe.empty:
-        return {
+        job_id = upload_jobs.create_job(total=0)
+        upload_jobs.mark_done(job_id, {
             "status": "success",
             "message": "No rows were found in the uploaded CSV.",
             "rows_processed": 0,
@@ -486,114 +637,31 @@ def upload_csv(
             "rows_skipped": 0,
             "rows_failed": 0,
             "failures": [],
-        }
+        })
+        return {"status": "processing", "job_id": job_id, "total_rows": 0}
 
     total_rows = len(dataframe)
-    logger.info("CSV ingestion started: %s (%d row(s))", file.filename, total_rows)
-    start_time = time.monotonic()
+    job_id = upload_jobs.create_job(total=total_rows)
+    threading.Thread(
+        target=_run_csv_ingestion,
+        args=(job_id, file.filename, dataframe),
+        daemon=True,
+    ).start()
 
-    processed_rows = 0
-    inserted_rows = 0
-    skipped_rows = 0
-    failed_rows = 0
-    failures: list[dict[str, Any]] = []
+    return {"status": "processing", "job_id": job_id, "total_rows": total_rows}
 
-    # Parsing a row (prepare_row_payload) never touches the DB, so failures here
-    # are recorded up front without spending a SAVEPOINT on them. This also gives
-    # _prefetch_caches() every row's lookup keys before any DB work starts.
-    prepared_rows: list[tuple[int, dict[str, Any]]] = []
-    for row_number, (_, row) in enumerate(dataframe.iterrows(), start=1):
-        processed_rows += 1
-        try:
-            prepared_rows.append((row_number, prepare_row_payload(row)))
-        except Exception as exc:
-            failed_rows += 1
-            failures.append({"row": row_number, "policy_no": None, "error": str(exc)})
 
-    caches = _prefetch_caches(prepared_rows, db)
-    logger.info(
-        "CSV ingestion prefetch complete for %s: %d boundary(ies), %d farmer(s) by ID, "
-        "%d farmer(s) by RSBSA, %d farm(s) cached",
-        file.filename, len(caches.boundaries), len(caches.farmers_by_farmers_id),
-        len(caches.farmers_by_rsbsa_no), len(caches.farms_by_reference),
-    )
-
-    try:
-        for progress_count, (row_number, payload) in enumerate(prepared_rows, start=1):
-            # Per-row SAVEPOINT: an unresolvable row (unmappable boundary, etc.) is
-            # rolled back and recorded without discarding every other
-            # already-processed row in this same upload -- a 23,917-row real
-            # export isn't going to be perfectly clean, and one bad row shouldn't
-            # cost every good one.
-            savepoint = db.begin_nested()
-            try:
-                result = _ingest_row(payload, db, caches)
-                if result.outcome == "inserted":
-                    inserted_rows += 1
-                else:
-                    skipped_rows += 1
-                savepoint.commit()
-                caches.boundaries[result.boundary_key] = result.boundary
-                if result.farmers_id:
-                    caches.farmers_by_farmers_id[result.farmers_id] = result.farmer
-                if result.rsbsa_no:
-                    caches.farmers_by_rsbsa_no[result.rsbsa_no] = result.farmer
-                if result.farm_reference:
-                    caches.farms_by_reference[result.farm_reference] = result.farm
-            except Exception as exc:
-                savepoint.rollback()
-                failed_rows += 1
-                failures.append(
-                    {
-                        "row": row_number,
-                        "policy_no": payload["insurance"]["policy_no"],
-                        "error": str(exc),
-                    }
-                )
-                logger.warning("CSV ingestion row %d failed: %s", row_number, exc)
-
-            if progress_count % _PROGRESS_LOG_EVERY == 0 or progress_count == len(prepared_rows):
-                elapsed = time.monotonic() - start_time
-                rate = progress_count / elapsed if elapsed > 0 else 0.0
-                logger.info(
-                    "CSV ingestion progress for %s: %d/%d row(s) (%.1f rows/sec) -- %d inserted, %d skipped, %d failed",
-                    file.filename, progress_count, total_rows, rate, inserted_rows, skipped_rows, failed_rows,
-                )
-
-        db.commit()
-    except Exception as exc:
-        db.rollback()
-        logger.exception("CSV ingestion for %s failed and was rolled back", file.filename)
-        raise HTTPException(status_code=500, detail=f"CSV ingestion failed: {exc}") from exc
-
-    # A no-op unless REDIS_URL is configured -- see app/core/farms_cache.py.
-    # Without this, a page cached before this ingest could keep serving
-    # stale data for up to the cache's TTL after a CSV upload just changed it.
-    invalidate_farms_cache()
-    # A no-op unless the migration in backend/migrations/2026-08-09_farms_perf.sql
-    # has been applied -- see app/core/farms_view.py. This CSV ingest can
-    # insert/update InsuranceRecord rows, which the view precomputes "most
-    # recent per farm" from.
-    refresh_farm_latest_insurance_view(db)
-
-    elapsed = time.monotonic() - start_time
-    logger.info(
-        "CSV ingestion finished: %s in %.1fs -- %d processed, %d inserted, %d skipped, %d failed",
-        file.filename, elapsed, processed_rows, inserted_rows, skipped_rows, failed_rows,
-    )
-
-    message = "CSV data ingested successfully."
-    if failed_rows:
-        message = f"CSV data ingested with {failed_rows} row(s) skipped due to errors."
-
+@router.get("/csv/status/{job_id}")
+def get_csv_upload_status(job_id: str):
+    job = upload_jobs.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Unknown upload job (may have been since a backend restart).")
     return {
-        "status": "success",
-        "message": message,
-        "rows_processed": processed_rows,
-        "rows_inserted": inserted_rows,
-        "rows_skipped": skipped_rows,
-        "rows_failed": failed_rows,
-        "failures": failures[:50],
+        "status": job.status,
+        "processed": job.processed,
+        "total": job.total,
+        "result": job.result,
+        "error": job.error,
     }
 
 

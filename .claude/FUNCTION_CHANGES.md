@@ -4057,3 +4057,89 @@ Key design decisions, confirmed with Fabio before implementing:
   Not raised as a problem, just flagging it's a real behavior, not a bug,
   if it comes up in testing.
 
+## [2026-08-16] - Real Upload Progress: CSV Job Polling + GPX Batch Counter (branch: fabio/frontend/user-management-modal-polish)
+
+Same-day follow-on. Asked whether ingestion progress could be tracked and
+where a loading bar would best go in Spatial Analysis. Investigated both
+upload paths first rather than assuming: GPX already uploads one file at a
+time in a loop, so "file 3 of 12" was trivially trackable client-side with
+no backend change. CSV was a single synchronous request that fully
+processed the file (parse -> farmer-match -> insert, row by row) before
+responding at all -- zero progress visibility, and a real percentage would
+need the row loop's actual position exposed somehow, not a fake/simulated
+bar. Fabio confirmed he wanted the real thing for CSV too, not just a
+spinner, which meant moving that row loop off the request thread entirely.
+
+### 1. File: `backend/app/core/upload_jobs.py` (new)
+* In-memory job registry (`create_job`/`update_progress`/`mark_done`/
+  `mark_error`/`get_job`), lock-protected dict keyed by a UUID job id.
+  Deliberately plain in-process memory, not Redis/a DB table -- same
+  single-worker assumption already documented for the APScheduler job in
+  `scheduler.py` (this repo's dev setup is one `uvicorn` process). Jobs are
+  never explicitly cleaned up -- not worth the complexity at this scale.
+
+### 2. File: `backend/app/api/upload.py`
+* Split `upload_csv`'s body: file validation + parsing stays synchronous
+  in the route (fast); the row-by-row ingestion loop (previously the whole
+  function body) moved into a new `_run_csv_ingestion()`, run in a
+  `threading.Thread` with its **own** `SessionLocal()` session -- the
+  request's `Depends(get_db)` session closes the moment the route returns,
+  long before a real multi-thousand-row export's loop finishes. Logic
+  inside the loop is otherwise unchanged; it now calls
+  `upload_jobs.update_progress(job_id, progress_count)` every row (cheap
+  in-memory write) and `mark_done()`/`mark_error()` at the end instead of
+  `return`ing/raising directly, since there's no request left to return
+  into by the time it finishes.
+* `POST /csv` now returns immediately: `{status: "processing", job_id,
+  total_rows}`, instead of blocking until ingestion completes.
+* New `GET /csv/status/{job_id}` -- `{status, processed, total, result,
+  error}`, polled by the frontend. 404s if the job_id is unknown (e.g. a
+  backend restart wiped the in-memory registry mid-upload).
+
+### 3. File: `frontend/src/lib/api.ts`
+* `uploadCsv()` return type changed from the final ingestion result to
+  `StartCsvUploadResult` (`{status, job_id, total_rows}`).
+* New `getCsvUploadStatus(jobId)` (`GET /api/upload/csv/status/{jobId}`)
+  and `CsvUploadStatus` type -- `result` is the same `UploadCsvResult`
+  shape the old synchronous response used to return directly.
+
+### 4. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* `handleCsvFileSelected` now starts the job, then polls
+  `getCsvUploadStatus()` every 500ms, updating `csvUploadProgress`
+  (`{processed, total}`) until `status: "done"` (shows the same success
+  toast as before, from `status.result`) or `"error"`.
+* `handleGpxFilesSelected` now tracks `gpxUploadProgress`
+  (`{current, total}`), updated after each file in the existing
+  upload-one-at-a-time loop -- no backend change needed, each completed
+  file already was the progress signal.
+* Both "Upload CSV"/"Upload GPX" buttons in the map toolbar (chosen over a
+  separate bar under the toolbar -- the row is already a tight single-line
+  strip of compact controls, and swapping the button's own contents needed
+  no new layout space) now show a spinner + real progress
+  (`Uploading… 47%` / `Uploading 3/12…`) and disable themselves while
+  their respective upload is in flight.
+
+### 5. File: `frontend/src/app/components/SpatialModule.tsx`
+* Dead/unreachable code (confirmed earlier -- nothing imports this
+  component), but still part of the TypeScript build, so `uploadCsv()`'s
+  changed return shape would have broken compilation. Minimally patched
+  to stay type-compatible (reports "Upload started (N rows)" instead of a
+  final result) rather than investing in building out real polling for
+  code nothing renders.
+
+### Status / Next Steps
+* Not tested -- needs a real large-ish CSV upload against a running
+  backend+frontend to confirm the progress bar actually moves smoothly and
+  the final toast/refresh still fires correctly.
+* The in-memory job registry does not survive a backend restart -- an
+  upload in progress when the backend restarts (e.g. `--reload` picking up
+  an unrelated code change) will leave the frontend polling a job_id that
+  now 404s; the row loop itself would also be killed mid-thread, so the
+  ingestion is genuinely incomplete in that case, not just the progress
+  display. Not handled specially -- surfaces as a normal upload-failed
+  toast.
+* No per-user ownership check on `GET /csv/status/{job_id}` -- any
+  authenticated user who knows a job_id (a UUID, not guessable) can poll
+  its status. Acceptable for this app's scale/threat model, not flagged
+  as something to fix now.
+

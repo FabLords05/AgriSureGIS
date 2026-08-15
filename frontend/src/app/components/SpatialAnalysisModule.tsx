@@ -2,11 +2,11 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import { toast } from "sonner";
 import {
   Map as MapIcon, ChevronUp, ChevronDown,
-  Filter, ArrowUpDown, UploadCloud, CheckCircle2, Table2, Satellite, ShieldCheck, X, AlertCircle
+  Filter, ArrowUpDown, UploadCloud, CheckCircle2, Table2, Satellite, ShieldCheck, X, AlertCircle, Loader2
 } from "lucide-react";
 import { GISLeafletMap } from "./GISLeafletMap";
 import { AOISARPanel } from "./AOISARPanel";
-import { getAssessments, uploadCsv, uploadGpx, Farm, Assessment, Bulletin } from "@/lib/api";
+import { getAssessments, uploadCsv, uploadGpx, getCsvUploadStatus, Farm, Assessment, Bulletin } from "@/lib/api";
 import { FarmsData } from "@/lib/useFarmsData";
 
 interface FarmRow extends Farm {
@@ -117,6 +117,12 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
   // needs to stay open after the toast itself has faded.
   const [uploadFailureDetails, setUploadFailureDetails] = useState<string[] | null>(null);
   const [showUploadDetails, setShowUploadDetails] = useState(false);
+  // Real progress (2026-08-16), not a fake/simulated bar -- CSV is driven by
+  // polling the backend job's actual row count (see getCsvUploadStatus);
+  // GPX is driven by the upload loop's own position, since each file
+  // completing is itself the progress signal. null = no upload in flight.
+  const [csvUploadProgress, setCsvUploadProgress] = useState<{ processed: number; total: number } | null>(null);
+  const [gpxUploadProgress, setGpxUploadProgress] = useState<{ current: number; total: number } | null>(null);
   const csvInputRef = useRef<HTMLInputElement>(null);
   const gpxInputRef = useRef<HTMLInputElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -257,25 +263,50 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
     else { setSortField(field); setSortDir("asc"); }
   };
 
-  const handleCsvFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Polls the backend job every 500ms for real processed/total counts (see
+  // getCsvUploadStatus) -- not a simulated/fake bar. 500ms is frequent
+  // enough to feel live without hammering the backend on every tick of a
+  // large export that can take a while.
+  const CSV_POLL_MS = 500;
+
+  const handleCsvFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     e.target.value = ""; // allow re-selecting the same filename later
     if (!file) return;
 
-    uploadCsv(file)
-      .then(result => {
-        const failedSuffix = result.rows_failed > 0 ? `, ${result.rows_failed} failed` : "";
-        toast.success(`${result.message} (${result.rows_inserted} inserted, ${result.rows_skipped} skipped${failedSuffix})`);
-        refreshFarms();
-      })
-      .catch(error => {
-        toast.error(error instanceof Error ? error.message : "CSV upload failed.");
-      });
+    try {
+      const { job_id, total_rows } = await uploadCsv(file);
+      setCsvUploadProgress({ processed: 0, total: total_rows });
+
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        await new Promise(resolve => setTimeout(resolve, CSV_POLL_MS));
+        const status = await getCsvUploadStatus(job_id);
+        setCsvUploadProgress({ processed: status.processed, total: status.total });
+
+        if (status.status === "done" && status.result) {
+          const result = status.result;
+          const failedSuffix = result.rows_failed > 0 ? `, ${result.rows_failed} failed` : "";
+          toast.success(`${result.message} (${result.rows_inserted} inserted, ${result.rows_skipped} skipped${failedSuffix})`);
+          refreshFarms();
+          break;
+        }
+        if (status.status === "error") {
+          toast.error(status.error ?? "CSV upload failed.");
+          break;
+        }
+      }
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "CSV upload failed.");
+    } finally {
+      setCsvUploadProgress(null);
+    }
   };
 
   // Farmer/farm for each file is auto-detected from its filename (see
   // GpxFarmerMatcherService) -- uploaded one at a time, not in parallel, so a
-  // large batch doesn't hammer the backend all at once.
+  // large batch doesn't hammer the backend all at once. Each file completing
+  // is itself the progress signal (no backend job needed, unlike CSV above).
   const handleGpxFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
     e.target.value = ""; // allow re-selecting the same filename(s) later
@@ -283,26 +314,32 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
 
     let succeeded = 0;
     const failures: string[] = [];
-    for (const file of files) {
-      try {
-        await uploadGpx(file);
-        succeeded++;
-      } catch (error) {
-        failures.push(`${file.name}: ${error instanceof Error ? error.message : "upload failed"}`);
+    setGpxUploadProgress({ current: 0, total: files.length });
+    try {
+      for (const [index, file] of files.entries()) {
+        try {
+          await uploadGpx(file);
+          succeeded++;
+        } catch (error) {
+          failures.push(`${file.name}: ${error instanceof Error ? error.message : "upload failed"}`);
+        }
+        setGpxUploadProgress({ current: index + 1, total: files.length });
       }
-    }
 
-    if (failures.length === 0) {
-      toast.success(`Uploaded ${succeeded} GPX file(s) successfully.`);
-    } else {
-      toast.error(`${succeeded} succeeded, ${failures.length} failed.`, {
-        action: {
-          label: "View details",
-          onClick: () => { setUploadFailureDetails(failures); setShowUploadDetails(true); },
-        },
-      });
+      if (failures.length === 0) {
+        toast.success(`Uploaded ${succeeded} GPX file(s) successfully.`);
+      } else {
+        toast.error(`${succeeded} succeeded, ${failures.length} failed.`, {
+          action: {
+            label: "View details",
+            onClick: () => { setUploadFailureDetails(failures); setShowUploadDetails(true); },
+          },
+        });
+      }
+      refreshFarms();
+    } finally {
+      setGpxUploadProgress(null);
     }
-    refreshFarms();
   };
 
   const SortIcon = ({ field }: { field: SortField }) =>
@@ -360,9 +397,17 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
             </div>
             <button
               onClick={() => csvInputRef.current?.click()}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#1e3a5f] text-white text-[11px] font-medium hover:bg-[#172f4d] transition-colors"
+              disabled={csvUploadProgress !== null}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#1e3a5f] text-white text-[11px] font-medium hover:bg-[#172f4d] disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
             >
-              <UploadCloud size={11} /> Upload CSV
+              {csvUploadProgress ? (
+                <>
+                  <Loader2 size={11} className="animate-spin" />
+                  Uploading… {csvUploadProgress.total > 0 ? `${Math.round((csvUploadProgress.processed / csvUploadProgress.total) * 100)}%` : ""}
+                </>
+              ) : (
+                <><UploadCloud size={11} /> Upload CSV</>
+              )}
             </button>
             <input
               ref={csvInputRef}
@@ -373,9 +418,17 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
             />
             <button
               onClick={() => gpxInputRef.current?.click()}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#1e3a5f] text-white text-[11px] font-medium hover:bg-[#172f4d] transition-colors"
+              disabled={gpxUploadProgress !== null}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#1e3a5f] text-white text-[11px] font-medium hover:bg-[#172f4d] disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
             >
-              <UploadCloud size={11} /> Upload GPX
+              {gpxUploadProgress ? (
+                <>
+                  <Loader2 size={11} className="animate-spin" />
+                  Uploading {gpxUploadProgress.current}/{gpxUploadProgress.total}…
+                </>
+              ) : (
+                <><UploadCloud size={11} /> Upload GPX</>
+              )}
             </button>
             <input
               ref={gpxInputRef}
