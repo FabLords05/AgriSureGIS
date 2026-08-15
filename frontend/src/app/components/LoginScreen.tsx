@@ -3,7 +3,7 @@ import { Eye, EyeOff, LogIn, Shield, User, AlertCircle, Leaf, UserPlus, ArrowLef
 import { loginUser, registerUser } from "@/lib/api";
 
 interface LoginScreenProps {
-  onLogin: (user: { name: string; role: string; email: string }) => void;
+  onLogin: (user: { name: string; role: string; email: string; session_timeout_minutes: number }, token: string) => void;
 }
 
 // No more role selection at login -- the account's real role now comes back
@@ -289,7 +289,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
 
     setLoading(true);
     loginUser(email.trim(), password)
-      .then(result => onLogin(result.user))
+      .then(result => onLogin(result.user, result.token))
       .catch(error => setError(error instanceof Error ? error.message : "Invalid credentials."))
       .finally(() => setLoading(false));
   };

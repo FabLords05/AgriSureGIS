@@ -8,7 +8,9 @@ import shutil
 
 from app.core.database import get_db
 from app.core.scheduler import reschedule_bulletin_job
+from app.core.security import get_current_user
 from app.services.bulletin_parser import BulletinParserService, PagasaScrapeError
+from app.services.email_alert_service import send_new_bulletin_alerts
 from app.services.exposure_calculator import ExposureCalculatorService
 from app.services.pagasa_status_scraper import PagasaStatusService
 from app.models.models import (
@@ -20,7 +22,7 @@ from app.models.models import (
     Typhoon,
 )
 
-router = APIRouter(prefix="/bulletins", tags=["bulletins"])
+router = APIRouter(prefix="/bulletins", tags=["bulletins"], dependencies=[Depends(get_current_user)])
 
 TEMP_DIR = "temp_bulletins"
 
@@ -123,6 +125,15 @@ async def trigger_pagasa_scrape(db: Session = Depends(get_db)):
         PagasaStatusService.sync_active_typhoons(active_names, db)
     except PagasaScrapeError as e:
         print(f"Error checking PAGASA severe weather bulletin status: {e}")
+
+    # Same alert step the scheduled poll runs -- a manual "Parse Latest
+    # Bulletin" click should notify active users too, not just the automatic
+    # background poll. Runs after the active-typhoon sync above for the same
+    # freshness reason (see email_alert_service's module docstring).
+    try:
+        send_new_bulletin_alerts(bulletins_created, db)
+    except Exception as e:
+        print(f"Bulletin alert email step failed: {e}")
 
     return {
         "status": "success",

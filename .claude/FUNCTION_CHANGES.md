@@ -3871,3 +3871,189 @@ since it depends on the real-auth/admin-panel plumbing that branch adds.
 * `frontend/src/leaflet-plugins.d.ts` still needs manual deletion (see
   file 9) -- blocked on tool sandboxing, not forgotten.
 
+## [2026-08-16] - Real Session-Token Auth, Per-Account Session Timeout, Activity Log (branch: fabio/frontend/user-management-modal-polish)
+
+Same-day follow-on from the entry above. Testing surfaced that the
+Calibration screen's "Session Timeout" dropdown was decorative (set local
+state, nothing read it) -- same category as the other mocks fixed earlier
+today. Investigating what a *real* session timeout would need surfaced a
+much bigger gap: **login issued no token at all**. `POST /api/users/login`
+returned a plain `{name, role, email}` object; the frontend trusted it
+forever in `localStorage`; and no backend route -- including the
+already-admin-gated user-management ones -- ever verified who (or whether
+anyone) was calling it. "Admin-only" was purely a frontend UI convention;
+any route was directly callable by anyone, logged in or not. Fabio confirmed
+scope to fix this for real rather than build session timeout on top of
+nothing: a real signed session token, checked on every route, plus (his
+separate, explicit request) a new admin-only Activity Log recording login,
+logout, and every mutating backend call.
+
+Key design decisions, confirmed with Fabio before implementing:
+- **Stateless JWT, not a DB session table.** Token is invalidated by the
+  frontend discarding it (explicit Logout, or the client-side idle timer)
+  -- not a server-side expiry/blocklist. The token's own `exp` claim (24h)
+  is a fixed safety-net upper bound, not the timeout mechanism.
+- **Session timeout is per-account (DB-backed), not per-browser.** Follows
+  a user to any device they log into, admin-editable from User Management
+  -- resolved after Fabio pointed out a client-only/localStorage-only
+  version wouldn't follow a user to a second PC.
+- **Enforcement is entirely client-side**, via real mouse/keyboard/scroll
+  activity tracking. No server-side heartbeat/last-seen call -- explicitly
+  dropped per Fabio's direction once it was clear the token itself doesn't
+  time out server-side, so a heartbeat wouldn't be doing any security work,
+  only cosmetic "last seen" tracking nobody asked for.
+- **Activity Log records login/logout + mutating calls only** (POST/PUT/
+  PATCH/DELETE), not GETs -- read traffic would drown the log in noise.
+
+### 1. File: `backend/requirements.txt` / `requirements-win.txt`
+* Added `PyJWT==2.10.1`. **Needs `pip install -r requirements(-win).txt`.**
+
+### 2. File: `backend/.env.example` / `.claude/ENV_GUIDE.md`
+* New **required** `JWT_SECRET_KEY` -- deliberately no insecure hardcoded
+  fallback like `DATABASE_URL` has (this is what makes tokens unforgeable).
+  Documented generating one via `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
+
+### 3. File: `backend/app/core/security.py` (new)
+* `create_access_token(user)` -- signs a JWT (`sub`=user_id, `role`, 24h
+  fixed `exp`) with `JWT_SECRET_KEY`. Raises `RuntimeError` at import time
+  if `JWT_SECRET_KEY` is unset, so the backend refuses to start without it
+  rather than silently signing tokens with a guessable default.
+* `get_current_user(request, authorization, db)` -- verifies the
+  `Authorization: Bearer <token>` header FastAPI dependency; re-checks
+  `is_active` on every request (not just at login), so deactivating a user
+  invalidates their token immediately instead of waiting for it to expire.
+  Stamps `request.state.user` -- read back by main.py's activity-log
+  middleware after the route finishes.
+* `require_admin(user)` -- layers a `role == "System Administrator"` check
+  on top, for the genuinely admin-exclusive routes.
+
+### 4. File: `backend/migrations/2026-08-16_session_timeout_minutes.sql` (new) / `backend/init_schema.sql`
+* `ALTER TABLE tbl_system_users ADD COLUMN session_timeout_minutes INT NOT NULL DEFAULT 5`.
+  0 = disabled. `init_schema.sql` updated to create it directly for fresh installs.
+
+### 5. File: `backend/migrations/2026-08-16_activity_log.sql` (new) / `backend/init_schema.sql`
+* New `tbl_activity_log` table (`log_id`, `user_id` FK **nullable** -- a
+  failed/anonymous login attempt has no confirmed identity but is still
+  worth recording, `action`, `endpoint`, `status_code`, `created_at`) +
+  indexes on `created_at DESC` and `user_id`.
+
+### 6. File: `backend/app/models/models.py`
+* `SystemUser`: new `session_timeout_minutes` column (default 5, matches
+  the migration).
+* New `ActivityLog` model (`tbl_activity_log`), with a `user` relationship
+  for the admin-only list endpoint's join.
+
+### 7. File: `backend/app/core/activity_log.py` (new)
+* `record_activity(db, user_id, action, endpoint, status_code)` -- shared
+  write helper used by both main.py's generic middleware (file 9) and
+  `users.py`'s explicit LOGIN/LOGOUT logging (file 8). Never raises -- a
+  logging failure must not break the request it's describing; each write
+  is its own short-lived commit, not sharing a transaction with whatever
+  the route itself is doing.
+
+### 8. File: `backend/app/api/users.py`
+* `POST /login` now returns a real `token` (via `create_access_token`)
+  alongside `user`, which also grew a `session_timeout_minutes` field.
+  Explicitly logs a `LOGIN` activity-log entry on every outcome (invalid
+  credentials, pending-approval, and success) -- not left to the generic
+  middleware, since a failed login has no bearer token yet for
+  `get_current_user` to have resolved an acting user from.
+* New `POST /logout` -- does nothing to the token itself (stateless, no
+  blocklist), exists purely so a `LOGOUT` entry gets recorded before the
+  frontend clears local storage.
+* `GET /`, `POST /`, `PATCH /{user_id}` now require `Depends(require_admin)`
+  -- previously callable by anyone. `POST /register` and `POST /login`
+  stay public (that's how a token is obtained in the first place).
+* `UpdateUserRequest` gained `session_timeout_minutes` (0-120, validated);
+  `update_user` applies it; `_user_to_dict` serializes it.
+
+### 9. File: `backend/app/api/bulletins.py` / `farms.py` / `assessments.py` / `insurance.py` / `typhoons.py` / `upload.py`
+* Each router now declares `dependencies=[Depends(get_current_user)]` at
+  the `APIRouter(...)` level -- one line per file, requires a valid token
+  for every route in that router at once. This is the change that actually
+  closes the "anyone can call any endpoint directly" gap app-wide, not just
+  for user management.
+
+### 10. File: `backend/app/main.py`
+* New `activity_log_middleware` (`@app.middleware("http")`) -- logs every
+  POST/PUT/PATCH/DELETE request after it completes, resolving the acting
+  user from `request.state.user`. Skips `/api/users/login` and
+  `/api/users/logout` (self-logged, see file 8) to avoid double-logging
+  them as a generic `"POST"`.
+* Registers the new `activity_log_router` (file 11).
+
+### 11. File: `backend/app/api/activity_log.py` (new)
+* `GET /api/activity-log/` (admin-only via router-level `Depends(require_admin)`)
+  -- newest-first, capped at `limit` (default/max 200/1000; this table has
+  no upper bound on growth, so an unbounded query isn't safe long-term),
+  optional `user_id` filter. Joins `ActivityLog.user` for display name/email.
+
+### 12. File: `frontend/src/lib/authStorage.ts`
+* `CurrentUser` gained `session_timeout_minutes`. New `persistToken()`/
+  `loadPersistedToken()` (separate `localStorage` key from the user object)
+  -- `clearPersistedUser()` now also clears the token.
+
+### 13. File: `frontend/src/lib/api.ts`
+* `request()` now attaches `Authorization: Bearer <token>` to every call
+  (harmless no-op on the two public routes) and force-clears storage +
+  reloads to the login screen on a `401` from anywhere except login/register
+  (a failed login 401 is a normal wrong-password case, not "your session
+  died," so it's excluded from the force-logout path).
+* `LoginResult` gained `token` + `user.session_timeout_minutes`.
+* New `logoutUser()` (`POST /api/users/logout`) and `getActivityLog()`
+  (`GET /api/activity-log/`, new `ActivityLogEntry` type).
+* `SystemUser`/`UpdateUserPayload` gained `session_timeout_minutes`.
+
+### 14. File: `frontend/src/app/components/LoginScreen.tsx`
+* `onLogin` now passes `(user, token)` instead of just `user`.
+
+### 15. File: `frontend/src/app/App.tsx`
+* `handleLogin` persists the token too (`persistToken`); `handleLogout`
+  fire-and-forgets `logoutUser()` (records the LOGOUT entry) *before*
+  clearing storage, so the call still has a valid token to authenticate
+  with -- logout itself must never be blocked by a slow/failed request.
+* New idle-timeout `useEffect`: real `mousemove`/`keydown`/`mousedown`/
+  `scroll`/`touchstart` listeners only -- deliberately **not** the existing
+  60s background bulletin poll, which is a fetch the app makes on its own,
+  not the user doing anything; counting it would mean a tab left open and
+  genuinely untouched never actually goes idle. Resets a `setTimeout` on
+  activity; fires `handleLogout()` after `currentUser.session_timeout_minutes`
+  idle minutes (skipped entirely if `0`/disabled).
+* Admin render branch now also handles `activeModule === "activity"` ->
+  `ActivityLogModule`.
+
+### 16. File: `frontend/src/app/components/UserManagementModule.tsx`
+* Edit User modal: replaced nothing, *added* a "Session Timeout" `<select>`
+  (same `[0,5,10,15,30]`/"Disabled" convention as the old decorative
+  Calibration dropdown) wired to the real field via `handleSaveEditUser`.
+
+### 17. File: `frontend/src/app/components/ActivityLogModule.tsx` (new)
+* New admin tab: read-only table (timestamp, user, action, endpoint,
+  status) backed by `getActivityLog()`, action-colored badges, manual
+  Refresh button. No auto-poll -- admin-initiated refresh only.
+
+### 18. File: `frontend/src/app/components/Header.tsx`
+* `ADMIN_MODULES` grows to 4 entries: Admin Panel / User Management /
+  Database Backup / **Activity Log** (new `"activity"` `ModuleId`).
+
+### Status / Next Steps
+* **Not tested end-to-end at all** -- this is the largest, highest-risk
+  change of the session. Before this ships anywhere near `develop`, Fabio
+  needs to, in his own environment: `pip install -r requirements(-win).txt`
+  (PyJWT), generate and set `JWT_SECRET_KEY` in `backend/.env` (backend
+  **will not start** without it), apply both new migrations (local *and*
+  remote -- the 2026-08-10 polling-interval migration was previously only
+  applied to remote, don't repeat that split here), `npm install`/restart
+  the frontend, and then a real login/logout/idle-timeout/admin-CRUD/
+  Activity-Log pass in the running app.
+* Every existing frontend `fetch`-based call now depends on a valid token
+  being attached -- if anything was calling `fetch()` directly instead of
+  through `api.ts`'s `request()`, it will start getting 401s. Worth a
+  search before merging.
+* `python -m pytest` has not been run against any of this.
+* Token expiry is a fixed 24h from issuance, every login -- a user who
+  logs in and leaves their session open (not idle, just open) past 24h
+  will be force-logged-out by the `401` handler regardless of activity.
+  Not raised as a problem, just flagging it's a real behavior, not a bug,
+  if it comes up in testing.
+

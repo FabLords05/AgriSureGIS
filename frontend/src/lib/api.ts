@@ -1,3 +1,5 @@
+import { clearPersistedUser, loadPersistedToken } from './authStorage';
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
 
 export interface Bulletin {
@@ -148,22 +150,67 @@ export interface TyphoonSummary {
   people_hit: number;
 }
 
+// Every request carries the session token now (2026-08-16) -- harmless on
+// the two public routes (login/register) that ignore it, required by every
+// other route's Depends(get_current_user)/require_admin (see
+// backend/app/core/security.py). A 401 means the token is missing, expired
+// past its fixed safety-net lifetime, or the account's since been
+// deactivated -- any of those means "not really logged in anymore," so this
+// force-clears local storage and reloads to the login screen rather than
+// leaving the app sitting in a half-authenticated state. Login/register
+// requests can 401 legitimately (wrong password) -- excluded so a failed
+// login attempt doesn't nuke storage that has nothing to clear anyway.
+const _NO_FORCE_LOGOUT_PATHS = ['/api/users/login', '/api/users/register'];
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, init);
+  const token = loadPersistedToken();
+  const headers = new Headers(init?.headers);
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+
+  const response = await fetch(`${API_BASE_URL}${path}`, { ...init, headers });
   if (!response.ok) {
+    if (response.status === 401 && !_NO_FORCE_LOGOUT_PATHS.includes(path)) {
+      clearPersistedUser();
+      window.location.reload();
+    }
     const body = await response.json().catch(() => null);
     throw new Error(body?.detail ?? `Request failed with status ${response.status}`);
   }
   return response.json() as Promise<T>;
 }
 
-export function uploadCsv(file: File): Promise<UploadCsvResult> {
+// Real progress tracking (2026-08-16) -- CSV ingestion runs row-by-row on
+// the backend already and is genuinely slow for a large real PABS export,
+// so uploadCsv() now only starts the job (fast: file validation + parse)
+// and returns a job_id immediately, instead of the request hanging until
+// every row is done. Poll getCsvUploadStatus() for real percentage
+// (processed/total), driven by the backend's actual row loop -- not a
+// fake/simulated progress bar.
+export interface StartCsvUploadResult {
+  status: string;
+  job_id: string;
+  total_rows: number;
+}
+
+export function uploadCsv(file: File): Promise<StartCsvUploadResult> {
   const formData = new FormData();
   formData.append('file', file);
-  return request<UploadCsvResult>('/api/upload/csv', {
+  return request<StartCsvUploadResult>('/api/upload/csv', {
     method: 'POST',
     body: formData,
   });
+}
+
+export interface CsvUploadStatus {
+  status: 'processing' | 'done' | 'error';
+  processed: number;
+  total: number;
+  result: UploadCsvResult | null;
+  error: string | null;
+}
+
+export function getCsvUploadStatus(jobId: string): Promise<CsvUploadStatus> {
+  return request<CsvUploadStatus>(`/api/upload/csv/status/${jobId}`);
 }
 
 export function getBulletins(): Promise<Bulletin[]> {
@@ -206,16 +253,11 @@ export function getActiveTyphoons(): Promise<ActiveTyphoonsResult> {
   return request<ActiveTyphoonsResult>('/api/typhoons/active');
 }
 
+// Used only as a lightweight backend-connectivity ping by CalibrationModule's
+// System Status section now -- the interval value it returns is no longer
+// surfaced/editable in the UI (fixed backend-side, see scheduler.py).
 export function getParserSettings(): Promise<ParserSettings> {
   return request<ParserSettings>('/api/bulletins/settings');
-}
-
-export function updateParserSettings(minutes: number): Promise<ParserSettings> {
-  return request<ParserSettings>('/api/bulletins/settings', {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ polling_interval_minutes: minutes }),
-  });
 }
 
 export function uploadGpx(file: File, farmerId?: number, farmId?: number): Promise<UploadGpxResult> {
@@ -340,11 +382,13 @@ export interface SystemUser {
   is_active: boolean;
   last_login: string | null;
   created_at: string | null;
+  session_timeout_minutes: number;
 }
 
 export interface LoginResult {
   status: string;
-  user: { name: string; role: string; email: string };
+  token: string;
+  user: { name: string; role: string; email: string; session_timeout_minutes: number };
 }
 
 export function loginUser(email: string, password: string): Promise<LoginResult> {
@@ -353,6 +397,15 @@ export function loginUser(email: string, password: string): Promise<LoginResult>
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, password }),
   });
+}
+
+// Doesn't touch the token itself (stateless JWT, no server-side blocklist --
+// see backend/app/core/security.py) -- exists purely so a LOGOUT event gets
+// recorded before the caller clears local storage. Fire-and-forget by
+// design from App.tsx's handleLogout: logging out must never be blocked by
+// a slow/failed network call.
+export function logoutUser(): Promise<{ status: string }> {
+  return request<{ status: string }>('/api/users/logout', { method: 'POST' });
 }
 
 export interface RegisterUserPayload {
@@ -396,6 +449,7 @@ export interface UpdateUserPayload {
   email?: string;
   role?: string;
   is_active?: boolean;
+  session_timeout_minutes?: number;
 }
 
 export function updateUser(userId: number, payload: UpdateUserPayload): Promise<{ status: string; data: SystemUser }> {
@@ -404,4 +458,20 @@ export function updateUser(userId: number, payload: UpdateUserPayload): Promise<
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
+}
+
+// ─── Activity Log (2026-08-16, admin-only) ────────────────────────────────
+
+export interface ActivityLogEntry {
+  log_id: number;
+  user_name: string | null;
+  user_email: string | null;
+  action: string;
+  endpoint: string;
+  status_code: number;
+  created_at: string | null;
+}
+
+export function getActivityLog(): Promise<{ status: string; data: ActivityLogEntry[] }> {
+  return request<{ status: string; data: ActivityLogEntry[] }>('/api/activity-log/');
 }

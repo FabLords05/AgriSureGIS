@@ -5,7 +5,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 
+from app.core.activity_log import record_activity
 from app.core.database import get_db
+from app.core.security import create_access_token, get_current_user, require_admin
 from app.models.models import SystemUser
 
 router = APIRouter(prefix="/users", tags=["users"])
@@ -65,6 +67,7 @@ class UpdateUserRequest(BaseModel):
     email: EmailStr | None = None
     role: str | None = None
     is_active: bool | None = None
+    session_timeout_minutes: int | None = Field(None, ge=0, le=120)
 
 
 def _split_name(full_name: str) -> tuple[str, str]:
@@ -81,6 +84,7 @@ def _user_to_dict(u: SystemUser) -> dict:
         "is_active": u.is_active,
         "last_login": u.last_login.isoformat() if u.last_login else None,
         "created_at": u.created_at.isoformat() if u.created_at else None,
+        "session_timeout_minutes": u.session_timeout_minutes,
     }
 
 
@@ -123,32 +127,58 @@ def login_user(payload: LoginRequest, db: Session = Depends(get_db)):
     """
     Real credential check against tbl_system_users, replacing the old
     client-side DEMO_ACCOUNTS comparison. Returns the same {name, role,
-    email} shape App.tsx/authStorage.ts already expect, so nothing else
-    downstream of a successful login needs to change.
+    email} shape App.tsx/authStorage.ts already expect, plus a real signed
+    session token (2026-08-16 -- see app/core/security.py) that every other
+    route now requires.
     """
     user = db.query(SystemUser).filter(SystemUser.email == payload.email).first()
     if not user or not _verify_password(payload.password, user.password_hash):
+        # user_id logged as None on a wrong-email/wrong-password attempt (no
+        # confirmed identity), or the real one on a right-email-wrong-password
+        # attempt -- both worth an audit trail entry either way.
+        record_activity(db, user.user_id if user else None, "LOGIN", "/api/users/login", 401)
         raise HTTPException(status_code=401, detail="Invalid credentials.")
     if not user.is_active:
+        record_activity(db, user.user_id, "LOGIN", "/api/users/login", 403)
         raise HTTPException(status_code=403, detail="This account is pending administrator approval.")
 
     user.last_login = datetime.now(timezone.utc)
     db.commit()
+    record_activity(db, user.user_id, "LOGIN", "/api/users/login", 200)
     return {
         "status": "success",
-        "user": {"name": f"{user.firstname} {user.lastname}".strip(), "role": user.role, "email": user.email},
+        "token": create_access_token(user),
+        "user": {
+            "name": f"{user.firstname} {user.lastname}".strip(),
+            "role": user.role,
+            "email": user.email,
+            "session_timeout_minutes": user.session_timeout_minutes,
+        },
     }
 
 
+@router.post("/logout")
+def logout_user(db: Session = Depends(get_db), current_user: SystemUser = Depends(get_current_user)):
+    """
+    Does nothing to the token itself -- it's a stateless JWT with no
+    server-side blocklist (see app/core/security.py's module docstring), so
+    "logout" is really just the frontend discarding it. This endpoint exists
+    purely so a LOGOUT event gets recorded before the frontend clears its
+    local storage.
+    """
+    record_activity(db, current_user.user_id, "LOGOUT", "/api/users/logout", 200)
+    return {"status": "success"}
+
+
 @router.get("/")
-def list_users(db: Session = Depends(get_db)):
+def list_users(db: Session = Depends(get_db), _admin: SystemUser = Depends(require_admin)):
     """Backs Calibration & Settings' User Account Management table (admin-exclusive in the UI)."""
     users = db.query(SystemUser).order_by(SystemUser.user_id.asc()).all()
     return {"status": "success", "data": [_user_to_dict(u) for u in users]}
 
 
 @router.post("/")
-def create_user(payload: CreateUserRequest, db: Session = Depends(get_db)):
+def create_user(payload: CreateUserRequest, db: Session = Depends(get_db), _admin: SystemUser = Depends(require_admin)):
     """Admin-created account (Calibration's "Add User") -- active immediately, no approval step needed."""
     _require_role(payload.role)
 
@@ -176,7 +206,7 @@ def create_user(payload: CreateUserRequest, db: Session = Depends(get_db)):
 
 
 @router.patch("/{user_id}")
-def update_user(user_id: int, payload: UpdateUserRequest, db: Session = Depends(get_db)):
+def update_user(user_id: int, payload: UpdateUserRequest, db: Session = Depends(get_db), _admin: SystemUser = Depends(require_admin)):
     """Admin edit / activate / deactivate (Calibration's Edit modal + Deactivate button)."""
     user = db.query(SystemUser).filter(SystemUser.user_id == user_id).first()
     if not user:
@@ -193,6 +223,8 @@ def update_user(user_id: int, payload: UpdateUserRequest, db: Session = Depends(
         user.role = payload.role
     if payload.is_active is not None:
         user.is_active = payload.is_active
+    if payload.session_timeout_minutes is not None:
+        user.session_timeout_minutes = payload.session_timeout_minutes
 
     try:
         db.commit()

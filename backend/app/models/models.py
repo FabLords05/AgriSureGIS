@@ -18,6 +18,23 @@ class SystemUser(Base):
     is_active = Column(Boolean, nullable=False, default=True)
     last_login = Column(DateTime)
     created_at = Column(DateTime, server_default=func.now())
+    # Per-account idle-logout policy, admin-set from User Management,
+    # enforced client-side (App.tsx) -- see
+    # migrations/2026-08-16_session_timeout_minutes.sql. 0 = disabled.
+    session_timeout_minutes = Column(Integer, nullable=False, default=5)
+
+
+class ActivityLog(Base):
+    __tablename__ = "tbl_activity_log"
+
+    log_id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("tbl_system_users.user_id", ondelete="SET NULL"), nullable=True)
+    action = Column(String(20), nullable=False)  # LOGIN, LOGOUT, POST, PUT, PATCH, DELETE
+    endpoint = Column(String(255), nullable=False)
+    status_code = Column(Integer, nullable=False)
+    created_at = Column(DateTime, server_default=func.now())
+
+    user = relationship("SystemUser")
 
 
 class AdminBoundary(Base):

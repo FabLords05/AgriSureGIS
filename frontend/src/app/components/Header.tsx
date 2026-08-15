@@ -1,11 +1,11 @@
 import { useState } from "react";
 import {
   Home, Map, FileText, Settings, Bell, Moon, Sun, ChevronDown,
-  User, LogOut, Shield, RefreshCw, CheckCircle2
+  User, LogOut, Shield, RefreshCw, CheckCircle2, Users, Database, Activity
 } from "lucide-react";
 import { AppNotification } from "./mockData";
 
-export type ModuleId = "monitoring" | "spatial" | "assessment" | "calibration";
+export type ModuleId = "monitoring" | "spatial" | "assessment" | "calibration" | "users" | "backup" | "activity";
 
 interface HeaderProps {
   activeModule: ModuleId;
@@ -24,13 +24,18 @@ const SPECIALIST_MODULES: { id: ModuleId; label: string; icon: React.ReactNode; 
   { id:"assessment",   label:"Assessment & Reporting",         shortLabel:"Assessment",    icon:<FileText size={15} /> },
 ];
 
-// System Administrators get a single, dedicated panel (the whole
-// Calibration & Settings screen, including User Account Management)
-// instead of the 3 specialist-facing tabs -- per Fabio's explicit request
-// to keep admin focused on admin privileges/maintenance, not the regular
-// GIS workflow.
+// System Administrators get their own dedicated tabs (Admin Panel / User
+// Management / Database Backup / Activity Log) instead of the 3 specialist-
+// facing tabs -- per Fabio's explicit request to keep admin focused on
+// admin privileges/maintenance, not the regular GIS workflow. User
+// Management and Database Backup used to be nested sections inside Admin
+// Panel; split into their own tabs so neither is buried behind an
+// accordion. Activity Log is new (2026-08-16).
 const ADMIN_MODULES: { id: ModuleId; label: string; icon: React.ReactNode; shortLabel: string }[] = [
   { id:"calibration",  label:"Admin Panel",                    shortLabel:"Admin",         icon:<Settings size={15} /> },
+  { id:"users",        label:"User Management",                shortLabel:"Users",         icon:<Users size={15} /> },
+  { id:"backup",       label:"Database Backup",                shortLabel:"Backup",        icon:<Database size={15} /> },
+  { id:"activity",     label:"Activity Log",                   shortLabel:"Activity",      icon:<Activity size={15} /> },
 ];
 
 export function Header({ activeModule, onModuleChange, darkMode, onToggleDark, notifications, onClearNotification, currentUser, onLogout }: HeaderProps) {

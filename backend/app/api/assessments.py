@@ -7,10 +7,11 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.security import get_current_user
 from app.models.models import AdminBoundary, AreaExposureSummary, FarmerProfile, InsuranceRecord, RiskAssessment, Typhoon
 from app.services.assessment_service import AssessmentService
 
-router = APIRouter(prefix="/assessments", tags=["assessments"])
+router = APIRouter(prefix="/assessments", tags=["assessments"], dependencies=[Depends(get_current_user)])
 
 
 class CalculateAssessmentsRequest(BaseModel):

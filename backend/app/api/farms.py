@@ -8,9 +8,10 @@ from sqlalchemy.orm import Session, joinedload
 from app.core.database import get_db
 from app.core.farms_cache import cache_farms_page, get_cached_farms_page
 from app.core.farms_view import fetch_latest_insurance_from_view, materialized_view_available
+from app.core.security import get_current_user
 from app.models.models import Farm, InsuranceRecord
 
-router = APIRouter(prefix="/farms", tags=["farms"])
+router = APIRouter(prefix="/farms", tags=["farms"], dependencies=[Depends(get_current_user)])
 
 
 @router.get("/")
