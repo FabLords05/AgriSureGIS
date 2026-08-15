@@ -9,6 +9,15 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.models import AdminBoundary, AreaExposureSummary, FarmerProfile, InsuranceRecord, RiskAssessment, Typhoon
+from app.models.models import (
+    AdminBoundary,
+    AreaExposureSummary,
+    FarmerProfile,
+    InsuranceRecord,
+    InsuranceUsage,
+    RiskAssessment,
+    Typhoon,
+)
 from app.services.assessment_service import AssessmentService
 
 router = APIRouter(prefix="/assessments", tags=["assessments"], dependencies=[Depends(get_current_user)])
@@ -70,9 +79,31 @@ def list_assessments(
 
     assessments = query.order_by(RiskAssessment.assessment_date.desc()).all()
 
-    return {
-        "status": "success",
-        "data": [
+    data = []
+    for a in assessments:
+        # typhoon_id is only known for free when the typhoon_id filter above was
+        # used (it joined AreaExposureSummary already); otherwise resolve it
+        # per-row through the assessment's summary, same indirection the export
+        # endpoints below already use.
+        row_typhoon_id = typhoon_id
+        if row_typhoon_id is None and a.summary_id is not None:
+            summary = (
+                db.query(AreaExposureSummary).filter(AreaExposureSummary.summary_id == a.summary_id).first()
+            )
+            row_typhoon_id = summary.typhoon_id if summary else None
+
+        usage = None
+        if row_typhoon_id is not None and a.insurance_records_id is not None:
+            usage = (
+                db.query(InsuranceUsage)
+                .filter(
+                    InsuranceUsage.insurance_records_id == a.insurance_records_id,
+                    InsuranceUsage.typhoon_id == row_typhoon_id,
+                )
+                .first()
+            )
+
+        data.append(
             {
                 "assessment_id": a.assessment_id,
                 "policy_no": a.insurance_record.policy_no if a.insurance_record else None,
@@ -85,10 +116,15 @@ def list_assessments(
                 "estimated_damage": float(a.estimated_damage),
                 "final_indemnity_payment": float(a.final_indemnity_payment),
                 "assessment_date": a.assessment_date,
+                "typhoon_id": row_typhoon_id,
+                # None when this typhoon has no tbl_insurance_usage row yet for this
+                # policy (e.g. assessed before this feature existed, or genuinely
+                # never touched) -- distinct from False ("assessed, but unused").
+                "insurance_used": usage.is_used if usage is not None else None,
             }
-            for a in assessments
-        ],
-    }
+        )
+
+    return {"status": "success", "data": data}
 
 
 @router.get("/export")

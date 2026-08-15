@@ -1,9 +1,12 @@
+from datetime import datetime, timezone
+
 from sqlalchemy.orm import Session
 
 from app.core.indemnity_calc import ParametricAssessment
 from app.models.models import (
     Farm,
     InsuranceRecord,
+    InsuranceUsage,
     RiskAssessment,
     TropicalCycloneBulletin,
 )
@@ -117,4 +120,72 @@ class AssessmentService:
         for result in results:
             db.refresh(result)
 
+        cls._sync_insurance_usage(typhoon_id, results, db)
+
         return results
+
+    @classmethod
+    def _sync_insurance_usage(cls, typhoon_id: int, results: list[RiskAssessment], db: Session) -> None:
+        """
+        Marks each assessed policy's insurance as used/unused for this specific
+        typhoon, both in tbl_insurance_usage (the per-typhoon source of truth)
+        and the tbl_insurance_records.is_used/used_for_typhoon_id/used_at mirror
+        (a convenience snapshot of the latest usage only).
+
+        "Used" = final_indemnity_payment > 0 for this (insurance, typhoon) pair.
+        Re-running this typhoon's assessment (e.g. a revised bulletin drops a
+        previously-used policy's payout to zero) flips tbl_insurance_usage back
+        to unused, rather than leaving a stale "used" mark.
+
+        The mirror on tbl_insurance_records is only ever downgraded to unused
+        when it currently points at *this* typhoon (or isn't set yet) -- if it
+        already reflects real usage from a *different* typhoon, this typhoon
+        computing zero payout must not clobber that, or a farmer whose insurance
+        was genuinely used for a past typhoon would incorrectly show as unused/
+        available again for a new one. This is the mixing this feature exists to
+        prevent -- see .claude/FUNCTION_CHANGES.md.
+        """
+        now = datetime.now(timezone.utc)
+        touched = False
+
+        for result in results:
+            insurance = result.insurance_record
+            if insurance is None:
+                continue
+            touched = True
+
+            usage = (
+                db.query(InsuranceUsage)
+                .filter(
+                    InsuranceUsage.insurance_records_id == insurance.insurance_records_id,
+                    InsuranceUsage.typhoon_id == typhoon_id,
+                )
+                .first()
+            )
+            if usage is None:
+                usage = InsuranceUsage(
+                    insurance_records_id=insurance.insurance_records_id,
+                    typhoon_id=typhoon_id,
+                )
+                db.add(usage)
+
+            is_used_now = result.final_indemnity_payment is not None and result.final_indemnity_payment > 0
+            usage.is_used = is_used_now
+            usage.assessment_id = result.assessment_id
+
+            if is_used_now:
+                insurance.is_used = True
+                insurance.used_for_typhoon_id = typhoon_id
+                insurance.used_at = now
+            elif insurance.used_for_typhoon_id is None or insurance.used_for_typhoon_id == typhoon_id:
+                insurance.is_used = False
+                insurance.used_for_typhoon_id = None
+                insurance.used_at = None
+            # else: the mirror already reflects real usage from a different
+            # typhoon -- leave it untouched (see docstring above).
+
+        # Nothing to persist if none of the results had a loaded insurance_record
+        # (e.g. unit tests constructing bare RiskAssessment rows outside a real
+        # Session, where the relationship resolves to None) -- avoid a no-op commit.
+        if touched:
+            db.commit()

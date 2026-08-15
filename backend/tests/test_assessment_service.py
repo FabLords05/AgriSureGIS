@@ -152,5 +152,83 @@ class AssessmentServiceTests(unittest.TestCase):
             AssessmentService.calculate_for_bulletin(1, 999, mock_db)
 
 
+class InsuranceUsageSyncTests(unittest.TestCase):
+    """
+    Exercises _sync_insurance_usage() directly (rather than through the full
+    calculate_for_bulletin flow) since it needs a result whose insurance_record
+    relationship is actually populated -- a bare `RiskAssessment(...)` built
+    outside a real Session (as the tests above do) resolves that relationship
+    to None, which is also why calculate_for_bulletin's own tests don't
+    exercise this path: touched stays False and _sync_insurance_usage is a
+    no-op, so they don't need any changes here.
+    """
+
+    def _result(self, insurance_records_id=7, payment=16500.0, assessment_id=42, is_used=False, used_for_typhoon_id=None):
+        insurance = MagicMock(
+            spec=InsuranceRecord,
+            insurance_records_id=insurance_records_id,
+            is_used=is_used,
+            used_for_typhoon_id=used_for_typhoon_id,
+            used_at=None,
+        )
+        result = MagicMock(
+            spec=RiskAssessment,
+            insurance_record=insurance,
+            final_indemnity_payment=payment,
+            assessment_id=assessment_id,
+        )
+        return result, insurance
+
+    def test_marks_insurance_used_when_payout_positive(self):
+        result, insurance = self._result(payment=16500.0)
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = None  # no existing usage row yet
+
+        AssessmentService._sync_insurance_usage(1, [result], mock_db)
+
+        self.assertTrue(insurance.is_used)
+        self.assertEqual(insurance.used_for_typhoon_id, 1)
+        self.assertIsNotNone(insurance.used_at)
+        mock_db.add.assert_called_once()  # new InsuranceUsage row
+        mock_db.commit.assert_called_once()
+
+    def test_unmarks_insurance_when_same_typhoon_recomputes_to_zero_payout(self):
+        result, insurance = self._result(payment=0.0, used_for_typhoon_id=1)
+        insurance.is_used = True
+        mock_usage = MagicMock(is_used=True)
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = mock_usage
+
+        AssessmentService._sync_insurance_usage(1, [result], mock_db)
+
+        self.assertFalse(mock_usage.is_used)
+        self.assertFalse(insurance.is_used)
+        self.assertIsNone(insurance.used_for_typhoon_id)
+        mock_db.commit.assert_called_once()
+
+    def test_does_not_clobber_a_different_typhoons_real_usage(self):
+        # Insurance is genuinely used for typhoon 2. Typhoon 1's assessment
+        # finds zero payout for this same policy -- must not overwrite typhoon
+        # 2's mark, or a farmer already paid for a past typhoon would
+        # incorrectly show as unused/available again for a new one.
+        result, insurance = self._result(payment=0.0, used_for_typhoon_id=2)
+        insurance.is_used = True
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = None
+
+        AssessmentService._sync_insurance_usage(1, [result], mock_db)
+
+        self.assertTrue(insurance.is_used)
+        self.assertEqual(insurance.used_for_typhoon_id, 2)
+
+    def test_skips_commit_when_no_result_has_a_loaded_insurance_record(self):
+        result = MagicMock(spec=RiskAssessment, insurance_record=None)
+        mock_db = MagicMock()
+
+        AssessmentService._sync_insurance_usage(1, [result], mock_db)
+
+        mock_db.commit.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()

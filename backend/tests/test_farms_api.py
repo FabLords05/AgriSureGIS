@@ -11,16 +11,17 @@ from app.models.models import Farm, InsuranceRecord
 
 class _ChainableQuery:
     """Minimal stand-in for a SQLAlchemy Query, supporting exactly the chain
-    list_farms() uses (.options/.order_by/.filter/.offset/.limit), where
-    every non-terminal method returns self and .all()/.count() return
-    whatever the test configured -- close enough to assert both the SQL shape
-    (was .offset()/.limit() applied? was .filter() called?) and the number of
-    real query executions, without needing a live database."""
+    list_farms() uses (.options/.order_by/.filter/.limit -- no .offset(),
+    since pagination is keyset/after_id-based, not OFFSET/LIMIT; see
+    app/api/farms.py's docstring), where every non-terminal method returns
+    self and .all()/.count() return whatever the test configured -- close
+    enough to assert both the SQL shape (was .limit() applied? was .filter()
+    called, and with what?) and the number of real query executions, without
+    needing a live database."""
 
     def __init__(self, all_result=None, count_result=0):
         self.filter_calls: list = []
         self.order_by_calls: list = []
-        self.offset_arg = None
         self.limit_arg = None
         self.all_call_count = 0
         self.count_call_count = 0
@@ -36,10 +37,6 @@ class _ChainableQuery:
 
     def filter(self, *criteria):
         self.filter_calls.extend(criteria)
-        return self
-
-    def offset(self, n):
-        self.offset_arg = n
         return self
 
     def limit(self, n):
@@ -102,7 +99,18 @@ def _build_mock_db(farms_all_result=None, farms_count_result=0, insurance_all_re
       .filter()/.distinct()/.scalar_subquery() SQL-building, not our fake
       .all()/.count(). Farm.farm_id.in_(...) requires a genuine ScalarSelect
       as its operand -- passing it the fake chain raises a real
-      sqlalchemy.exc.ArgumentError, so this must be a real construct."""
+      sqlalchemy.exc.ArgumentError, so this must be a real construct.
+
+    mock_db.execute is pinned to raise: list_farms() checks
+    materialized_view_available(db) (app/core/farms_view.py) before falling
+    back to the bulk InsuranceRecord query these tests assert against. A
+    bare, unconfigured MagicMock().execute(...).first() returns a truthy
+    MagicMock (not None), which would make that check wrongly report the
+    view as available -- and since a positive result there is memoized
+    process-wide, one test taking that wrong branch would corrupt every test
+    that runs after it in the same pytest session. Raising forces the
+    deterministic "view not available" fallback path instead, every time.
+    """
     farms_chain = _ChainableQuery(all_result=farms_all_result, count_result=farms_count_result)
     insurance_chain = _ChainableQuery(all_result=insurance_all_result)
 
@@ -115,68 +123,83 @@ def _build_mock_db(farms_all_result=None, farms_count_result=0, insurance_all_re
 
     mock_db = MagicMock()
     mock_db.query.side_effect = query_side_effect
+    mock_db.execute.side_effect = Exception("no materialized view in tests -- forces the fallback path")
     return mock_db, farms_chain, insurance_chain
 
 
 class ListFarmsUnpaginatedTests(unittest.TestCase):
-    def test_no_limit_returns_all_rows_with_no_offset_limit_calls(self):
+    def test_no_limit_returns_all_rows_with_no_after_id_limit_calls(self):
         farms = [_fake_farm(1), _fake_farm(2), _fake_farm(3)]
         mock_db, farms_chain, insurance_chain = _build_mock_db(farms_all_result=farms)
 
-        result = list_farms(db=mock_db, limit=None, offset=0, active_only=False)
+        result = list_farms(db=mock_db, limit=None, after_id=0, active_only=False)
 
         self.assertEqual(len(result["data"]), 3)
-        self.assertIsNone(farms_chain.offset_arg)
         self.assertIsNone(farms_chain.limit_arg)
         # Backward-compat guard for MonitoringModule.tsx's unpaginated call:
-        # omitting `limit` must not add the extra COUNT query.
+        # omitting `limit` must not add the extra COUNT query, nor the
+        # after_id > 0 filter (after_id defaults to 0, i.e. "no cursor yet").
         self.assertEqual(farms_chain.count_call_count, 0)
+        self.assertEqual(farms_chain.filter_calls, [])
         self.assertEqual(result["total"], 3)
         self.assertIsNone(result["limit"])
-        self.assertEqual(result["offset"], 0)
+        self.assertEqual(result["after_id"], 0)
         self.assertFalse(result["has_more"])
 
     def test_no_limit_does_not_apply_active_only_filter_by_default(self):
         farms = [_fake_farm(1)]
         mock_db, farms_chain, _ = _build_mock_db(farms_all_result=farms)
 
-        list_farms(db=mock_db, limit=None, offset=0, active_only=False)
+        list_farms(db=mock_db, limit=None, after_id=0, active_only=False)
 
         self.assertEqual(farms_chain.filter_calls, [])
 
 
 class ListFarmsPaginationTests(unittest.TestCase):
-    def test_limit_and_offset_are_applied_and_total_is_queried(self):
+    def test_limit_and_after_id_are_applied_and_total_is_queried(self):
         page = [_fake_farm(1), _fake_farm(2)]
         mock_db, farms_chain, _ = _build_mock_db(farms_all_result=page, farms_count_result=5)
 
-        result = list_farms(db=mock_db, limit=2, offset=0, active_only=False)
+        result = list_farms(db=mock_db, limit=2, after_id=0, active_only=False)
 
-        self.assertEqual(farms_chain.offset_arg, 0)
         self.assertEqual(farms_chain.limit_arg, 2)
+        # First page (after_id == 0) is the only one that triggers the COUNT.
+        self.assertEqual(farms_chain.count_call_count, 1)
         self.assertEqual(result["total"], 5)
         self.assertEqual(result["limit"], 2)
-        self.assertEqual(result["offset"], 0)
-        self.assertTrue(result["has_more"])  # 0 + 2 < 5
+        self.assertEqual(result["after_id"], 0)
+        self.assertTrue(result["has_more"])  # a full page (2) came back
 
     def test_has_more_false_on_last_page(self):
+        # Continuing a walk past farm_id 4 (after_id=4); only 1 farm left,
+        # short of a full page -- has_more is derived from "did a full page
+        # come back", not offset+total arithmetic (there's no offset under
+        # keyset pagination).
         page = [_fake_farm(5)]
-        mock_db, _, _ = _build_mock_db(farms_all_result=page, farms_count_result=5)
+        mock_db, farms_chain, _ = _build_mock_db(farms_all_result=page, farms_count_result=5)
 
-        result = list_farms(db=mock_db, limit=2, offset=4, active_only=False)
+        result = list_farms(db=mock_db, limit=2, after_id=4, active_only=False)
 
-        self.assertFalse(result["has_more"])  # 4 + 1 == 5, nothing left
+        self.assertFalse(result["has_more"])  # 1 row came back, short of limit=2
+        # after_id > 0 means no COUNT this page (only the first page counts).
+        self.assertEqual(farms_chain.count_call_count, 0)
+        # ...and the keyset filter (Farm.farm_id > 4) was applied instead.
+        self.assertEqual(len(farms_chain.filter_calls), 1)
+        criterion = farms_chain.filter_calls[0]
+        compiled = str(criterion.compile(compile_kwargs={"literal_binds": True}))
+        self.assertIn("farm_id", compiled)
+        self.assertIn("> 4", compiled)
 
     def test_exactly_2_query_executions_per_paginated_request(self):
         mock_db, farms_chain, insurance_chain = _build_mock_db(
             farms_all_result=[_fake_farm(1)], farms_count_result=1
         )
 
-        list_farms(db=mock_db, limit=100, offset=0, active_only=False)
+        list_farms(db=mock_db, limit=100, after_id=0, active_only=False)
 
         # 1 farms SELECT (.all()) + 1 insurance SELECT (.all()) -- the
         # docstring's "2 queries per page" guarantee -- plus the 1 extra
-        # COUNT this endpoint now runs only when `limit` is given.
+        # COUNT this endpoint now runs only on the first page (after_id == 0).
         self.assertEqual(farms_chain.all_call_count, 1)
         self.assertEqual(insurance_chain.all_call_count, 1)
         self.assertEqual(farms_chain.count_call_count, 1)
@@ -189,7 +212,7 @@ class ListFarmsPaginationTests(unittest.TestCase):
         page = [_fake_farm(10), _fake_farm(20)]
         mock_db, _, insurance_chain = _build_mock_db(farms_all_result=page)
 
-        list_farms(db=mock_db, limit=2, offset=0, active_only=False)
+        list_farms(db=mock_db, limit=2, after_id=0, active_only=False)
 
         self.assertEqual(len(insurance_chain.filter_calls), 1)
         self.assertEqual(_in_clause_values(insurance_chain.filter_calls[0]), [10, 20])
@@ -200,7 +223,7 @@ class ListFarmsActiveOnlyTests(unittest.TestCase):
         farms = [_fake_farm(1)]
         mock_db, farms_chain, _ = _build_mock_db(farms_all_result=farms)
 
-        list_farms(db=mock_db, limit=None, offset=0, active_only=True)
+        list_farms(db=mock_db, limit=None, after_id=0, active_only=True)
 
         # The farms query gets one extra .filter(Farm.farm_id.in_(subquery)).
         self.assertEqual(len(farms_chain.filter_calls), 1)
@@ -229,7 +252,7 @@ class ListFarmsActiveOnlyTests(unittest.TestCase):
         farms = [_fake_farm(1)]
         mock_db, farms_chain, _ = _build_mock_db(farms_all_result=farms)
 
-        list_farms(db=mock_db, limit=None, offset=0, active_only=False)
+        list_farms(db=mock_db, limit=None, after_id=0, active_only=False)
 
         self.assertEqual(farms_chain.filter_calls, [])
 
@@ -240,7 +263,7 @@ class ListFarmsActiveOnlyTests(unittest.TestCase):
         page = [_fake_farm(1)]
         mock_db, farms_chain, _ = _build_mock_db(farms_all_result=page, farms_count_result=1)
 
-        result = list_farms(db=mock_db, limit=50, offset=0, active_only=True)
+        result = list_farms(db=mock_db, limit=50, after_id=0, active_only=True)
 
         self.assertEqual(farms_chain.count_call_count, 1)
         self.assertEqual(result["total"], 1)
@@ -270,7 +293,7 @@ class ListFarmsResponseShapeTests(unittest.TestCase):
             insurance_all_result=[newer, older],
         )
 
-        result = list_farms(db=mock_db, limit=None, offset=0, active_only=False)
+        result = list_farms(db=mock_db, limit=None, after_id=0, active_only=False)
 
         self.assertEqual(result["data"][0]["policy_no"], "NEW")
         self.assertEqual(
