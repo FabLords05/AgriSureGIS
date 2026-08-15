@@ -70,6 +70,20 @@ class UpdateUserRequest(BaseModel):
     session_timeout_minutes: int | None = Field(None, ge=0, le=120)
 
 
+class UpdateMeRequest(BaseModel):
+    """
+    Self-service counterpart to UpdateUserRequest -- deliberately has no
+    `role`/`is_active` fields at all (not just left unset), so there's no
+    payload shape that could ever let a user promote or reactivate/deactivate
+    themselves. Those stay exclusively behind PATCH /{user_id} + require_admin.
+    """
+    name: str | None = Field(None, min_length=1)
+    email: EmailStr | None = None
+    session_timeout_minutes: int | None = Field(None, ge=0, le=120)
+    current_password: str | None = None
+    new_password: str | None = Field(None, min_length=8)
+
+
 def _split_name(full_name: str) -> tuple[str, str]:
     parts = full_name.strip().split(" ", 1)
     return (parts[0], parts[1] if len(parts) > 1 else "")
@@ -196,6 +210,37 @@ def create_user(payload: CreateUserRequest, db: Session = Depends(get_db), _admi
         is_active=True,
     )
     db.add(user)
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="An account with this email already exists.")
+    db.refresh(user)
+    return {"status": "success", "data": _user_to_dict(user)}
+
+
+@router.patch("/me")
+def update_me(payload: UpdateMeRequest, db: Session = Depends(get_db), current_user: SystemUser = Depends(get_current_user)):
+    """
+    Self-service Account Settings tab (2026-08-16) -- any authenticated user
+    editing their own name/email/session timeout/password, no admin role
+    required. Registered ahead of PATCH /{user_id} below so "/me" is matched
+    as a static path first, not swallowed by the int-typed {user_id} route.
+    """
+    user = current_user
+
+    if payload.name is not None:
+        user.firstname, user.lastname = _split_name(payload.name)
+    if payload.email is not None:
+        user.email = payload.email
+    if payload.session_timeout_minutes is not None:
+        user.session_timeout_minutes = payload.session_timeout_minutes
+
+    if payload.new_password is not None:
+        if not payload.current_password or not _verify_password(payload.current_password, user.password_hash):
+            raise HTTPException(status_code=400, detail="Current password is incorrect.")
+        user.password_hash = _hash_password(payload.new_password)
+
     try:
         db.commit()
     except Exception:

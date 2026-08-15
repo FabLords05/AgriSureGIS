@@ -1,11 +1,11 @@
 import { useState } from "react";
 import {
   Home, Map, FileText, Settings, Bell, Moon, Sun, ChevronDown,
-  User, LogOut, Shield, RefreshCw, CheckCircle2, Users, Database, Activity
+  User, LogOut, Shield, RefreshCw, CheckCircle2, Users, Database, Activity, UserCog
 } from "lucide-react";
 import { AppNotification } from "./mockData";
 
-export type ModuleId = "monitoring" | "spatial" | "assessment" | "calibration" | "users" | "backup" | "activity";
+export type ModuleId = "monitoring" | "spatial" | "assessment" | "calibration" | "users" | "backup" | "activity" | "account";
 
 interface HeaderProps {
   activeModule: ModuleId;
@@ -38,11 +38,17 @@ const ADMIN_MODULES: { id: ModuleId; label: string; icon: React.ReactNode; short
   { id:"activity",     label:"Activity Log",                   shortLabel:"Activity",      icon:<Activity size={15} /> },
 ];
 
+// Personal account settings (2026-08-16) -- unlike the role-specific lists
+// above, every user gets this tab regardless of Specialist/Admin, so it's
+// appended separately rather than duplicated into both arrays.
+const ACCOUNT_MODULE: { id: ModuleId; label: string; icon: React.ReactNode; shortLabel: string } =
+  { id:"account", label:"Account Settings", shortLabel:"Account", icon:<UserCog size={15} /> };
+
 export function Header({ activeModule, onModuleChange, darkMode, onToggleDark, notifications, onClearNotification, currentUser, onLogout }: HeaderProps) {
   const [showNotifs, setShowNotifs] = useState(false);
   const [showUser, setShowUser] = useState(false);
   const isAdmin = currentUser?.role === "System Administrator";
-  const modules = isAdmin ? ADMIN_MODULES : SPECIALIST_MODULES;
+  const modules = [...(isAdmin ? ADMIN_MODULES : SPECIALIST_MODULES), ACCOUNT_MODULE];
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshDone, setRefreshDone] = useState(false);
   const unread = notifications.filter(n => !n.read).length;

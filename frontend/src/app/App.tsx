@@ -9,8 +9,9 @@ import { CalibrationModule } from "./components/CalibrationModule";
 import { UserManagementModule } from "./components/UserManagementModule";
 import { DatabaseBackupModule } from "./components/DatabaseBackupModule";
 import { ActivityLogModule } from "./components/ActivityLogModule";
+import { AccountSettingsModule } from "./components/AccountSettingsModule";
 import { AppNotification } from "./components/mockData";
-import { Bulletin, getBulletins, logoutUser } from "@/lib/api";
+import { Bulletin, getBulletins, logoutUser, SystemUser } from "@/lib/api";
 import { useFarmsData } from "@/lib/useFarmsData";
 import { CurrentUser, loadPersistedUser, persistUser, persistToken, clearPersistedUser } from "@/lib/authStorage";
 
@@ -52,6 +53,22 @@ export default function App() {
     persistUser(user);
     persistToken(token);
     setActiveModule(user.role === "System Administrator" ? "calibration" : "monitoring");
+  };
+
+  // Account Settings tab hands back the full updated row after a save --
+  // reconcile it into currentUser/localStorage immediately (no re-login
+  // needed) so the idle-timeout effect below picks up a changed session
+  // timeout right away, and the Header user menu reflects a changed
+  // name/email without a refresh.
+  const handleAccountUpdate = (updated: SystemUser) => {
+    const next: CurrentUser = {
+      name: updated.name,
+      role: updated.role,
+      email: updated.email,
+      session_timeout_minutes: updated.session_timeout_minutes,
+    };
+    setCurrentUser(next);
+    persistUser(next);
   };
 
   const handleLogout = () => {
@@ -164,9 +181,12 @@ export default function App() {
             branch, anything other than "users"/"backup"/"activity" falls
             back to Admin Panel rather than rendering blank, same defensive
             spirit as before there was more than one admin tab to choose
-            between. */}
+            between. Account Settings (2026-08-16) is checked first since,
+            unlike every other tab, it's available to both roles alike. */}
         <main className="flex-1 overflow-hidden">
-          {currentUser.role === "System Administrator" ? (
+          {activeModule === "account" ? (
+            <AccountSettingsModule currentUser={currentUser} onUpdated={handleAccountUpdate} />
+          ) : currentUser.role === "System Administrator" ? (
             activeModule === "users" ? (
               <UserManagementModule />
             ) : activeModule === "backup" ? (

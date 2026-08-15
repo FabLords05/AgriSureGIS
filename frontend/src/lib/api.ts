@@ -460,6 +460,25 @@ export function updateUser(userId: number, payload: UpdateUserPayload): Promise<
   });
 }
 
+// ─── Account Settings (2026-08-16, self-service -- any logged-in user editing
+// their own profile, no admin role required) ───────────────────────────────
+
+export interface UpdateMePayload {
+  name?: string;
+  email?: string;
+  session_timeout_minutes?: number;
+  current_password?: string;
+  new_password?: string;
+}
+
+export function updateMe(payload: UpdateMePayload): Promise<{ status: string; data: SystemUser }> {
+  return request<{ status: string; data: SystemUser }>('/api/users/me', {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+}
+
 // ─── Activity Log (2026-08-16, admin-only) ────────────────────────────────
 
 export interface ActivityLogEntry {

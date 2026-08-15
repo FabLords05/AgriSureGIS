@@ -4143,3 +4143,89 @@ spinner, which meant moving that row loop off the request thread entirely.
   its status. Acceptable for this app's scale/threat model, not flagged
   as something to fix now.
 
+---
+
+## [2026-08-16] - Self-Service Account Settings Tab (branch: fabio/frontend/user-management-modal-polish)
+
+Same-day follow-on. Fabio asked for a window where any logged-in user (not
+just an admin editing others) can edit their own session timeout, plus
+"similar features" -- confirmed via follow-up: full name, email, password,
+and session timeout, surfaced as a new dedicated nav tab available to every
+role (not a dropdown modal, not admin-only). No UI-prototype precedent for
+this screen existed; placement/scope were confirmed with Fabio first per
+the Required Process before writing any code. Distinct from
+`UserManagementModule.tsx`, which remains the admin-only screen for editing
+*other* accounts (role/active status included) -- this new route/component
+deliberately cannot touch either of those on yourself.
+
+### 1. File: `backend/app/api/users.py`
+* New **`UpdateMeRequest`** Pydantic model -- `name`, `email`,
+  `session_timeout_minutes`, `current_password`, `new_password`. No
+  `role`/`is_active` fields exist on this model at all (not just left
+  optional/unset), so there is no payload shape that could ever let a user
+  promote or reactivate/deactivate themselves.
+* New **`update_me()`** -- `PATCH /api/users/me`, gated by
+  `Depends(get_current_user)` (any authenticated user), not
+  `require_admin`. Registered in the file **before** the existing
+  `PATCH /{user_id}` route so the static `/me` path is matched first,
+  rather than being swallowed by the int-typed `{user_id}` path parameter.
+  Password change requires `current_password` to verify correctly via the
+  existing `_verify_password()` before `_hash_password()` overwrites
+  `password_hash` -- reuses the same helpers `login_user()`/`update_user()`
+  already use, no new hashing logic. Reuses `_split_name()`/`_user_to_dict()`
+  too. Falls through to the generic activity-log middleware in `main.py`
+  for audit logging (a mutating PATCH call) -- no special-casing needed
+  like `login_user()`/`logout_user()` required.
+
+### 2. File: `frontend/src/lib/api.ts`
+* New `UpdateMePayload` type and `updateMe(payload)` (`PATCH /api/users/me`),
+  alongside the existing admin-only `updateUser(userId, payload)`.
+
+### 3. File: `frontend/src/app/components/AccountSettingsModule.tsx` (new)
+* Self-service tab, styled to match `UserManagementModule.tsx`'s existing
+  modal conventions (`bg-muted/40` field containers, same input/button
+  classes) but rendered inline as a tab, not a modal overlay, per Fabio's
+  placement choice. Two independent sections/save actions:
+  - **Profile & Preferences** -- Full Name, Email, Session Timeout
+    (same `[0, 5, 10, 15, 30]` dropdown convention as the admin Edit User
+    modal). Single "Save Changes" button, disabled unless something
+    actually changed.
+  - **Change Password** -- Current/New/Confirm Password, with client-side
+    length and match validation before the request is even sent. Separate
+    "Update Password" button/flow from the profile save, since it is a
+    materially different, more sensitive action.
+* Both actions call `onUpdated(res.data)` on success so the parent
+  (`App.tsx`) can reconcile the change into `currentUser` immediately.
+
+### 4. File: `frontend/src/app/components/Header.tsx`
+* `ModuleId` gained `"account"`.
+* New `ACCOUNT_MODULE` entry (icon: `UserCog`) appended to whichever list
+  (`ADMIN_MODULES`/`SPECIALIST_MODULES`) is active, rather than duplicated
+  into both arrays -- this tab is the one nav item every role gets
+  regardless of admin/specialist split.
+
+### 5. File: `frontend/src/app/App.tsx`
+* New **`handleAccountUpdate(updated: SystemUser)`** -- maps the backend's
+  full user row back down to the `CurrentUser` shape and calls
+  `setCurrentUser()`/`persistUser()`, the same pair `handleLogin()` uses.
+  Needed so a changed `session_timeout_minutes` is picked up immediately by
+  the existing idle-timeout `useEffect` (keyed on
+  `currentUser?.session_timeout_minutes`) without forcing a re-login, and
+  so a changed name/email shows up in `Header.tsx`'s user menu right away.
+  A changed email does not require re-login either -- the JWT only encodes
+  `user_id`/`role`, not email, so the existing token stays valid.
+* Main-content render now checks `activeModule === "account"` **before**
+  branching on `currentUser.role`, since this is the one tab both branches
+  share -- avoided duplicating the render call into both the admin and
+  specialist branches.
+
+### Status / Next Steps
+* Not tested -- needs a real click-through: profile save reflecting
+  immediately in the header, a session-timeout change actually shortening
+  the idle-logout window without a re-login, a wrong-current-password
+  attempt correctly rejected, and a successful password change actually
+  working on the next login.
+* No new migration -- `name`/`email`/`session_timeout_minutes`/
+  `password_hash` all already exist on `tbl_system_users` from earlier
+  work this session.
+
