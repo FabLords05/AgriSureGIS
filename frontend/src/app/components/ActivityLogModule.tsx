@@ -72,7 +72,7 @@ export function ActivityLogModule() {
                   <th className="px-3 py-2 text-left font-semibold">Timestamp</th>
                   <th className="px-3 py-2 text-left font-semibold">User</th>
                   <th className="px-3 py-2 text-left font-semibold">Action</th>
-                  <th className="px-3 py-2 text-left font-semibold">Endpoint</th>
+                  <th className="px-3 py-2 text-left font-semibold">Summary</th>
                   <th className="px-3 py-2 text-left font-semibold">Status</th>
                 </tr>
               </thead>
@@ -89,7 +89,10 @@ export function ActivityLogModule() {
                         {e.action}
                       </span>
                     </td>
-                    <td className="px-3 py-2.5 text-muted-foreground font-mono text-[10px]">{e.endpoint}</td>
+                    <td className="px-3 py-2.5">
+                      {e.summary}
+                      <span className="block text-[9px] text-muted-foreground font-mono">{e.endpoint}</span>
+                    </td>
                     <td className="px-3 py-2.5">
                       <span className={e.status_code < 400 ? "text-emerald-600 font-semibold" : "text-red-600 font-semibold"}>
                         {e.status_code}

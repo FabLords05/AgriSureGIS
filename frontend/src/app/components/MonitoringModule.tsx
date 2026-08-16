@@ -1,9 +1,9 @@
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import { toast } from "sonner";
 import {
   Activity, Download, FileDown,
   RefreshCw, Eye, BarChart2, TrendingUp, Zap,
-  Satellite, X, MapPin, User, MapPinned, ShieldCheck,
+  X, MapPinned, ShieldCheck,
   ChevronUp, ChevronDown, ArrowUpDown
 } from "lucide-react";
 import {
@@ -292,166 +292,6 @@ function ExposureSummaryModal({
   );
 }
 
-// ─── SAR Quick-View Modal ─────────────────────────────────────────────────
-// Farm identity/assessment data is real (farmRows below); the SAR imagery
-// itself is still a simulated canvas render -- no real Google Earth Engine
-// integration exists in this codebase to source actual Sentinel-1 imagery.
-function SARQuickViewModal({ farm, onClose }: { farm: FarmRow; onClose: () => void }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    const W = canvas.width, H = canvas.height;
-
-    let seed = farm.farm_id * 1234567;
-    const rand = () => { seed = (seed * 16807 + 0) % 2147483647; return seed / 2147483647; };
-
-    const imgData = ctx.createImageData(W, H);
-    for (let y = 0; y < H; y++) {
-      for (let x = 0; x < W; x++) {
-        const i = (y * W + x) * 4;
-        const n = rand();
-        const isFloodArea = y > H * 0.55 && x > W * 0.3 && x < W * 0.75 && n > 0.35;
-        const isFarmArea  = x > W * 0.25 && x < W * 0.75 && y > H * 0.25 && y < H * 0.75;
-        const brightness  = n * 180;
-        if (isFloodArea) {
-          imgData.data[i]   = Math.floor(10 + rand() * 20);
-          imgData.data[i+1] = Math.floor(20 + rand() * 40);
-          imgData.data[i+2] = Math.floor(60 + rand() * 60);
-        } else if (isFarmArea) {
-          const v = Math.floor(50 + rand() * 100);
-          imgData.data[i]   = Math.floor(v * 0.3);
-          imgData.data[i+1] = Math.floor(v * 0.8);
-          imgData.data[i+2] = Math.floor(v * 0.4);
-        } else {
-          imgData.data[i]   = Math.floor(brightness * 0.5);
-          imgData.data[i+1] = Math.floor(brightness * 0.5);
-          imgData.data[i+2] = Math.floor(brightness * 0.4);
-        }
-        imgData.data[i+3] = 255;
-      }
-    }
-    ctx.putImageData(imgData, 0, 0);
-
-    ctx.strokeStyle = "#fbbf24";
-    ctx.lineWidth = 2;
-    ctx.setLineDash([4, 3]);
-    const fw = W * 0.45, fh = H * 0.42;
-    const fx = (W - fw) / 2, fy = (H - fh) / 2;
-    ctx.strokeRect(fx, fy, fw, fh);
-    ctx.setLineDash([]);
-
-    ctx.fillStyle = "rgba(30, 100, 220, 0.35)";
-    ctx.fillRect(fx + fw * 0.1, fy + fh * 0.6, fw * 0.65, fh * 0.35);
-
-    ctx.fillStyle = "#fbbf24";
-    ctx.font = "bold 10px monospace";
-    ctx.fillText(`#${farm.farm_id}`, fx + 4, fy - 4);
-
-    ctx.fillStyle = "rgba(0,0,0,0.55)";
-    ctx.fillRect(4, H - 32, 130, 28);
-    ctx.fillStyle = "#86efac"; ctx.fillRect(8, H - 28, 8, 8);
-    ctx.fillStyle = "#fff"; ctx.font = "9px sans-serif";
-    ctx.fillText("Planted Area", 20, H - 20);
-    ctx.fillStyle = "rgba(30,100,220,0.7)"; ctx.fillRect(8, H - 18, 8, 8);
-    ctx.fillStyle = "#fff"; ctx.fillText("Flood Extent", 20, H - 10);
-
-  }, [farm]);
-
-  const floodPct = 25 + (farm.farm_id * 7) % 45;
-  const plantedPct = 60 + (farm.farm_id * 13) % 35;
-  const coherence = (0.42 + (farm.farm_id * 0.037) % 0.4).toFixed(2);
-  const signalNo = farm.assessment?.wind_velocity ?? null;
-
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65">
-      <div className="bg-card border border-border rounded-2xl shadow-2xl w-[700px] flex flex-col overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-border" style={{ background: "#0f1e0f" }}>
-          <div className="flex items-center gap-2.5">
-            <Satellite size={15} className="text-emerald-400" />
-            <div>
-              <p className="text-[12px] font-bold text-white">Sentinel-1 SAR Imagery — Farm #{farm.farm_id}</p>
-              <p className="text-[10px] text-white/60">Google Earth Engine · C-Band SAR · VV+VH · simulated preview</p>
-            </div>
-          </div>
-          <button onClick={onClose} className="w-6 h-6 flex items-center justify-center rounded hover:bg-white/10 text-white/60 hover:text-white transition-colors">
-            <X size={13} />
-          </button>
-        </div>
-
-        <div className="flex flex-1 overflow-hidden">
-          <div className="flex-1 bg-black relative">
-            <canvas ref={canvasRef} width={420} height={280} className="w-full h-full object-contain" />
-            <div className="absolute top-2 right-2 flex flex-col gap-1">
-              {["VV", "VH", "RGB"].map(b => (
-                <button key={b} className="px-2 py-0.5 rounded bg-black/60 border border-white/20 text-white text-[9px] hover:bg-white/10 transition-colors">{b}</button>
-              ))}
-            </div>
-          </div>
-
-          <div className="w-52 shrink-0 border-l border-border flex flex-col overflow-auto bg-card">
-            <div className="px-3 py-2.5 border-b border-border">
-              <div className="flex items-center gap-1.5 mb-2">
-                <User size={11} className="text-[#166534]" />
-                <p className="text-[11px] font-bold">{farm.farmer_name ?? "Unknown farmer"}</p>
-              </div>
-              <div className="space-y-1 text-[10px]">
-                <div className="flex justify-between"><span className="text-muted-foreground">Farm ID</span><span className="font-mono text-[#166534]">#{farm.farm_id}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Municipality</span><span>{farm.municipality ?? "—"}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Area</span><span>{(farm.area_size ?? 0).toFixed(2)} ha</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Crop Stage</span><span className="font-medium">{farm.assessment?.crop_stage ?? "Not yet assessed"}</span></div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Signal</span>
-                  <span className={`px-1.5 py-0.5 rounded border text-[9px] font-bold ${signalNo === 2 ? "bg-amber-100 text-amber-700 border-amber-200" : signalNo != null && signalNo >= 3 ? "bg-red-100 text-red-700 border-red-200" : "bg-emerald-100 text-emerald-700 border-emerald-200"}`}>
-                    {signalNo != null ? `S${signalNo}` : "—"}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            <div className="px-3 py-2.5 border-b border-border">
-              <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2">SAR Metrics</p>
-              <div className="space-y-2">
-                {[
-                  { label: "Flood Extent", value: `${floodPct}%`, color: "text-blue-600" },
-                  { label: "Planted Area", value: `${plantedPct}%`, color: "text-emerald-600" },
-                  { label: "Coherence", value: coherence, color: "text-purple-600" },
-                  { label: "Pass Dir.", value: "Descending", color: "" },
-                  { label: "Resolution", value: "10m × 10m", color: "" },
-                ].map((m, i) => (
-                  <div key={i} className="flex justify-between items-center">
-                    <span className="text-[10px] text-muted-foreground">{m.label}</span>
-                    <span className={`text-[10px] font-bold ${m.color}`}>{m.value}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="px-3 py-2.5">
-              <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2">Flood Risk Assessment</p>
-              <div className="w-full h-2 rounded-full bg-muted overflow-hidden mb-1">
-                <div className="h-full rounded-full bg-blue-500 transition-all" style={{ width: `${floodPct}%` }} />
-              </div>
-              <p className="text-[9px] text-muted-foreground">{floodPct}% of farm polygon shows backscatter consistent with inundation.</p>
-              <div className={`mt-2 px-2 py-1.5 rounded-lg text-[10px] font-medium ${floodPct > 50 ? "bg-red-100 text-red-700" : floodPct > 25 ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>
-                {floodPct > 50 ? "High Flood Risk — Recommend field verification" : floodPct > 25 ? "Moderate — Confirm with ground survey" : "Low — SAR shows minimal inundation"}
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="flex items-center justify-between px-4 py-2 border-t border-border bg-muted/20 shrink-0">
-          <p className="text-[9px] text-muted-foreground">Simulated GEE Sentinel-1 result · For assessment reference only · Verify with field data</p>
-          <button onClick={onClose} className="px-3 py-1 rounded-lg bg-[#166534] text-white text-[10px] font-semibold hover:bg-[#14532d] transition-colors">Close</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 interface MonitoringModuleProps {
   darkMode: boolean;
   selectedBulletin: Bulletin | null;
@@ -482,8 +322,6 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin,
   const [exposureResult, setExposureResult] = useState<ComputeExposureResult | null>(null);
   const [isLoadingExposure, setIsLoadingExposure] = useState(false);
   const [exposureError, setExposureError] = useState<string | null>(null);
-
-  const [sarFarmer, setSarFarmer] = useState<FarmRow | null>(null);
 
   const farms = farmsData.farms;
   const [assessments, setAssessments] = useState<Assessment[]>([]);
@@ -714,7 +552,6 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin,
     { label: "Gust", field: "gustiness" },
   ];
 
-  const selectedMaxSignal = maxSignalLevel(selectedSignals);
   const activeTyphoonNames = activeTyphoons.map(t => t.name).join(", ");
 
   const statCards = [
@@ -727,7 +564,6 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin,
 
   return (
     <div className="h-full overflow-hidden bg-background p-4 flex flex-col gap-4">
-      {sarFarmer && <SARQuickViewModal farm={sarFarmer} onClose={() => setSarFarmer(null)} />}
       {viewingTCB && (
         <TCBViewerModal
           bulletin={viewingTCB}
@@ -868,37 +704,6 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin,
                 </div>
                 <button onClick={() => onSelectBulletin(null)} className="text-muted-foreground text-[10px] hover:text-foreground mt-0.5">✕</button>
               </div>
-              {/* Farmer list with SAR quick-view, cross-referenced by the bulletin's highest recorded signal level */}
-              {selectedMaxSignal > 0 && (
-                <div className="border-t border-[#166534]/20 px-4 py-2">
-                  <div className="flex items-center gap-2 mb-1.5">
-                    <Satellite size={11} className="text-[#166534]" />
-                    <p className="text-[10px] font-semibold">Farmers Under Signal No. {selectedMaxSignal} — Click to view SAR Imagery</p>
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {affectedFarmRows
-                      .filter(f => f.assessment?.wind_velocity === selectedMaxSignal)
-                      .slice(0, 10)
-                      .map(f => (
-                        <button
-                          key={f.farm_id}
-                          onClick={() => setSarFarmer(f)}
-                          className="flex items-center gap-1 px-2 py-1 rounded-lg bg-card border border-border hover:bg-[#166534] hover:text-white hover:border-[#166534] transition-all group text-[10px]"
-                          title={`${f.farmer_name ?? "Unknown farmer"} — ${f.municipality ?? "—"}`}
-                        >
-                          <MapPin size={9} className="text-[#166534] group-hover:text-white" />
-                          <span className="font-mono">#{f.farm_id}</span>
-                          <span className="text-muted-foreground group-hover:text-white/80 text-[9px]">{f.farmer_name?.split(" ").pop() ?? "—"}</span>
-                          <Satellite size={8} className="text-muted-foreground group-hover:text-white/80 ml-0.5" />
-                        </button>
-                      ))
-                    }
-                    {affectedFarmRows.filter(f => f.assessment?.wind_velocity === selectedMaxSignal).length === 0 && (
-                      <p className="text-[10px] text-muted-foreground">No assessed farms recorded under this signal level yet.</p>
-                    )}
-                  </div>
-                </div>
-              )}
             </div>
           )}
         </div>

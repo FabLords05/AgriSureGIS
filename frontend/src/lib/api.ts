@@ -487,6 +487,7 @@ export interface ActivityLogEntry {
   user_email: string | null;
   action: string;
   endpoint: string;
+  summary: string;
   status_code: number;
   created_at: string | null;
 }

@@ -4293,3 +4293,98 @@ deliberately cannot touch either of those on yourself.
   `password_hash` all already exist on `tbl_system_users` from earlier
   work this session.
 
+---
+
+## [2026-08-16] - Activity Log: human-readable summaries instead of raw endpoints
+
+Fabio's explicit request: the Activity Log's Endpoint column showed the raw
+request path (`/api/users/login`, `/api/users/42`, ...) -- asked for a
+readable summary instead (e.g. "Logged in" / "User logged in"), same spirit
+as the rest of this session's "replace raw/decorative with something a
+non-engineer admin can actually read" work.
+
+### 1. File: `backend/app/api/activity_log.py`
+* New `_ENDPOINT_SUMMARIES`: an ordered `(method, path-regex, summary text)`
+  table covering every mutating route in the app as of this date (users
+  register/create/self-update/admin-update, CSV/GPX upload, bulletin
+  parse/manual-PDF-upload/settings/compute-exposure, assessment
+  calculation). Dynamic id segments matched generically (`\d+`) -- the
+  summary never needs to name *which* row was touched.
+* New `_summarize(action, endpoint, status_code)`: `LOGIN`/`LOGOUT` handled
+  specially (and, per Fabio's confirmation, a failed/blocked login reads
+  differently -- "Failed login attempt" (401) / "Login blocked (pending
+  approval)" (403) vs. "Logged in" (200)); everything else looked up in the
+  table above. Anything not explicitly mapped falls back to the old
+  `"{ACTION} {endpoint}"` format, so a future route added without updating
+  this table is never silently hidden from the log.
+* `_entry_to_dict()` gained a `summary` field alongside the existing raw
+  `endpoint` (kept, not removed from the API response -- see file 3).
+
+### 2. File: `frontend/src/lib/api.ts`
+* `ActivityLogEntry` gained `summary: string`.
+
+### 3. File: `frontend/src/app/components/ActivityLogModule.tsx`
+* Table's "Endpoint" column header/cell replaced with "Summary" -- shows
+  `e.summary` as the primary text, with the raw `e.endpoint` kept as a
+  small muted mono subtext underneath (same visual convention the User
+  column already uses for name + email), rather than dropping the raw path
+  entirely -- still useful for an admin cross-checking against server logs.
+
+### Status / Next Steps
+* Not tested -- needs a real click-through against a populated Activity Log
+  (a mix of successful/failed logins, a few different mutating actions) to
+  confirm the summaries read correctly and the fallback format doesn't fire
+  for anything that should have been mapped.
+
+---
+
+## [2026-08-16] - SAR/GEE Mock Analysis Removed
+
+Fabio's explicit request, after confirming with him that the SAR/GEE panels
+were 100% mock/simulated (no real Google Earth Engine or Sentinel-1
+integration anywhere in the codebase -- see the removed files' own
+in-repo comments admitting this). This maps to the documented
+"Verify Farm Planted" use case (`docs/UseCase.drawio.png`, `<<include>>`
+of "Conduct Parametric Damage Assessment", external system "GOOGLE EARTH
+ENGINE (GEE)"), so it's a deliberate deferral of that use case's UI
+scaffolding, not scope creep being trimmed.
+
+### 1. File: `frontend/src/app/components/AOISARPanel.tsx`
+* **Deleted.** 493-line panel that ran a scripted fake progress sequence
+  ("Authenticating with Google Earth Engine…", "Fetching Sentinel-1 SAR
+  tiles…") against a hardcoded `MOCK_SAR_RESULTS` array; no backend call
+  anywhere in it. (Note: this file could not be removed via a tool call in
+  this session -- `rm`/`git rm` were both blocked -- Fabio deleted it by
+  hand.)
+
+### 2. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* Removed the `AOISARPanel` import, the `showSARPanel` state, the
+  "SAR / GEE Analysis" toggle button, and the panel's overlay render over
+  `GISLeafletMap`. Dropped the now-unused `Satellite` icon import.
+
+### 3. File: `frontend/src/app/components/MonitoringModule.tsx`
+* Removed **`SARQuickViewModal()`**: a modal that rendered a canvas-drawn
+  fake SAR backscatter composite per farm (its own comment already
+  disclosed this: "the SAR imagery below is simulated... no real Google
+  Earth Engine integration exists").
+* Removed the `sarFarmer` state, its modal render call, and the "Farmer
+  list with SAR quick-view" block under each selected bulletin (the
+  per-farm buttons that opened the modal).
+* Removed the now-dead `selectedMaxSignal` variable (only consumer was the
+  deleted block) and the now-unused `Satellite`, `MapPin`, `User` icon
+  imports and `useRef` hook import.
+
+### 4. File: `frontend/src/app/components/SettingsModule.tsx`
+* Removed the "Google Earth Engine Configuration" card (Project ID / EEC
+  Capacity fields, fake "GEE API Status: Connected" chip, "Test
+  Connection" button -- none wired to a real check) and its
+  `geeProjectId`/`geeCapacity` state. "Database Configuration" card
+  (unrelated, real) left untouched.
+
+### Status / Next Steps
+* `frontend/src/app/components/AOISARPanel.tsx` still needs to be deleted
+  by hand (blocked tool call, see above).
+* Not yet verified against a running `npm run dev` -- Fabio to confirm no
+  TypeScript/build errors from the removed imports/state before this is
+  committed.
+

@@ -2,10 +2,9 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import { toast } from "sonner";
 import {
   Map as MapIcon, ChevronUp, ChevronDown,
-  Filter, ArrowUpDown, UploadCloud, CheckCircle2, Table2, Satellite, ShieldCheck, X, AlertCircle, Loader2
+  Filter, ArrowUpDown, UploadCloud, CheckCircle2, Table2, ShieldCheck, X, AlertCircle, Loader2
 } from "lucide-react";
 import { GISLeafletMap } from "./GISLeafletMap";
-import { AOISARPanel } from "./AOISARPanel";
 import { getAssessments, uploadCsv, uploadGpx, getCsvUploadStatus, Farm, Assessment, Bulletin } from "@/lib/api";
 import { FarmsData } from "@/lib/useFarmsData";
 
@@ -97,7 +96,6 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
   } = farmsData;
   const [assessments, setAssessments] = useState<Assessment[]>([]);
   const [selectedFarmId, setSelectedFarmId] = useState<number | null>(null);
-  const [showSARPanel, setShowSARPanel]      = useState(false);
   const [filterMuni, setFilterMuni] = useState("All");
   // Defaults to true: a farm with no currently-active insurance policy is
   // rarely useful to look at day to day. This is purely a client-side
@@ -438,12 +436,6 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
               hidden
               onChange={handleGpxFilesSelected}
             />
-            <button
-              onClick={() => setShowSARPanel(v => !v)}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors border ${showSARPanel ? "bg-[#166534] text-white border-[#166534]" : "border-[#166534] text-[#166534] hover:bg-[#166534]/10"}`}
-            >
-              <Satellite size={11} /> SAR / GEE Analysis
-            </button>
           </div>
         </div>
 
@@ -451,7 +443,7 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
           <UploadFailuresModal failures={uploadFailureDetails} onClose={() => setShowUploadDetails(false)} />
         )}
 
-        {/* Map canvas + SAR panel overlay */}
+        {/* Map canvas */}
         <div className="flex-1 overflow-hidden p-2 relative">
           <GISLeafletMap
             farms={filteredFarms}
@@ -461,14 +453,6 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
             darkMode={darkMode}
             focusMunicipality={filterMuni === "All" ? null : filterMuni}
           />
-          {/* SAR AOI Panel — slides in over the map */}
-          {showSARPanel && (
-            <AOISARPanel
-              onClose={() => setShowSARPanel(false)}
-              geeProjectId="pcic-bicol-gee-2024"
-              darkMode={darkMode}
-            />
-          )}
         </div>
       </div>
 
