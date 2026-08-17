@@ -4594,3 +4594,166 @@ expected behavior. Credit to Cristian Aton for this fix.
   dark-mode-per-user, and this logout-notice change) -- merging to
   `develop` and pushing next.
 
+---
+
+## [2026-08-18] - Farms On-Demand Pagination Stage 2: Split Polygons from List Data
+
+New branch `fabio/perf/farms-polygon-split`, off `develop` (which now
+contains Stage 1, commit `273532d`). Fabio asked what happens at
+100k-1M farm polygons -- the backend was already fine (keyset pagination,
+bbox-indexed `/farms/geometry`, materialized view), but the frontend's
+`useFarmsData.ts` was still proactively background-walking the *entire*
+farms table into browser memory + IndexedDB every session regardless of
+what was on screen, and `GISLeafletMap.tsx` still culled geometry
+client-side over that fully-loaded array instead of using the already-built
+bbox endpoint. Settled design: split "polygon or not" cleanly between the
+list endpoint (table) and the geometry endpoint (map); remove the
+background-walk entirely; and -- the stricter of two options discussed --
+no default "browse everything" view at all. The Farm Records table and map
+now stay empty until the user searches a specific municipality.
+
+### 1. File: `backend/app/api/farms.py`
+* **`list_farms()`** (`GET /farms/`): replaced the per-row `location_geom`
+  GeoJSON (`to_shape()`/`shapely.mapping()`) with a cheap
+  `has_geometry: bool` (`farm.location_geom is not None`) -- the only
+  consumer of geometry content here was a Yes/No "Surveyed" badge, nothing
+  ever drew a polygon with it. Skips real per-row CPU cost at 100k-1M scale.
+* **`get_farms_geometry()`** (`GET /farms/geometry`): added an optional
+  `farm_id: int | None` param that, when set, ignores
+  `bbox`/`active_only`/`municipality` and returns just that one farm's
+  geometry -- backs `GISLeafletMap.tsx`'s `FlyToSelectedFarm` for a farm
+  selected from a table row that's outside the map's current viewport
+  fetch. `bbox` is now optional (`Query(None)`), required only when
+  `farm_id` is absent.
+* **New: `list_farm_municipalities()`** (`GET /farms/municipalities`):
+  distinct municipality names from `tbl_admin_boundaries` (not
+  `tbl_farms`), `ORDER BY municipality`. Required fix, not optional --
+  without a default farm-list view, the search box's old suggestion source
+  (whatever farms happened to already be loaded) would be permanently empty
+  before a first search.
+
+### 2. File: `backend/app/api/assessments.py`
+* **`get_assessments_summary()`** (`GET /assessments/summary`): extended
+  the existing totals aggregate (built 2026-08-17, previously had no
+  frontend caller) with two more, each following the same
+  `DISTINCT ON`-latest-assessment-per-farm CTE pattern:
+  `growth_stage_distribution` (per-crop-stage farm counts across all farms,
+  `LEFT JOIN`, bucketed to `"Not Assessed"`) and `signal_breakdown`
+  (per-`wind_velocity` farm count + summed area, affected farms only).
+  Three separate `db.execute(text(...))` calls, one HTTP response --
+  replaces `MonitoringModule.tsx`'s Growth Stage pie and Farms by Signal
+  Number bar chart, which used to reduce over the full client-side `farms`
+  array. Deliberately not municipality-scoped -- a dashboard summary, not
+  something a user searches into.
+
+### 3. File: `frontend/src/lib/api.ts`
+* `Farm.location_geom` (`GeoJsonMultiPolygon | null`) replaced with
+  `Farm.has_geometry: boolean`.
+* **`getFarms()`**: added the missing `municipality` param (backend already
+  supported it).
+* New **`getFarmsGeometry()`** + `FarmGeometry`/`GetFarmsGeometryResult`
+  types, calling `GET /farms/geometry` (`bbox`/`farm_id`/`active_only`/
+  `municipality`).
+* New **`getAssessmentsSummary()`** + `AssessmentsSummary`/
+  `GrowthStageBucket`/`SignalBucket` types, calling the extended
+  `GET /assessments/summary`.
+* New **`getMunicipalities()`**, calling `GET /farms/municipalities`.
+
+### 4. File: `frontend/src/lib/useFarmsData.ts` (rewritten)
+* New signature: `useFarmsData({ enabled, activeOnly, municipality })`.
+  `municipality: string | null` now gates fetching entirely, not just what's
+  fetched -- `null` means no request is ever sent, `farms` stays `[]`.
+* Removed entirely: the two-fixed-phase (`active` -> `all`) model, the
+  self-pacing background loop (`runBackgroundLoop`/`sleep`/
+  `BACKGROUND_FETCH_DELAY_MS`) that walked the whole table to completion
+  regardless of scroll position, and the IndexedDB cache +
+  `agrisuregis_farms_progress_v3` localStorage progress marker built to
+  survive that walk across reloads. One-time cleanup of any pre-existing
+  browser state (`indexedDB.deleteDatabase("agrisuregis")`, both old
+  localStorage keys) runs on module load.
+* Kept: `mergeFarmsPage()` (farm_id-keyed merge, not replace), `PAGE_SIZE`,
+  keyset cursor semantics.
+* New behavior: page 1 fetches eagerly on mount/enable and on every
+  `activeOnly`/`municipality` change (cursor reset, old rows merged over);
+  every later page only via an explicit `requestMore()` call (unchanged
+  `IntersectionObserver` scroll trigger in `SpatialAnalysisModule.tsx`).
+  `refresh()` (`start()` internally) is a no-op while `municipality` is
+  `null`.
+
+### 5. File: `frontend/src/app/App.tsx`
+* `activeInsuranceOnly` (default `true`) and `filterMuni` (default `"All"`)
+  lifted up from `SpatialAnalysisModule` into controlled state here, since
+  `useFarmsData` stays owned here (shared/eager, and `SpatialAnalysisModule`
+  is conditionally mounted -- moving the hook down would drop progress on
+  every tab switch). `useFarmsData({ enabled: !!currentUser, activeOnly:
+  activeInsuranceOnly, municipality: filterMuni === "All" ? null :
+  filterMuni })`.
+* `MonitoringModule` no longer receives a `farmsData` prop.
+  `SpatialAnalysisModule` gains `activeInsuranceOnly`/
+  `onActiveInsuranceOnlyChange`/`filterMuni`/`onFilterMuniChange`.
+
+### 6. File: `frontend/src/app/components/MonitoringModule.tsx`
+* Dropped the `FarmsData` prop/import entirely. Removed `farms`,
+  `assessments` state + its `getAssessments()` fetch, `assessmentByFarmId`,
+  the local `FarmRow` type, `farmRows`, `affectedFarmRows` -- all dead once
+  stats moved server-side (also removes an extra unpaginated
+  `GET /assessments/` call this module was making just to build
+  `assessmentByFarmId`).
+* `totalFarms`/`affectedFarms`/`totalArea`/`totalIndemnity`/
+  `growthStageData`/`signalChartData` now derive from one
+  `getAssessmentsSummary()` call instead of reducing over `farms`. Stat-card
+  and chart JSX unchanged -- same variable names, new source.
+
+### 7. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* `activeInsuranceOnly`/`filterMuni` are now props, not local state.
+* `municipalities`/`muniSuggestions` no longer derive from `farmRows`
+  (would be permanently empty pre-search under the new gating) -- new
+  `allMunicipalities` state fetched once via `getMunicipalities()`, filtered
+  by `muniQuery` for suggestions exactly as before.
+* New empty state: while `filterMuni === "All"`, the table area shows a
+  "Search a municipality above to view farm records" prompt instead of an
+  empty/loading table; the record-count badge shows "No municipality
+  selected".
+* "Active Insurance Only" toggle: `disabled={filterMuni === "All"}` with an
+  explanatory tooltip -- turning off active-insurance scope only makes
+  sense once a municipality narrows what's being browsed.
+* `f.location_geom` Yes/No badge check -> `f.has_geometry`.
+* `<GISLeafletMap>` now also receives `activeOnly={activeInsuranceOnly}`.
+
+### 8. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* New `activeOnly: boolean` prop.
+* Removed client-side geometry culling built from the `farms` prop
+  (`surveyedFarms`-as-render-source, `bboxCacheRef`, `surveyedBBoxByFarmId`,
+  `visibleSurveyedFarms`) -- `farms` no longer carries geometry at all.
+  `computeGeoJsonBBox`/`bboxIntersects`/`BBox`/`SimpleBounds` kept, now
+  applied to the new fetched geometry cache instead.
+* New `geomCache: Map<farm_id, GeoJsonMultiPolygon>` state, refetched via
+  `getFarmsGeometry({ bbox, active_only, municipality })` on
+  `moveend`/`zoomend` (existing `MapBoundsWatcher`), reset (not merged)
+  whenever `activeOnly`/`focusMunicipality` change. Render loop iterates the
+  viewport-culled subset of `geomCache` directly (no longer joined against
+  farm attributes for rendering -- geometry and attributes now arrive
+  independently).
+* **`FlyToSelectedFarm()`**: checks `geomCache` first; if the selected farm
+  `has_geometry` but isn't cached (out of viewport), calls
+  `getFarmsGeometry({ farm_id })` directly, reports the result back via a
+  new `onGeometryFetched` callback (so it's immediately render-eligible too,
+  not just used for the flight), then flies to its bounds. Falls back to
+  `approxPos`/`flyTo` unchanged when the farm has no geometry.
+* `unsurveyedFarms` filter and the Selected Farm Info Panel's
+  "Surveyed"/"Not yet uploaded" check both switched from `f.location_geom`
+  to `f.has_geometry`.
+
+### Status / Next Steps
+* Implementation complete on this branch; not yet verified by Fabio in the
+  running app (backend venv/DB and frontend npm are his environment per
+  the Python/DB/Frontend execution rules -- verification steps are listed
+  in the approved plan at
+  `/home/fabio/.claude/plans/rippling-launching-pond.md`).
+* Scale-testing note: `backend/seed_100k_farms.py` exercises `GET /farms/`
+  pagination at real scale once a search lands on a padded municipality,
+  but adds no `location_geom`, so it doesn't exercise
+  `GET /farms/geometry`'s `ST_Intersects` query at scale -- that stays
+  bounded by however many farms in that municipality have a real GPX
+  boundary today.
+

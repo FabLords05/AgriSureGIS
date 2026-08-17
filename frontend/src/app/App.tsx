@@ -62,11 +62,23 @@ export default function App() {
   const [selectedBulletin, setSelectedBulletin] = useState<Bulletin | null>(null);
   const seenMaxTcbId = useRef<number | null>(null);
 
-  // Starts fetching farm records the moment login succeeds, regardless of
-  // which tab is active -- shared by MonitoringModule (needs the complete
-  // dataset for its aggregate stat cards) and SpatialAnalysisModule (its
-  // table/map), instead of each independently fetching its own copy.
-  const farmsData = useFarmsData(!!currentUser);
+  // SpatialAnalysisModule's Farm Records table/map filters -- owned here
+  // (not locally in that module) because useFarmsData is owned here too:
+  // SpatialAnalysisModule is conditionally mounted (only while
+  // activeModule === "spatial"), so keeping the hook + its filter state at
+  // this level means switching tabs away and back doesn't drop progress or
+  // re-fetch from scratch. `filterMuni === "All"` means "nothing searched
+  // yet" -- see useFarmsData.ts's on-demand gating (2026-08-18, stage 2 of
+  // the on-demand-pagination redesign, .claude/FUNCTION_CHANGES.md): the
+  // Farm Records table/map show nothing at all until a municipality is
+  // picked, so there's no more "browse every farm" default view to own here.
+  const [activeInsuranceOnly, setActiveInsuranceOnly] = useState(true);
+  const [filterMuni, setFilterMuni] = useState("All");
+  const farmsData = useFarmsData({
+    enabled: !!currentUser,
+    activeOnly: activeInsuranceOnly,
+    municipality: filterMuni === "All" ? null : filterMuni,
+  });
 
   const handleLogin = (user: CurrentUser, token: string) => {
     setCurrentUser(user);
@@ -266,7 +278,6 @@ export default function App() {
                   darkMode={darkMode}
                   selectedBulletin={selectedBulletin}
                   onSelectBulletin={setSelectedBulletin}
-                  farmsData={farmsData}
                 />
               )}
               {activeModule === "spatial"     && (
@@ -274,6 +285,10 @@ export default function App() {
                   darkMode={darkMode}
                   selectedBulletin={selectedBulletin}
                   farmsData={farmsData}
+                  activeInsuranceOnly={activeInsuranceOnly}
+                  onActiveInsuranceOnlyChange={setActiveInsuranceOnly}
+                  filterMuni={filterMuni}
+                  onFilterMuniChange={setFilterMuni}
                 />
               )}
               {activeModule === "assessment"  && (

@@ -32,7 +32,11 @@ export interface Farm {
   area_size: number | null;
   csv_farm_reference: string | null;
   georef_id: string | null;
-  location_geom: GeoJsonMultiPolygon | null;
+  // Whether a GPX boundary has been uploaded -- actual polygon coordinates
+  // are fetched separately via getFarmsGeometry(), never carried on this
+  // type. See backend/app/api/farms.py's list_farms docstring (2026-08-18,
+  // stage 2 of the on-demand-pagination redesign).
+  has_geometry: boolean;
   policy_no: string | null;
   effectivity_date: string | null;
   expiry_date: string | null;
@@ -291,10 +295,11 @@ export interface GetFarmsResult {
   has_more: boolean;
 }
 
-// Omitting params returns the full, unpaginated farm list (unchanged legacy
-// behavior -- MonitoringModule.tsx relies on this). Pass `limit`/`after_id`
-// to page through the list, and `active_only` to restrict to farms with a
-// currently-active InsuranceRecord -- see SpatialAnalysisModule.tsx.
+// Omitting params returns the full, unpaginated farm list. Pass
+// `limit`/`after_id` to page through the list, `active_only` to restrict to
+// farms with a currently-active InsuranceRecord, and `municipality` to
+// restrict to one AdminBoundary.municipality -- see useFarmsData.ts and
+// SpatialAnalysisModule.tsx.
 //
 // `after_id` is a keyset (cursor) position, not an OFFSET: pass the highest
 // `farm_id` already seen (0 to start from the beginning). Unlike OFFSET,
@@ -305,13 +310,53 @@ export function getFarms(params?: {
   limit?: number;
   after_id?: number;
   active_only?: boolean;
+  municipality?: string;
 }): Promise<GetFarmsResult> {
   const query = new URLSearchParams();
   if (params?.limit != null) query.set('limit', String(params.limit));
   if (params?.after_id != null) query.set('after_id', String(params.after_id));
   if (params?.active_only != null) query.set('active_only', String(params.active_only));
+  if (params?.municipality) query.set('municipality', params.municipality);
   const qs = query.toString();
   return request<GetFarmsResult>(`/api/farms/${qs ? `?${qs}` : ''}`);
+}
+
+// Viewport-scoped polygon fetch backing GISLeafletMap.tsx -- pass `bbox`
+// ("minLon,minLat,maxLon,maxLat") for the normal moveend/zoomend case, or
+// `farm_id` (which ignores bbox/active_only/municipality server-side) to
+// resolve one specific farm's geometry regardless of the map's current
+// viewport/filters -- e.g. FlyToSelectedFarm's out-of-view case. See
+// backend/app/api/farms.py's get_farms_geometry docstring.
+export interface FarmGeometry {
+  farm_id: number;
+  location_geom: GeoJsonMultiPolygon;
+}
+
+export interface GetFarmsGeometryResult {
+  status: string;
+  data: FarmGeometry[];
+}
+
+export function getFarmsGeometry(params: {
+  bbox?: string;
+  farm_id?: number;
+  active_only?: boolean;
+  municipality?: string;
+}): Promise<GetFarmsGeometryResult> {
+  const query = new URLSearchParams();
+  if (params.bbox) query.set('bbox', params.bbox);
+  if (params.farm_id != null) query.set('farm_id', String(params.farm_id));
+  if (params.active_only != null) query.set('active_only', String(params.active_only));
+  if (params.municipality) query.set('municipality', params.municipality);
+  return request<GetFarmsGeometryResult>(`/api/farms/geometry?${query.toString()}`);
+}
+
+// Distinct municipality names for the Farm Records search box's suggestion
+// list -- sourced from AdminBoundary, not from whatever farms happen to be
+// loaded, so it's populated even before any municipality has been searched.
+// See backend/app/api/farms.py's list_farm_municipalities docstring.
+export function getMunicipalities(): Promise<{ status: string; data: string[] }> {
+  return request<{ status: string; data: string[] }>('/api/farms/municipalities');
 }
 
 export interface InsuranceSummary {
@@ -322,6 +367,28 @@ export interface InsuranceSummary {
 
 export function getInsuranceSummary(): Promise<InsuranceSummary> {
   return request<InsuranceSummary>('/api/insurance/summary');
+}
+
+// MonitoringModule.tsx's dashboard aggregate -- totals plus the two chart
+// breakdowns, computed server-side (backend/app/api/assessments.py's
+// get_assessments_summary) instead of reducing over the full farms array
+// client-side. Deliberately not municipality-scoped -- see that function's
+// docstring.
+export interface GrowthStageBucket { crop_stage: string; farm_count: number }
+export interface SignalBucket { wind_velocity: number; farm_count: number; total_area: number }
+
+export interface AssessmentsSummary {
+  status: string;
+  total_farms: number;
+  affected_farms: number;
+  total_area: number;
+  total_indemnity: number;
+  growth_stage_distribution: GrowthStageBucket[];
+  signal_breakdown: SignalBucket[];
+}
+
+export function getAssessmentsSummary(): Promise<AssessmentsSummary> {
+  return request<AssessmentsSummary>('/api/assessments/summary');
 }
 
 export function getAssessments(typhoonId?: number, policyNo?: string): Promise<{ status: string; data: Assessment[] }> {

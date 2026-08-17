@@ -5,7 +5,7 @@ import {
   Filter, ArrowUpDown, UploadCloud, CheckCircle2, Table2, ShieldCheck, X, AlertCircle, Loader2
 } from "lucide-react";
 import { GISLeafletMap } from "./GISLeafletMap";
-import { getAssessments, uploadCsv, uploadGpx, getCsvUploadStatus, Farm, Assessment, Bulletin } from "@/lib/api";
+import { getAssessments, getMunicipalities, uploadCsv, uploadGpx, getCsvUploadStatus, Farm, Assessment, Bulletin } from "@/lib/api";
 import { FarmsData } from "@/lib/useFarmsData";
 
 interface FarmRow extends Farm {
@@ -40,11 +40,21 @@ const OVERSCAN = 10;
 interface SpatialAnalysisModuleProps {
   darkMode: boolean;
   selectedBulletin: Bulletin | null;
-  // Shared with MonitoringModule and owned by App.tsx (useFarmsData) --
-  // fetching starts the moment the app opens, not when this module mounts,
-  // so data is often already there (or well underway) by the time a user
-  // navigates here. See useFarmsData.ts for the fetch/pagination mechanics.
+  // Owned by App.tsx (useFarmsData), not locally -- this module is
+  // conditionally mounted, so keeping the hook + these filters one level up
+  // means switching tabs away and back doesn't drop progress or re-fetch
+  // from scratch. See useFarmsData.ts for the fetch mechanics.
   farmsData: FarmsData;
+  // activeInsuranceOnly/filterMuni also live in App.tsx for the same
+  // reason. filterMuni === "All" means "nothing searched yet" -- the Farm
+  // Records table/map show nothing at all until a municipality is picked
+  // (2026-08-18, stage 2 of the on-demand-pagination redesign -- see
+  // .claude/FUNCTION_CHANGES.md), so there's no default "browse everything"
+  // view to gate here anymore.
+  activeInsuranceOnly: boolean;
+  onActiveInsuranceOnlyChange: (value: boolean) => void;
+  filterMuni: string;
+  onFilterMuniChange: (value: string) => void;
 }
 
 // ─── Upload Failures Modal ───────────────────────────────────────────────────
@@ -83,7 +93,10 @@ function UploadFailuresModal({ failures, onClose }: { failures: string[]; onClos
   );
 }
 
-export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }: SpatialAnalysisModuleProps) {
+export function SpatialAnalysisModule({
+  darkMode, selectedBulletin, farmsData,
+  activeInsuranceOnly, onActiveInsuranceOnlyChange, filterMuni, onFilterMuniChange,
+}: SpatialAnalysisModuleProps) {
   const {
     farms,
     isLoadingFirstPage,
@@ -96,15 +109,11 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
   } = farmsData;
   const [assessments, setAssessments] = useState<Assessment[]>([]);
   const [selectedFarmId, setSelectedFarmId] = useState<number | null>(null);
-  const [filterMuni, setFilterMuni] = useState("All");
-  // Defaults to true: a farm with no currently-active insurance policy is
-  // rarely useful to look at day to day. This is purely a client-side
-  // display filter over the shared `farms` cache -- toggling it does not
-  // trigger a fetch, since useFarmsData already fetches active-insurance
-  // farms first and the complete dataset shortly after, regardless of this
-  // toggle's state (MonitoringModule's stat cards need the complete set
-  // either way).
-  const [activeInsuranceOnly, setActiveInsuranceOnly] = useState(true);
+  // All real municipality names, for the search box's suggestions --
+  // fetched once from a dedicated endpoint (not derived from `farms`,
+  // which is empty until a municipality is actually picked -- see
+  // getMunicipalities()'s doc comment in api.ts).
+  const [allMunicipalities, setAllMunicipalities] = useState<string[]>([]);
   const [muniQuery, setMuniQuery] = useState("");
   const [showMuniSuggestions, setShowMuniSuggestions] = useState(false);
   const [sortField, setSortField] = useState<SortField>("farm_id");
@@ -143,6 +152,7 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
 
   useEffect(() => {
     getAssessments().then(res => setAssessments(res.data)).catch(() => setAssessments([]));
+    getMunicipalities().then(res => setAllMunicipalities(res.data)).catch(() => setAllMunicipalities([]));
   }, []);
 
   // Infinite scroll: observe a sentinel row at the end of the table body and
@@ -186,23 +196,19 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
     [farms, assessmentByFarmId]
   );
 
-  const municipalities = useMemo(() => {
-    const set = new Set(farmRows.map(f => f.municipality).filter((m): m is string => !!m));
-    return ["All", ...Array.from(set).sort()];
-  }, [farmRows]);
-
   // Type-ahead suggestions for the municipality search box -- matches on the
   // typed letters as a prefix (case-insensitive), same idea as the old select
-  // dropdown but searchable instead of scroll-to-find.
+  // dropdown but searchable instead of scroll-to-find. Sourced from
+  // `allMunicipalities` (always populated, see the mount effect above), not
+  // from `farms` -- `farms` is empty until a municipality is actually picked.
   const muniSuggestions = useMemo(() => {
-    const options = municipalities.filter(m => m !== "All");
     const q = muniQuery.trim().toLowerCase();
-    if (!q) return options;
-    return options.filter(m => m.toLowerCase().startsWith(q));
-  }, [municipalities, muniQuery]);
+    if (!q) return allMunicipalities;
+    return allMunicipalities.filter(m => m.toLowerCase().startsWith(q));
+  }, [allMunicipalities, muniQuery]);
 
   const selectMunicipality = (m: string) => {
-    setFilterMuni(m);
+    onFilterMuniChange(m);
     setMuniQuery(m);
     setShowMuniSuggestions(false);
   };
@@ -373,7 +379,7 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
                   const value = e.target.value;
                   setMuniQuery(value);
                   setShowMuniSuggestions(true);
-                  if (value.trim() === "") setFilterMuni("All");
+                  if (value.trim() === "") onFilterMuniChange("All");
                 }}
                 onFocus={() => setShowMuniSuggestions(true)}
                 onBlur={() => setShowMuniSuggestions(false)}
@@ -452,6 +458,7 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
             selectedBulletin={selectedBulletin}
             darkMode={darkMode}
             focusMunicipality={filterMuni === "All" ? null : filterMuni}
+            activeOnly={activeInsuranceOnly}
           />
         </div>
       </div>
@@ -481,13 +488,17 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
               <Table2 size={13} className="text-[#166534]" />
               <span className="text-[11px] font-semibold">Farm Records</span>
               <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">
-                {isLoadingFirstPage ? "Loading…" : isRefreshing ? "Refreshing…" : `${filteredFarms.length} records`}
+                {filterMuni === "All"
+                  ? "No municipality selected"
+                  : isLoadingFirstPage ? "Loading…" : isRefreshing ? "Refreshing…" : `${filteredFarms.length} records`}
               </span>
               {loadError && <span className="text-[10px] text-red-500">{loadError}</span>}
             </div>
             <button
-              onClick={() => setActiveInsuranceOnly(v => !v)}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors border ${activeInsuranceOnly ? "bg-[#166534] text-white border-[#166534]" : "border-[#166534] text-[#166534] hover:bg-[#166534]/10"}`}
+              onClick={() => onActiveInsuranceOnlyChange(!activeInsuranceOnly)}
+              disabled={filterMuni === "All"}
+              title={filterMuni === "All" ? "Search a municipality to view farm records" : undefined}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors border disabled:opacity-50 disabled:cursor-not-allowed ${activeInsuranceOnly ? "bg-[#166534] text-white border-[#166534]" : "border-[#166534] text-[#166534] hover:bg-[#166534]/10"}`}
             >
               <ShieldCheck size={11} /> Active Insurance Only
             </button>
@@ -501,7 +512,14 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
             ref={scrollContainerRef}
             onScroll={e => setTableScrollTop(e.currentTarget.scrollTop)}
           >
-            {isLoadingFirstPage ? (
+            {filterMuni === "All" ? (
+              <div className="flex flex-col items-center justify-center h-full gap-1.5 text-center px-6">
+                <Filter size={18} className="text-muted-foreground/50" />
+                <p className="text-[11px] text-muted-foreground">
+                  Search a municipality above to view farm records
+                </p>
+              </div>
+            ) : isLoadingFirstPage ? (
               <div className="flex items-center justify-center h-full text-[11px] text-muted-foreground">
                 Loading farm records…
               </div>
@@ -558,7 +576,7 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
                     <td className="px-2.5 py-2 text-muted-foreground">{f.barangay ?? "—"}</td>
                     <td className="px-2.5 py-2 text-right">{f.area_size != null ? f.area_size.toFixed(2) : "—"}</td>
                     <td className="px-2.5 py-2">
-                      {f.location_geom
+                      {f.has_geometry
                         ? <span className="text-emerald-600 flex items-center gap-0.5"><CheckCircle2 size={10} />Yes</span>
                         : <span className="text-muted-foreground">No</span>
                       }

@@ -25,8 +25,19 @@ def list_farms(
 ):
     """
     Lists farms with farmer/boundary identity, insurance coverage dates (from
-    the farm's most recent InsuranceRecord, if any), and, where a GPX
-    boundary has been uploaded, the farm's geometry as GeoJSON.
+    the farm's most recent InsuranceRecord, if any), and a `has_geometry`
+    flag for whether a GPX boundary has been uploaded.
+
+    `has_geometry` (2026-08-18, stage 2 of the on-demand-pagination redesign
+    -- see .claude/FUNCTION_CHANGES.md) replaces what used to be a full
+    `location_geom` GeoJSON blob per row here. This endpoint's only
+    consumer of geometry content was a Yes/No "Surveyed" badge
+    (SpatialAnalysisModule.tsx) -- nothing here ever drew a polygon with
+    it. Skipping `to_shape()`/`shapely.mapping()` per row (real per-row CPU
+    cost, not DB I/O -- `Farm.location_geom` is still selected as part of
+    the ORM row either way) is a straightforward win at 100k-1M farm scale.
+    Actual polygon geometry now comes exclusively from GET /farms/geometry
+    below, which the map calls directly.
 
     Runs 2 queries total per request regardless of farm count: `farmer`/
     `boundary` are eager-loaded via joinedload (they default to lazy/per-row
@@ -174,9 +185,6 @@ def list_farms(
 
     data = []
     for farm in farms:
-        location_geom = (
-            mapping(to_shape(farm.location_geom)) if farm.location_geom is not None else None
-        )
         insurance = latest_insurance_by_farm_id.get(farm.farm_id)
         data.append(
             {
@@ -193,7 +201,7 @@ def list_farms(
                 "area_size": float(farm.area_size) if farm.area_size is not None else None,
                 "csv_farm_reference": farm.csv_farm_reference,
                 "georef_id": farm.georef_id,
-                "location_geom": location_geom,
+                "has_geometry": farm.location_geom is not None,
                 "policy_no": insurance.policy_no if insurance else None,
                 "effectivity_date": insurance.effectivity_date.strftime("%m/%d/%Y") if insurance and insurance.effectivity_date else None,
                 "expiry_date": insurance.expiry_date.strftime("%m/%d/%Y") if insurance and insurance.expiry_date else None,
@@ -228,9 +236,13 @@ def list_farms(
 
 @router.get("/geometry")
 def get_farms_geometry(
-    bbox: str = Query(
-        ...,
-        description="minLon,minLat,maxLon,maxLat (WGS84) -- the map's current visible bounds.",
+    bbox: str | None = Query(
+        None,
+        description="minLon,minLat,maxLon,maxLat (WGS84) -- the map's current visible bounds. Required unless farm_id is given.",
+    ),
+    farm_id: int | None = Query(
+        None,
+        description="When set, ignores bbox/active_only/municipality entirely and returns just this one farm's geometry, if it has one.",
     ),
     active_only: bool = Query(False),
     municipality: str | None = Query(None),
@@ -257,7 +269,26 @@ def get_farms_geometry(
     walk). If real-world testing ever shows a viewport spanning enough
     farms to make this expensive, the fix is a tighter bbox from the
     frontend (don't fetch below a certain zoom level), not pagination here.
+
+    `farm_id` (2026-08-18, stage 2) is a separate, bbox-independent lookup
+    path for GISLeafletMap.tsx's FlyToSelectedFarm: a farm selected from a
+    table row can be outside the map's current viewport fetch, so its
+    geometry wouldn't be in the bbox result set yet -- this lets the map
+    resolve that one farm's geometry directly, reusing this endpoint/route
+    instead of adding a second one.
     """
+    if farm_id is not None:
+        row = (
+            db.query(Farm.farm_id, Farm.location_geom)
+            .filter(Farm.farm_id == farm_id, Farm.location_geom.isnot(None))
+            .first()
+        )
+        data = [{"farm_id": row.farm_id, "location_geom": mapping(to_shape(row.location_geom))}] if row else []
+        return {"status": "success", "data": data}
+
+    if bbox is None:
+        raise HTTPException(status_code=400, detail="bbox is required unless farm_id is provided")
+
     try:
         min_lon, min_lat, max_lon, max_lat = (float(part) for part in bbox.split(","))
     except ValueError as exc:
@@ -296,3 +327,29 @@ def get_farms_geometry(
     ]
 
     return {"status": "success", "data": data}
+
+
+@router.get("/municipalities")
+def list_farm_municipalities(db: Session = Depends(get_db)):
+    """
+    Distinct municipality names, for the Farm Records search box's
+    suggestion list (2026-08-18, stage 2 of the on-demand-pagination
+    redesign -- see .claude/FUNCTION_CHANGES.md).
+
+    Sourced from tbl_admin_boundaries, not tbl_farms -- this stage removes
+    GET /farms/'s old "load everything, then let the user filter/search
+    client-side" default view, so the municipality list the search box used
+    to derive from whatever farms happened to already be loaded would
+    otherwise be permanently empty before a first search: nothing to
+    suggest, nothing to pick, nothing loads. AdminBoundary is a small,
+    fixed reference table (real municipalities in the covered region), so
+    this is safe to return in full regardless of how large tbl_farms gets.
+    """
+    rows = (
+        db.query(AdminBoundary.municipality)
+        .filter(AdminBoundary.municipality.isnot(None))
+        .distinct()
+        .order_by(AdminBoundary.municipality.asc())
+        .all()
+    )
+    return {"status": "success", "data": [row.municipality for row in rows]}

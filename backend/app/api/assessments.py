@@ -150,8 +150,22 @@ def get_assessments_summary(db: Session = Depends(get_db)):
     Raw SQL (not the ORM) for the same reason farms_view.py uses it: this
     is a DISTINCT ON + FILTER aggregate that's awkward to express
     correctly through the ORM and cheap for Postgres to run directly.
+
+    growth_stage_distribution/signal_breakdown (2026-08-18, stage 2) round
+    out this replacement -- MonitoringModule.tsx's Growth Stage pie and
+    Farms by Signal Number bar chart used to reduce over the same full
+    `farms` array (joined against `assessments`, itself a separate
+    unpaginated GET /assessments/ fetch) client-side. Deliberately three
+    separate `db.execute()` calls sharing the same
+    latest-assessment-per-farm CTE shape rather than one combined query --
+    each stays simple/readable at the cost of Postgres re-scanning
+    tbl_risk_assessment/tbl_insurance_records three times, which is fine
+    given those tables are far smaller than tbl_farms at 100k-1M scale.
+    Deliberately not scoped by municipality (unlike GET /farms/ and GET
+    /farms/geometry) -- this is a dashboard summary meant to reflect the
+    whole system, not something a user searches into.
     """
-    row = db.execute(
+    totals_row = db.execute(
         text(
             """
             WITH latest_assessment_per_farm AS (
@@ -174,12 +188,72 @@ def get_assessments_summary(db: Session = Depends(get_db)):
         )
     ).first()
 
+    # Growth Stage Distribution -- MonitoringModule.tsx's growthStageData,
+    # over ALL farms (LEFT JOIN), bucketed to "Not Assessed" for farms with
+    # no RiskAssessment at all yet -- same semantics as the old client-side
+    # `f.assessment?.crop_stage ?? "Not Assessed"` reduction.
+    growth_stage_rows = db.execute(
+        text(
+            """
+            WITH latest_assessment_per_farm AS (
+                SELECT DISTINCT ON (ir.farm_id)
+                    ir.farm_id,
+                    ra.crop_stage
+                FROM tbl_risk_assessment ra
+                JOIN tbl_insurance_records ir ON ir.insurance_records_id = ra.insurance_records_id
+                ORDER BY ir.farm_id, ra.assessment_date DESC
+            )
+            SELECT
+                COALESCE(lap.crop_stage, 'Not Assessed') AS crop_stage,
+                COUNT(*) AS farm_count
+            FROM tbl_farms f
+            LEFT JOIN latest_assessment_per_farm lap ON lap.farm_id = f.farm_id
+            GROUP BY COALESCE(lap.crop_stage, 'Not Assessed')
+            ORDER BY farm_count DESC, crop_stage ASC
+            """
+        )
+    ).all()
+
+    # Signal breakdown -- MonitoringModule.tsx's signalChartData, over
+    # affected farms only (wind_velocity NOT NULL), same as the old
+    # affectedFarmRows reduction.
+    signal_rows = db.execute(
+        text(
+            """
+            WITH latest_assessment_per_farm AS (
+                SELECT DISTINCT ON (ir.farm_id)
+                    ir.farm_id,
+                    ra.wind_velocity
+                FROM tbl_risk_assessment ra
+                JOIN tbl_insurance_records ir ON ir.insurance_records_id = ra.insurance_records_id
+                ORDER BY ir.farm_id, ra.assessment_date DESC
+            )
+            SELECT
+                lap.wind_velocity,
+                COUNT(*) AS farm_count,
+                COALESCE(SUM(f.area_size), 0) AS total_area
+            FROM latest_assessment_per_farm lap
+            JOIN tbl_farms f ON f.farm_id = lap.farm_id
+            WHERE lap.wind_velocity IS NOT NULL
+            GROUP BY lap.wind_velocity
+            ORDER BY lap.wind_velocity ASC
+            """
+        )
+    ).all()
+
     return {
         "status": "success",
-        "total_farms": row.total_farms if row else 0,
-        "affected_farms": row.affected_farms if row else 0,
-        "total_area": float(row.total_area) if row and row.total_area is not None else 0.0,
-        "total_indemnity": float(row.total_indemnity) if row and row.total_indemnity is not None else 0.0,
+        "total_farms": totals_row.total_farms if totals_row else 0,
+        "affected_farms": totals_row.affected_farms if totals_row else 0,
+        "total_area": float(totals_row.total_area) if totals_row and totals_row.total_area is not None else 0.0,
+        "total_indemnity": float(totals_row.total_indemnity) if totals_row and totals_row.total_indemnity is not None else 0.0,
+        "growth_stage_distribution": [
+            {"crop_stage": r.crop_stage, "farm_count": r.farm_count} for r in growth_stage_rows
+        ],
+        "signal_breakdown": [
+            {"wind_velocity": r.wind_velocity, "farm_count": r.farm_count, "total_area": float(r.total_area)}
+            for r in signal_rows
+        ],
     }
 
 

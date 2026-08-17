@@ -11,16 +11,11 @@ import {
   PieChart, Pie, Cell, LineChart, Line, CartesianGrid, Legend
 } from "recharts";
 import {
-  Bulletin, TcbSignal, Farm, Assessment, InsuranceSummary, ActiveTyphoon,
+  Bulletin, TcbSignal, InsuranceSummary, ActiveTyphoon, AssessmentsSummary,
   getBulletins, parseBulletins, getBulletinSignals,
-  computeExposure, ComputeExposureResult, getAssessments, getInsuranceSummary,
+  computeExposure, ComputeExposureResult, getAssessmentsSummary, getInsuranceSummary,
   getActiveTyphoons,
 } from "@/lib/api";
-import { FarmsData } from "@/lib/useFarmsData";
-
-interface FarmRow extends Farm {
-  assessment: Assessment | null;
-}
 
 type BulletinSortField = "bulletin_count" | "typhoon_name" | "issued_at" | "category" | "max_sustained_winds" | "gustiness";
 type SortDir = "asc" | "desc";
@@ -296,10 +291,9 @@ interface MonitoringModuleProps {
   darkMode: boolean;
   selectedBulletin: Bulletin | null;
   onSelectBulletin: (bulletin: Bulletin | null) => void;
-  farmsData: FarmsData;
 }
 
-export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin, farmsData }: MonitoringModuleProps) {
+export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin }: MonitoringModuleProps) {
   const [bulletins, setBulletins] = useState<Bulletin[]>([]);
   const [isLoadingBulletins, setIsLoadingBulletins] = useState(false);
   const [isParsing, setIsParsing] = useState(false);
@@ -323,8 +317,7 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin,
   const [isLoadingExposure, setIsLoadingExposure] = useState(false);
   const [exposureError, setExposureError] = useState<string | null>(null);
 
-  const farms = farmsData.farms;
-  const [assessments, setAssessments] = useState<Assessment[]>([]);
+  const [assessmentsSummary, setAssessmentsSummary] = useState<AssessmentsSummary | null>(null);
   const [insuranceSummary, setInsuranceSummary] = useState<InsuranceSummary | null>(null);
   const [activeTyphoons, setActiveTyphoons] = useState<ActiveTyphoon[]>([]);
 
@@ -337,60 +330,34 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin,
     }
   }, []);
 
+  // Stat cards + charts all come from one server-side aggregate now
+  // (2026-08-18, stage 2 of the on-demand-pagination redesign -- see
+  // .claude/FUNCTION_CHANGES.md) instead of reducing over the full farms
+  // array + a separate unpaginated GET /assessments/ fetch client-side.
   useEffect(() => {
-    getAssessments().then(res => setAssessments(res.data)).catch(() => setAssessments([]));
+    getAssessmentsSummary().then(setAssessmentsSummary).catch(() => setAssessmentsSummary(null));
     getInsuranceSummary().then(setInsuranceSummary).catch(() => setInsuranceSummary(null));
     loadActiveTyphoons();
   }, [loadActiveTyphoons]);
 
-  // Most recent assessment per farm_id (list_assessments() is ordered by assessment_date desc).
-  const assessmentByFarmId = useMemo(() => {
-    const map = new Map<number, Assessment>();
-    for (const a of assessments) {
-      if (a.farm_id != null && !map.has(a.farm_id)) map.set(a.farm_id, a);
-    }
-    return map;
-  }, [assessments]);
+  const totalFarms = assessmentsSummary?.total_farms ?? 0;
+  const affectedFarms = assessmentsSummary?.affected_farms ?? 0;
+  const totalArea = assessmentsSummary?.total_area ?? 0;
+  const totalIndemnity = assessmentsSummary?.total_indemnity ?? 0;
 
-  const farmRows: FarmRow[] = useMemo(
-    () => farms.map(f => ({ ...f, assessment: assessmentByFarmId.get(f.farm_id) ?? null })),
-    [farms, assessmentByFarmId]
+  const growthStageData = useMemo(
+    () => (assessmentsSummary?.growth_stage_distribution ?? []).map((d, i) => ({
+      name: d.crop_stage, value: d.farm_count, color: GROWTH_STAGE_COLORS[i % GROWTH_STAGE_COLORS.length],
+    })),
+    [assessmentsSummary]
   );
 
-  // "Affected" = has a real computed assessment (wind_velocity set) -- excludes
-  // the legacy CSV-import seed rows, which only carry a crop_stage placeholder
-  // and never get wind_velocity/period_of_exposure populated (see upload.py).
-  const affectedFarmRows = useMemo(() => farmRows.filter(f => f.assessment?.wind_velocity != null), [farmRows]);
-
-  const totalFarms = farms.length;
-  const affectedFarms = affectedFarmRows.length;
-  const totalArea = affectedFarmRows.reduce((s, f) => s + (f.area_size ?? 0), 0);
-  const totalIndemnity = affectedFarmRows.reduce((s, f) => s + (f.assessment?.final_indemnity_payment ?? 0), 0);
-
-  const growthStageData = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const f of farmRows) {
-      const stage = f.assessment?.crop_stage ?? "Not Assessed";
-      counts.set(stage, (counts.get(stage) ?? 0) + 1);
-    }
-    return Array.from(counts.entries()).map(([name, value], i) => ({
-      name, value, color: GROWTH_STAGE_COLORS[i % GROWTH_STAGE_COLORS.length],
-    }));
-  }, [farmRows]);
-
-  const signalChartData = useMemo(() => {
-    const bySignal = new Map<number, { farms: number; area: number }>();
-    for (const f of affectedFarmRows) {
-      const signal = f.assessment!.wind_velocity!;
-      const entry = bySignal.get(signal) ?? { farms: 0, area: 0 };
-      entry.farms += 1;
-      entry.area += f.area_size ?? 0;
-      bySignal.set(signal, entry);
-    }
-    return Array.from(bySignal.entries())
-      .sort(([a], [b]) => a - b)
-      .map(([signal, v]) => ({ signal: `Signal ${signal}`, farms: v.farms, area: Math.round(v.area * 10) / 10 }));
-  }, [affectedFarmRows]);
+  const signalChartData = useMemo(
+    () => [...(assessmentsSummary?.signal_breakdown ?? [])]
+      .sort((a, b) => a.wind_velocity - b.wind_velocity)
+      .map(d => ({ signal: `Signal ${d.wind_velocity}`, farms: d.farm_count, area: Math.round(d.total_area * 10) / 10 })),
+    [assessmentsSummary]
+  );
 
   const bulletinTimelineData = useMemo(() => {
     const byDate = new Map<string, number>();
