@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { toast } from "sonner";
 import {
-  Map as MapIcon, ChevronUp, ChevronDown,
+  ChevronUp, ChevronDown,
   Filter, User, ArrowUpDown, UploadCloud, CheckCircle2, Table2, ShieldCheck, X, AlertCircle, Loader2
 } from "lucide-react";
 import { GISLeafletMap } from "./GISLeafletMap";
@@ -411,16 +411,10 @@ export function SpatialAnalysisModule({
     <div className="h-full flex flex-col overflow-hidden">
       {/* Top Panel – GIS Map */}
       <div style={{ height: `${topPanelH}%` }} className="flex flex-col overflow-hidden">
-        {/* Map toolbar -- just the title. Search/filter/upload controls all
-            live in the Farm Records toolbar below now (2026-08-18, per
-            Fabio's request) so the map itself gets more vertical room. */}
-        <div className="flex items-center gap-2 px-4 py-2 bg-card border-b border-border shrink-0">
-          <MapIcon size={14} className="text-[#166534]" />
-          <span className="text-xs font-semibold">
-            {selectedBulletin ? `${selectedBulletin.typhoon_name} Impact Map` : "Spatial Impact Map"}
-          </span>
-        </div>
-
+        {/* Map toolbar removed entirely (2026-08-18, per Fabio's request) --
+            it only ever held the title, and the map canvas below now gets
+            that space instead. Search/filter/upload controls already live
+            in the Farm Records toolbar further down. */}
         {showUploadDetails && uploadFailureDetails && (
           <UploadFailuresModal failures={uploadFailureDetails} onClose={() => setShowUploadDetails(false)} />
         )}

@@ -4903,6 +4903,22 @@ explicit direction that the two filters be independent and combinable.
   `focusMunicipality`.
 
 ### Status / Next Steps
-* Implementation complete on this branch; not yet verified by Fabio in the
-  running app.
+* Fabio confirmed the toolbar consolidation and farmer search both work as
+  expected.
+
+---
+
+## [2026-08-18] - Remove Map Toolbar Entirely
+
+Fabio: the map toolbar (by this point just a title, everything else having
+moved down to the Farm Records toolbar per the prior entry) was still
+taking up vertical space the map itself could use -- asked to remove it
+outright.
+
+### File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* Deleted the map toolbar `<div>` (icon + `"{typhoon} Impact Map"` /
+  `"Spatial Impact Map"` title) entirely -- the map canvas `<div>`
+  (`flex-1`) now fills the whole top panel on its own. Dropped the
+  now-unused `Map as MapIcon` import.
+
 
