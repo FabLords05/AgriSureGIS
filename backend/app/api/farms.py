@@ -1,15 +1,16 @@
 from datetime import date
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from geoalchemy2.shape import to_shape
 from shapely.geometry import mapping
+from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
 from app.core.farms_cache import cache_farms_page, get_cached_farms_page
 from app.core.farms_view import fetch_latest_insurance_from_view, materialized_view_available
 from app.core.security import get_current_user
-from app.models.models import Farm, InsuranceRecord
+from app.models.models import AdminBoundary, Farm, InsuranceRecord
 
 router = APIRouter(prefix="/farms", tags=["farms"], dependencies=[Depends(get_current_user)])
 
@@ -20,6 +21,7 @@ def list_farms(
     limit: int | None = Query(None, ge=1, le=1000),
     after_id: int = Query(0, ge=0),
     active_only: bool = Query(False),
+    municipality: str | None = Query(None),
 ):
     """
     Lists farms with farmer/boundary identity, insurance coverage dates (from
@@ -51,6 +53,12 @@ def list_farms(
     isActiveInsurance() already applies client-side, now pushed into the
     query so an all-inactive farm is never fetched in the first place.
 
+    `municipality` (2026-08-17, part of the on-demand-pagination redesign --
+    see .claude/FUNCTION_CHANGES.md) restricts results to farms whose
+    AdminBoundary.municipality exactly matches -- pushes what was previously
+    a client-side filter over the fully-loaded array into the query, since
+    the redesign no longer loads the full array client-side to filter over.
+
     Pagination is keyset (cursor), not OFFSET/LIMIT: `after_id` is the
     highest `farm_id` already seen by the caller (0 to start from the
     beginning), and each page filters `Farm.farm_id > after_id` instead of
@@ -81,7 +89,9 @@ def list_farms(
     instead of re-running these queries, since this listing doesn't change
     on every request the way a live feed would.
     """
-    cached = get_cached_farms_page(limit=limit, after_id=after_id, active_only=active_only)
+    cached = get_cached_farms_page(
+        limit=limit, after_id=after_id, active_only=active_only, municipality=municipality
+    )
     if cached is not None:
         return cached
 
@@ -102,6 +112,15 @@ def list_farms(
             .scalar_subquery()
         )
         base_query = base_query.filter(Farm.farm_id.in_(active_farm_ids))
+
+    if municipality:
+        # Plain join (not joinedload) purely to filter -- Farm.boundary_id ->
+        # AdminBoundary.boundary_id is many-to-one, so this can never
+        # duplicate a Farm row, meaning base_query.count() below (and the
+        # LIMIT'd page after it) both stay correct without any DISTINCT.
+        base_query = base_query.join(AdminBoundary, Farm.boundary_id == AdminBoundary.boundary_id).filter(
+            AdminBoundary.municipality == municipality
+        )
 
     total: int | None = None
     if limit is not None and after_id == 0:
@@ -201,5 +220,79 @@ def list_farms(
             "has_more": False,
         }
 
-    cache_farms_page(limit=limit, after_id=after_id, active_only=active_only, result=result)
+    cache_farms_page(
+        limit=limit, after_id=after_id, active_only=active_only, municipality=municipality, result=result
+    )
     return result
+
+
+@router.get("/geometry")
+def get_farms_geometry(
+    bbox: str = Query(
+        ...,
+        description="minLon,minLat,maxLon,maxLat (WGS84) -- the map's current visible bounds.",
+    ),
+    active_only: bool = Query(False),
+    municipality: str | None = Query(None),
+    db: Session = Depends(get_db),
+):
+    """
+    Viewport-based geometry for the map (2026-08-17, on-demand-pagination
+    redesign -- see .claude/FUNCTION_CHANGES.md). Returns only
+    `farm_id`/`location_geom` for farms whose geometry actually intersects
+    the given bbox, via a real PostGIS ST_Intersects query -- replaces
+    GISLeafletMap.tsx's previous approach of computing bbox intersection
+    client-side over every farm's geometry already sitting in the shared
+    `farms` array, which required the *entire* dataset's geometry to be
+    loaded into the browser first regardless of what was actually visible.
+
+    Deliberately a separate, lightweight endpoint from GET /farms/ -- the
+    map never needs farmer/insurance/crop-stage fields, and GET /farms/'s
+    consumers (the Farm Records table) don't need this on every row either;
+    keeping them separate means the map's requests stay cheap.
+
+    No pagination/limit here: a single screen's viewport is expected to
+    intersect a small enough number of farms that a full result set is
+    fine (matches PostGIS's own strength -- an indexed bbox query, not a
+    walk). If real-world testing ever shows a viewport spanning enough
+    farms to make this expensive, the fix is a tighter bbox from the
+    frontend (don't fetch below a certain zoom level), not pagination here.
+    """
+    try:
+        min_lon, min_lat, max_lon, max_lat = (float(part) for part in bbox.split(","))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="bbox must be minLon,minLat,maxLon,maxLat") from exc
+
+    query = db.query(Farm.farm_id, Farm.location_geom).filter(Farm.location_geom.isnot(None))
+
+    if active_only:
+        today = date.today()
+        active_farm_ids = (
+            db.query(InsuranceRecord.farm_id)
+            .filter(
+                InsuranceRecord.effectivity_date <= today,
+                InsuranceRecord.expiry_date >= today,
+            )
+            .distinct()
+            .scalar_subquery()
+        )
+        query = query.filter(Farm.farm_id.in_(active_farm_ids))
+
+    if municipality:
+        query = query.join(AdminBoundary, Farm.boundary_id == AdminBoundary.boundary_id).filter(
+            AdminBoundary.municipality == municipality
+        )
+
+    # ST_MakeEnvelope(..., 4326) builds the bbox as a real PostGIS geometry;
+    # ST_Intersects lets Postgres use location_geom's spatial (GiST) index
+    # instead of pulling every row into Python to test intersection there.
+    envelope = func.ST_MakeEnvelope(min_lon, min_lat, max_lon, max_lat, 4326)
+    query = query.filter(func.ST_Intersects(Farm.location_geom, envelope))
+
+    rows = query.all()
+    data = [
+        {"farm_id": farm_id, "location_geom": mapping(to_shape(geom))}
+        for farm_id, geom in rows
+    ]
+
+    return {"status": "success", "data": data}

@@ -4388,3 +4388,209 @@ scaffolding, not scope creep being trimmed.
   TypeScript/build errors from the removed imports/state before this is
   committed.
 
+---
+
+## [2026-08-17] - Farms On-Demand Pagination Redesign, Stage 1 (Backend)
+
+Branch `fabio/perf/farms-on-demand-pagination` (off `develop`). Fabio
+confirmed 100k-1M farm records is a real near-term scale target -- the
+current frontend design (`frontend/src/lib/useFarmsData.ts`) eagerly
+background-walks the *entire* dataset into the browser (React state +
+one giant IndexedDB blob) every session, which already needed one fix at
+~48,588 rows (see the 2026-08-13 table-virtualization entry) and would
+not survive 20x that scale: a full walk at 1M rows/1000-per-page, at the
+network latency observed against the remote box, would take over an
+hour. This stage lays the backend groundwork for the frontend switch to
+genuine on-demand (fetch-what's-visible) pagination -- table windowing,
+map viewport geometry, and server-computed dashboard aggregates -- landing
+in later stages of this branch. Design decisions confirmed with Fabio:
+table pagination stays farm_id-order only (multi-column server sort would
+need a new index + compound keyset cursor per column, two of which are
+behind joins -- not worth it speculatively); the client-side whole-dataset
+IndexedDB cache is being dropped entirely in favor of the already-working
+Redis page cache (a single-blob client cache is structurally incompatible
+with on-demand paging anyway).
+
+### 1. File: `backend/app/api/farms.py`
+* `list_farms()` (`GET /farms/`) gained a `municipality` query param --
+  pushes what was a client-side filter (over the fully-loaded array) into
+  the query via a plain (non-eager) join against `AdminBoundary`, filtered
+  on `AdminBoundary.municipality`. Many-to-one join, so `total`/pagination
+  stay correct without needing `DISTINCT`.
+* Added **`get_farms_geometry()`** (`GET /farms/geometry`): new,
+  deliberately lightweight endpoint returning only `farm_id`/
+  `location_geom` for farms whose geometry intersects a given
+  `bbox=minLon,minLat,maxLon,maxLat`, via a real `ST_Intersects`/
+  `ST_MakeEnvelope` PostGIS query (uses the existing
+  `idx_farms_location_geom` GiST index -- no new migration needed).
+  Replaces `GISLeafletMap.tsx`'s current approach of computing bbox
+  intersection client-side over every farm already sitting in the shared
+  `farms` array. Supports the same `active_only`/`municipality` filters
+  as `list_farms()`.
+
+### 2. File: `backend/app/api/assessments.py`
+* Added **`get_assessments_summary()`** (`GET /assessments/summary`):
+  real SQL-aggregate replacement for what `MonitoringModule.tsx`'s
+  "Affected Farms"/`EST. TOTAL INDEMNITY` stat tiles used to compute by
+  reducing over the entire client-side `farms` array (only viable because
+  the old design had loaded everything already). Uses a `DISTINCT ON`
+  CTE (same "most recent row per farm_id" pattern as
+  `app/core/farms_view.py`'s materialized view) to find each farm's most
+  recent `RiskAssessment` across all its insurance records/typhoons, then
+  aggregates `COUNT`/`SUM ... FILTER` over the ones with `wind_velocity`
+  set -- exact same "affected" semantics the old frontend reduction used,
+  just computed once in Postgres instead of per-request in the browser
+  over a fully-loaded array.
+
+### 3. File: `backend/app/core/farms_cache.py`
+* `_cache_key()`/`get_cached_farms_page()`/`cache_farms_page()` all gained
+  a `municipality` parameter, folded into the Redis cache key -- without
+  this, two different municipality filters would have collided on the
+  same cache entry and served each other's (wrong) results. Old-format
+  keys (pre-this-change) are simply orphaned, not migrated -- harmless,
+  they age out via the existing 300s TTL and are never read by the new
+  key format.
+
+### Status / Next Steps
+* **Not yet tested** -- needs a backend restart + a few manual
+  requests (`GET /api/farms/?municipality=...`, `GET
+  /api/farms/geometry?bbox=...`, `GET /api/assessments/summary`) to
+  confirm before any frontend work builds against these.
+* Frontend still on the old `useFarmsData.ts` eager-load design --
+  intentionally unchanged in this stage. Next stages: table (windowed
+  on-demand pagination), map (viewport geometry fetching), dashboard
+  stats (call the new summary endpoint), then remove the IndexedDB
+  whole-dataset cache once nothing depends on it.
+
+---
+
+## [2026-08-17] - Dark Mode Keyed Per User, Not Per Browser
+
+Fabio's request: the dark-mode toggle (uncommitted work already sitting in
+this branch's tree) persisted to one global `localStorage` key shared by
+*every* user of a given browser/device -- User B logging in after User A
+would silently inherit User A's light/dark preference. Fabio clarified he
+wanted this scoped per user, but deliberately **without** a DB/backend
+change (no new column, no server round-trip) -- purely a local-storage
+keying fix, same device only, nothing synced across devices for the same
+user.
+
+### 1. File: `frontend/src/lib/themeStorage.ts`
+* `loadPersistedDarkMode()`/`persistDarkMode()` both now take an `email`
+  parameter and read/write `agrisuregis_dark_mode_<email>` instead of one
+  flat `agrisuregis_dark_mode` key -- two different users sharing a
+  browser now each keep their own independent entry.
+
+### 2. File: `frontend/src/app/App.tsx`
+* `darkMode`'s lazy initializer now reads `loadPersistedUser()?.email`
+  first and keys the theme lookup off that (falls back to light mode when
+  there's no persisted user yet, e.g. a fresh login screen).
+* **`handleLogin()`** now also calls `setDarkMode(loadPersistedDarkMode(user.email))`
+  right after login -- otherwise a shared device would keep showing
+  whichever mode the *previous* user left it in until the newly-logged-in
+  user happened to toggle it themselves.
+* `onToggleDark` now persists via `persistDarkMode(currentUser.email, next)`
+  instead of the old no-argument call.
+
+### Status / Next Steps
+* Verified working locally by Fabio: toggles correctly, survives a
+  refresh, no TypeScript errors.
+
+---
+
+## [2026-08-17] - Local DB Reset + Scale-Test Seeding Tooling
+
+Fabio's local backend hit the same `column tbl_insurance_records.is_used
+does not exist` error diagnosed and fixed on the *remote* DB the day
+before (see [[project_migrations_not_auto_applied]]) -- his local DB had
+the same never-applied-migration gap. Fixed by a full local reset
+(`psql -f init_schema.sql`, which already has the fix baked in for fresh
+installs) + full reseed. Two new scripts added along the way:
+
+### 1. File: `backend/seed_100k_farms.py` (new)
+* Adds 100,000 synthetic farms (+ one synthetic farmer each) on top of
+  whatever's already in `tbl_farms`, for local scale-testing of the
+  on-demand-pagination redesign (branch
+  `fabio/perf/farms-on-demand-pagination`) without waiting on real PABS
+  data to reach that scale. Deliberately narrow: only
+  `tbl_farmers_profile`/`tbl_farms` rows, no insurance/assessment rows
+  (that's `seed_active_insurance.py`'s job), no `location_geom` (matches
+  the real dataset's own sparse-geometry pattern). Reuses existing
+  `tbl_admin_boundaries` rows rather than inventing fake municipalities.
+  Bulk-inserts via `psycopg2.extras.execute_values` in 5,000-row batches
+  (not row-by-row) for a reasonable runtime at this scale. Rows are
+  clearly prefixed (`SEED-FARMER-`/`SEED-FARM-`) so they're
+  identifiable/removable later without touching real or
+  previously-seeded data. Invalidates the Redis farms cache on completion
+  (no matview refresh needed -- this script never touches insurance data).
+
+### 2. File: `backend/seed_all.py` (new)
+* One-command orchestrator for the full local-DB reseed sequence already
+  documented in `.claude/BACKEND_DATABASE_WORKFLOW.md`'s "Resetting the
+  Local Database" section -- imports and calls each existing seed
+  script's entry point (`seed_database.run_setup()`,
+  `seed_system_users.run()`, `backfill_admin_boundary_geom.run_backfill()`,
+  `mock_data.seed_mock_typhoon.run_seed()`, `seed_active_insurance.run()`,
+  `seed_100k_farms.run()`) in the required order, in one process, instead
+  of running six files by hand one at a time. Does **not** run
+  `init_schema.sql` itself (that stays a separate, explicit `psql` step in
+  Fabio's own terminal, per the Database Command Execution rule) -- this
+  only covers everything *after* the schema reset. Stops immediately with
+  a clear message if any step fails, since every later step assumes the
+  ones before it succeeded.
+
+### Status / Next Steps
+* Fabio ran both the schema reset and `python seed_all.py` locally --
+  all 6 steps completed successfully.
+* Still needs: confirm the frontend actually fetches/renders data again
+  now that the schema error is gone (this was the original symptom that
+  surfaced the bug).
+
+---
+
+## [2026-08-18] - Explicit Notice on Involuntary Logout (Idle Timeout / Expired Session)
+
+Same branch (`fabio/perf/farms-on-demand-pagination`). Previously, both the
+idle-timeout logout and a 401 from `api.ts` (expired/missing token,
+deactivated account) dropped the user straight back to the login screen --
+the 401 path did it via a hard `window.location.reload()`. Neither told
+the user *why* they landed there, which reads as a bug rather than
+expected behavior. Credit to Cristian Aton for this fix.
+
+### 1. File: `frontend/src/lib/sessionEvents.ts` (new)
+* `SESSION_EXPIRED_EVENT` / `notifySessionExpired()`: a tiny
+  `window` custom-event bridge so `api.ts` (a plain module outside React)
+  can tell `App.tsx` a request came back 401 without forcing a reload.
+
+### 2. File: `frontend/src/lib/api.ts`
+* `request()`'s 401 handling still force-clears local storage
+  synchronously (unchanged -- that has to happen regardless of whether
+  React is still mounted to hear about it), but now calls
+  `notifySessionExpired()` instead of `window.location.reload()`.
+
+### 3. File: `frontend/src/app/components/LoggedOutNotice.tsx` (new)
+* **`LoggedOutNotice()`**: an `AlertDialog` shown in place of the login
+  screen for an involuntary logout, with copy keyed by a `LogoutReason`
+  (`"idle"` | `"expired"`). Deliberately uncontrolled (`open` always
+  `true`, no `onOpenChange`) so Escape/outside-click can't dismiss it --
+  the only way through is the explicit "Return to Login" click, so the
+  user actually registers why they landed back at login.
+
+### 4. File: `frontend/src/app/App.tsx`
+* New `logoutReason` state (`LogoutReason | null`). `null` means either
+  still logged in, or a *voluntary* Sign Out (Header's Sign Out button
+  calls `handleLogout()` directly and never touches this) -- both still
+  fall through to `LoginScreen` unchanged.
+* The idle-timeout effect's `setTimeout` callback now also calls
+  `setLogoutReason("idle")` after `handleLogout()`.
+* New effect listens for `SESSION_EXPIRED_EVENT`; on it, clears
+  `currentUser` and sets `setLogoutReason("expired")`.
+* Render now checks `logoutReason` ahead of the `!currentUser` check and
+  renders `LoggedOutNotice` (clearing back to `null` on acknowledgment)
+  instead of falling straight through to `LoginScreen`.
+
+### Status / Next Steps
+* Fabio confirmed testing complete on this branch (backend Stage 1,
+  dark-mode-per-user, and this logout-notice change) -- merging to
+  `develop` and pushing next.
+

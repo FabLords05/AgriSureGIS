@@ -1,4 +1,5 @@
 import { clearPersistedUser, loadPersistedToken } from './authStorage';
+import { notifySessionExpired } from './sessionEvents';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000';
 
@@ -156,10 +157,14 @@ export interface TyphoonSummary {
 // backend/app/core/security.py). A 401 means the token is missing, expired
 // past its fixed safety-net lifetime, or the account's since been
 // deactivated -- any of those means "not really logged in anymore," so this
-// force-clears local storage and reloads to the login screen rather than
-// leaving the app sitting in a half-authenticated state. Login/register
-// requests can 401 legitimately (wrong password) -- excluded so a failed
-// login attempt doesn't nuke storage that has nothing to clear anyway.
+// force-clears local storage and notifies App.tsx (see sessionEvents.ts)
+// rather than leaving the app sitting in a half-authenticated state. That
+// used to be a hard window.location.reload() straight to the login screen;
+// now App.tsx shows an explicit "you've been logged out" notice first (see
+// LoggedOutNotice.tsx) so the user knows why they landed back at login
+// instead of just finding themselves there. Login/register requests can 401
+// legitimately (wrong password) -- excluded so a failed login attempt
+// doesn't nuke storage that has nothing to clear anyway.
 const _NO_FORCE_LOGOUT_PATHS = ['/api/users/login', '/api/users/register'];
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -171,7 +176,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   if (!response.ok) {
     if (response.status === 401 && !_NO_FORCE_LOGOUT_PATHS.includes(path)) {
       clearPersistedUser();
-      window.location.reload();
+      notifySessionExpired();
     }
     const body = await response.json().catch(() => null);
     throw new Error(body?.detail ?? `Request failed with status ${response.status}`);

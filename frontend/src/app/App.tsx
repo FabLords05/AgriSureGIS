@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Toaster, toast } from "sonner";
 import { LoginScreen } from "./components/LoginScreen";
+import { LoggedOutNotice, LogoutReason } from "./components/LoggedOutNotice";
 import { Header, ModuleId } from "./components/Header";
 import { MonitoringModule } from "./components/MonitoringModule";
 import { SpatialAnalysisModule } from "./components/SpatialAnalysisModule";
@@ -14,6 +15,8 @@ import { AppNotification } from "./components/mockData";
 import { Bulletin, getBulletins, logoutUser, SystemUser } from "@/lib/api";
 import { useFarmsData } from "@/lib/useFarmsData";
 import { CurrentUser, loadPersistedUser, persistUser, persistToken, clearPersistedUser } from "@/lib/authStorage";
+import { loadPersistedDarkMode, persistDarkMode } from "@/lib/themeStorage";
+import { SESSION_EXPIRED_EVENT } from "@/lib/sessionEvents";
 
 const BULLETIN_POLL_MS = 60_000;
 
@@ -36,7 +39,24 @@ export default function App() {
   const [activeModule, setActiveModule]   = useState<ModuleId>(
     () => loadPersistedUser()?.role === "System Administrator" ? "calibration" : "monitoring"
   );
-  const [darkMode, setDarkMode]           = useState(false);
+  // Lazy initializer, same reasoning as currentUser above -- reads
+  // localStorage synchronously so a refresh never flashes light mode before
+  // rehydrating the user's last choice. Keyed by the persisted user's email
+  // (themeStorage.ts) so this is *that user's* preference, not whichever
+  // user last set it on this browser -- falls back to light mode when
+  // there's no persisted user yet (fresh login screen, nobody to key by).
+  const [darkMode, setDarkMode]           = useState(() => {
+    const user = loadPersistedUser();
+    return user ? loadPersistedDarkMode(user.email) : false;
+  });
+  // Set only for *involuntary* logout (idle timeout / expired session token)
+  // -- see the two effects below. null means either "still logged in" or
+  // "logged out on purpose" (the Header's Sign Out button calls handleLogout
+  // directly and never touches this), in which case render falls straight
+  // through to LoginScreen as before. Non-null renders LoggedOutNotice
+  // instead, and only clears back to null (reaching LoginScreen) once the
+  // user clicks through it.
+  const [logoutReason, setLogoutReason]   = useState<LogoutReason | null>(null);
   const [coverageRatePerHa, setCoverageRatePerHa] = useState(25000);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [selectedBulletin, setSelectedBulletin] = useState<Bulletin | null>(null);
@@ -53,6 +73,10 @@ export default function App() {
     persistUser(user);
     persistToken(token);
     setActiveModule(user.role === "System Administrator" ? "calibration" : "monitoring");
+    // Switch to *this* user's own dark-mode preference -- otherwise a
+    // shared device would keep showing whichever mode the previous user
+    // left it in until this user happens to toggle it themselves.
+    setDarkMode(loadPersistedDarkMode(user.email));
   };
 
   // Account Settings tab hands back the full updated row after a save --
@@ -89,7 +113,9 @@ export default function App() {
   // real user interaction only (see ACTIVITY_EVENTS above) -- entirely
   // client-side per Fabio's explicit direction; the session token itself
   // carries a long fixed safety-net expiry, not a sliding one tied to this
-  // (see backend/app/core/security.py's module docstring).
+  // (see backend/app/core/security.py's module docstring). Unlike a manual
+  // Sign Out, this also flags logoutReason so the user sees why they landed
+  // back at login (see LoggedOutNotice.tsx) instead of it just happening.
   useEffect(() => {
     if (!currentUser || currentUser.session_timeout_minutes <= 0) return;
 
@@ -98,7 +124,10 @@ export default function App() {
 
     const resetTimer = () => {
       clearTimeout(timer);
-      timer = setTimeout(handleLogout, timeoutMs);
+      timer = setTimeout(() => {
+        handleLogout();
+        setLogoutReason("idle");
+      }, timeoutMs);
     };
 
     ACTIVITY_EVENTS.forEach(evt => window.addEventListener(evt, resetTimer));
@@ -109,6 +138,21 @@ export default function App() {
       ACTIVITY_EVENTS.forEach(evt => window.removeEventListener(evt, resetTimer));
     };
   }, [currentUser?.email, currentUser?.session_timeout_minutes]);
+
+  // api.ts dispatches this the moment any request comes back 401 (token
+  // missing/expired/account deactivated) -- it already force-cleared
+  // localStorage itself (see its request() comment) since that has to
+  // happen synchronously regardless of whether React is still mounted to
+  // hear about it; this just clears the in-memory user and shows the same
+  // involuntary-logout notice as the idle-timeout path above.
+  useEffect(() => {
+    const onSessionExpired = () => {
+      setCurrentUser(null);
+      setLogoutReason("expired");
+    };
+    window.addEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onSessionExpired);
+  }, []);
 
   // Polls for bulletins the background PAGASA scheduler parsed on its own (no
   // manual "Parse Latest Bulletin" click involved) and surfaces them as an
@@ -152,6 +196,18 @@ export default function App() {
     return () => { cancelled = true; clearInterval(id); };
   }, [currentUser]);
 
+  // Checked ahead of the currentUser check below -- both involuntary-logout
+  // paths above already clear currentUser, so without this the app would
+  // fall straight through to LoginScreen and the user would never see why.
+  if (logoutReason) {
+    return (
+      <div className={darkMode ? "dark" : ""}>
+        <LoggedOutNotice reason={logoutReason} onAcknowledge={() => setLogoutReason(null)} />
+        <Toaster position="bottom-right" richColors />
+      </div>
+    );
+  }
+
   if (!currentUser) {
     return (
       <div className={darkMode ? "dark" : ""}>
@@ -168,7 +224,11 @@ export default function App() {
           activeModule={activeModule}
           onModuleChange={setActiveModule}
           darkMode={darkMode}
-          onToggleDark={() => setDarkMode(v => !v)}
+          onToggleDark={() => setDarkMode(v => {
+            const next = !v;
+            if (currentUser) persistDarkMode(currentUser.email, next);
+            return next;
+          })}
           notifications={notifications}
           onClearNotification={handleClearNotification}
           currentUser={currentUser}

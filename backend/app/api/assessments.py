@@ -4,6 +4,7 @@ import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -125,6 +126,61 @@ def list_assessments(
         )
 
     return {"status": "success", "data": data}
+
+
+@router.get("/summary")
+def get_assessments_summary(db: Session = Depends(get_db)):
+    """
+    Real SQL-aggregate replacement (2026-08-17, on-demand-pagination
+    redesign -- see .claude/FUNCTION_CHANGES.md) for what
+    MonitoringModule.tsx's "Affected Farms" stat tile used to compute by
+    reducing over the *entire* client-side `farms` array. That only worked
+    because useFarmsData.ts eagerly loaded every farm into the browser; the
+    redesign stops doing that, so this aggregate has to be computed once,
+    server-side, instead.
+
+    "Affected" mirrors the old frontend logic exactly: a farm's most recent
+    RiskAssessment (by assessment_date, across all its insurance
+    records/typhoons -- same DISTINCT ON semantics as
+    app/core/farms_view.py's "latest insurance per farm") has
+    wind_velocity set. total_area/total_indemnity are summed only over
+    that same affected set, same as the old totalArea/totalIndemnity
+    reductions.
+
+    Raw SQL (not the ORM) for the same reason farms_view.py uses it: this
+    is a DISTINCT ON + FILTER aggregate that's awkward to express
+    correctly through the ORM and cheap for Postgres to run directly.
+    """
+    row = db.execute(
+        text(
+            """
+            WITH latest_assessment_per_farm AS (
+                SELECT DISTINCT ON (ir.farm_id)
+                    ir.farm_id,
+                    ra.wind_velocity,
+                    ra.final_indemnity_payment
+                FROM tbl_risk_assessment ra
+                JOIN tbl_insurance_records ir ON ir.insurance_records_id = ra.insurance_records_id
+                ORDER BY ir.farm_id, ra.assessment_date DESC
+            )
+            SELECT
+                (SELECT COUNT(*) FROM tbl_farms) AS total_farms,
+                COUNT(*) FILTER (WHERE lap.wind_velocity IS NOT NULL) AS affected_farms,
+                COALESCE(SUM(f.area_size) FILTER (WHERE lap.wind_velocity IS NOT NULL), 0) AS total_area,
+                COALESCE(SUM(lap.final_indemnity_payment) FILTER (WHERE lap.wind_velocity IS NOT NULL), 0) AS total_indemnity
+            FROM latest_assessment_per_farm lap
+            JOIN tbl_farms f ON f.farm_id = lap.farm_id
+            """
+        )
+    ).first()
+
+    return {
+        "status": "success",
+        "total_farms": row.total_farms if row else 0,
+        "affected_farms": row.affected_farms if row else 0,
+        "total_area": float(row.total_area) if row and row.total_area is not None else 0.0,
+        "total_indemnity": float(row.total_indemnity) if row and row.total_indemnity is not None else 0.0,
+    }
 
 
 @router.get("/export")

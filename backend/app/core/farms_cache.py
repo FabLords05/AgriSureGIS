@@ -60,28 +60,39 @@ def _get_client():
     return _redis_client
 
 
-def _cache_key(*, limit: int | None, after_id: int, active_only: bool) -> str:
-    return f"agrisuregis:farms:{limit}:{after_id}:{active_only}"
+# municipality defaults to None (not "" ) so a request with no filter and a
+# request explicitly filtering to some future "" value can never collide.
+def _cache_key(*, limit: int | None, after_id: int, active_only: bool, municipality: str | None = None) -> str:
+    return f"agrisuregis:farms:{limit}:{after_id}:{active_only}:{municipality}"
 
 
-def get_cached_farms_page(*, limit: int | None, after_id: int, active_only: bool) -> dict[str, Any] | None:
+def get_cached_farms_page(
+    *, limit: int | None, after_id: int, active_only: bool, municipality: str | None = None
+) -> dict[str, Any] | None:
     client = _get_client()
     if client is None:
         return None
     try:
-        raw = client.get(_cache_key(limit=limit, after_id=after_id, active_only=active_only))
+        raw = client.get(_cache_key(limit=limit, after_id=after_id, active_only=active_only, municipality=municipality))
         return json.loads(raw) if raw else None
     except Exception:
         return None  # fail safe -- any Redis error is treated as a cache miss
 
 
-def cache_farms_page(*, limit: int | None, after_id: int, active_only: bool, result: dict[str, Any]) -> None:
+def cache_farms_page(
+    *,
+    limit: int | None,
+    after_id: int,
+    active_only: bool,
+    result: dict[str, Any],
+    municipality: str | None = None,
+) -> None:
     client = _get_client()
     if client is None:
         return
     try:
         client.setex(
-            _cache_key(limit=limit, after_id=after_id, active_only=active_only),
+            _cache_key(limit=limit, after_id=after_id, active_only=active_only, municipality=municipality),
             _TTL_SECONDS,
             json.dumps(result),
         )
