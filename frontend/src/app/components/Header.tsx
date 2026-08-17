@@ -1,6 +1,6 @@
 import { useState } from "react";
 import {
-  Home, Map, FileText, Settings, Bell, Moon, Sun, ChevronDown,
+  Home, Map, FileText, Settings, Bell, Moon, Sun, ChevronDown, ChevronUp,
   User, LogOut, Shield, RefreshCw, CheckCircle2, Users, Database, Activity, UserCog
 } from "lucide-react";
 import { AppNotification } from "./mockData";
@@ -47,6 +47,13 @@ const ACCOUNT_MODULE: { id: ModuleId; label: string; icon: React.ReactNode; shor
 export function Header({ activeModule, onModuleChange, darkMode, onToggleDark, notifications, onClearNotification, currentUser, onLogout }: HeaderProps) {
   const [showNotifs, setShowNotifs] = useState(false);
   const [showUser, setShowUser] = useState(false);
+  // Collapsible header (2026-08-18, per Fabio's request -- "like on Word,
+  // that it can be hide") -- same idea as Word's ribbon-collapse toggle:
+  // collapsed hides the whole header (logo, tabs, every control) down to a
+  // thin strip with just the button to bring it back. Deliberately
+  // component-local, non-persisted state -- a per-session convenience, not
+  // a saved preference like darkMode.
+  const [collapsed, setCollapsed] = useState(false);
   const isAdmin = currentUser?.role === "System Administrator";
   const modules = [...(isAdmin ? ADMIN_MODULES : SPECIALIST_MODULES), ACCOUNT_MODULE];
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -69,6 +76,19 @@ export function Header({ activeModule, onModuleChange, darkMode, onToggleDark, n
     info:     "bg-[#166534]",
     success:  "bg-emerald-500",
   };
+
+  if (collapsed) {
+    return (
+      <div
+        onClick={() => setCollapsed(false)}
+        className="h-5 flex items-center justify-center shrink-0 cursor-pointer select-none group z-50"
+        style={{ background: darkMode ? "#0f1e0f" : "#166534" }}
+        title="Show menu"
+      >
+        <ChevronDown size={13} className="text-white/50 group-hover:text-white transition-colors" />
+      </div>
+    );
+  }
 
   return (
     <header
@@ -224,6 +244,15 @@ export function Header({ activeModule, onModuleChange, darkMode, onToggleDark, n
             </div>
           )}
         </div>
+
+        {/* Collapse header -- see the `collapsed` state above */}
+        <button
+          onClick={() => setCollapsed(true)}
+          className="w-8 h-8 rounded flex items-center justify-center hover:bg-white/10 transition-colors"
+          title="Hide menu"
+        >
+          <ChevronUp size={14} className="text-white/70" />
+        </button>
       </div>
     </header>
   );

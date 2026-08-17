@@ -4921,4 +4921,25 @@ outright.
   (`flex-1`) now fills the whole top panel on its own. Dropped the
   now-unused `Map as MapIcon` import.
 
+---
+
+## [2026-08-18] - Collapsible Main Header
+
+Fabio: "make this panel like on word that it can be hide," pointing at the
+main nav header (logo/tabs/status/icons) -- same idea as Word's
+ribbon-collapse toggle. Confirmed interaction: a toggle button collapses
+the whole header down to a thin strip with just that button, click again
+to bring it back (not auto-hide-on-idle).
+
+### File: `frontend/src/app/components/Header.tsx`
+* New `collapsed` state (component-local, not persisted -- a per-session
+  convenience, not a saved preference like `darkMode`). `false` renders the
+  header exactly as before, plus a new `ChevronUp` "Hide menu" button
+  appended to the end of Right Controls. `true` short-circuits the whole
+  render to a `h-5` strip (same background color as the real header, so it
+  reads as "the header, collapsed" rather than a different element) holding
+  a centered `ChevronDown` "Show menu" button.
+* No `App.tsx` changes needed -- `<main>` is already `flex-1` inside a
+  `flex flex-col` shell, so it automatically expands to fill the space the
+  collapsed header frees up.
 
