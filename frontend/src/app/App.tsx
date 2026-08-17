@@ -16,6 +16,7 @@ import { Bulletin, getBulletins, logoutUser, SystemUser } from "@/lib/api";
 import { useFarmsData } from "@/lib/useFarmsData";
 import { CurrentUser, loadPersistedUser, persistUser, persistToken, clearPersistedUser } from "@/lib/authStorage";
 import { loadPersistedDarkMode, persistDarkMode } from "@/lib/themeStorage";
+import { loadPersistedHeaderHideMode, persistHeaderHideMode, HeaderHideMode } from "@/lib/headerHideModeStorage";
 import { SESSION_EXPIRED_EVENT } from "@/lib/sessionEvents";
 
 const BULLETIN_POLL_MS = 60_000;
@@ -49,6 +50,21 @@ export default function App() {
     const user = loadPersistedUser();
     return user ? loadPersistedDarkMode(user.email) : false;
   });
+  // Same lazy-init/per-user pattern as darkMode above, for the header's
+  // hide-mode preference (2026-08-18, set from Account Settings' "Display
+  // Preferences" card -- see AccountSettingsModule.tsx and Header.tsx).
+  const [headerHideMode, setHeaderHideModeState] = useState<HeaderHideMode>(() => {
+    const user = loadPersistedUser();
+    return user ? loadPersistedHeaderHideMode(user.email) : "manual";
+  });
+  // Persists alongside updating state, same shape as onToggleDark below --
+  // passed to AccountSettingsModule so picking a new mode there applies
+  // immediately (no Save button; this is client-only, not part of
+  // SystemUser/updateMe()) and survives a refresh for this user.
+  const handleHeaderHideModeChange = (mode: HeaderHideMode) => {
+    setHeaderHideModeState(mode);
+    if (currentUser) persistHeaderHideMode(currentUser.email, mode);
+  };
   // Set only for *involuntary* logout (idle timeout / expired session token)
   // -- see the two effects below. null means either "still logged in" or
   // "logged out on purpose" (the Header's Sign Out button calls handleLogout
@@ -104,10 +120,11 @@ export default function App() {
     persistUser(user);
     persistToken(token);
     setActiveModule(user.role === "System Administrator" ? "calibration" : "monitoring");
-    // Switch to *this* user's own dark-mode preference -- otherwise a
-    // shared device would keep showing whichever mode the previous user
-    // left it in until this user happens to toggle it themselves.
+    // Switch to *this* user's own dark-mode/header-hide-mode preferences --
+    // otherwise a shared device would keep showing whichever settings the
+    // previous user left it in until this user happens to change them.
     setDarkMode(loadPersistedDarkMode(user.email));
+    setHeaderHideModeState(loadPersistedHeaderHideMode(user.email));
   };
 
   // Account Settings tab hands back the full updated row after a save --
@@ -264,6 +281,7 @@ export default function App() {
           onClearNotification={handleClearNotification}
           currentUser={currentUser}
           onLogout={handleLogout}
+          hideMode={headerHideMode}
         />
 
         {/* isAdmin gates rendering itself, not just Header's nav -- defense in
@@ -276,7 +294,12 @@ export default function App() {
             unlike every other tab, it's available to both roles alike. */}
         <main className="flex-1 overflow-hidden">
           {activeModule === "account" ? (
-            <AccountSettingsModule currentUser={currentUser} onUpdated={handleAccountUpdate} />
+            <AccountSettingsModule
+              currentUser={currentUser}
+              onUpdated={handleAccountUpdate}
+              headerHideMode={headerHideMode}
+              onHeaderHideModeChange={handleHeaderHideModeChange}
+            />
           ) : currentUser.role === "System Administrator" ? (
             activeModule === "users" ? (
               <UserManagementModule />

@@ -4943,3 +4943,63 @@ to bring it back (not auto-hide-on-idle).
   `flex flex-col` shell, so it automatically expands to fill the space the
   collapsed header frees up.
 
+---
+
+## [2026-08-18] - Header Hide Mode: Manual or Auto, Set from Account Settings
+
+Fabio: "give user option for auto hide or manual hide in the settings" --
+turns the prior entry's manual-only collapse into a per-user choice between
+the existing manual toggle and a new auto-hide-on-idle/reveal-on-hover mode,
+set from Account Settings. Client-only preference (like `darkMode`), not
+part of `SystemUser`/`updateMe()` -- there's no backend preferences field
+to put it in, and it doesn't need to sync across devices.
+
+### 1. File: `frontend/src/lib/headerHideModeStorage.ts` (new)
+* `HeaderHideMode = "manual" | "auto"` + `loadPersistedHeaderHideMode(email)`/
+  `persistHeaderHideMode(email, mode)` -- exact same per-user
+  localStorage-keyed-by-email pattern as `themeStorage.ts`'s dark-mode
+  persistence, mirrored file-for-file (private `keyFor()`, try/catch
+  fail-safes, default `"manual"` on any read failure).
+
+### 2. File: `frontend/src/app/components/Header.tsx`
+* New required `hideMode: HeaderHideMode` prop.
+* The old single `collapsed` boolean is now two independent pieces of
+  state, one per mode, so switching `hideMode` never has to reconcile one
+  against the other: `collapsed` (manual, click-driven, unchanged from the
+  prior entry) and `autoVisible` (auto, driven by a `setTimeout` +
+  `AUTO_HIDE_DELAY_MS = 900`). `isHidden = hideMode === "manual" ? collapsed : !autoVisible`
+  is the single value the render branches on.
+* Auto mode: `<header>` gets `onMouseEnter`/`onMouseLeave` (cancel/schedule
+  the hide timer); the collapsed strip gets `onMouseEnter` too (reveal on
+  hover, no click needed) instead of manual's `onClick`. A `useEffect`
+  keyed on `hideMode` re-arms auto-hide on mount/mode-switch (shows the
+  header, then schedules the same hide-after-a-pause used on mouseLeave) --
+  covers landing directly in "auto" mode or switching into it while the
+  cursor isn't already over the header to trigger a real `mouseLeave`.
+* The manual `ChevronUp` "Hide menu" button now only renders when
+  `hideMode === "manual"` -- "auto" hides itself, no button needed.
+
+### 3. File: `frontend/src/app/App.tsx`
+* New `headerHideMode` state, lazy-initialized from
+  `loadPersistedHeaderHideMode()` exactly like `darkMode`, re-read in
+  `handleLogin()` alongside it. New `handleHeaderHideModeChange(mode)`
+  updates state and persists in one call -- passed to
+  `AccountSettingsModule` as `onHeaderHideModeChange`. `headerHideMode`
+  itself passed to `<Header>` as `hideMode`.
+
+### 4. File: `frontend/src/app/components/AccountSettingsModule.tsx`
+* New props `headerHideMode`/`onHeaderHideModeChange` (controlled from
+  App.tsx, not local state -- this screen's other fields all round-trip
+  through `updateMe()`/`SystemUser`, this one doesn't).
+* New "Display Preferences" card (its own card, deliberately separate from
+  "Profile & Preferences" -- no Save button, since the change applies
+  immediately via `onHeaderHideModeChange` on `<select>` change, unlike the
+  Profile card's dirty-check-then-Save flow) with a "Header Visibility"
+  `<select>` (same visual pattern as the existing Session Timeout field):
+  "Manual -- click a button to hide/show" / "Auto-hide -- hides itself,
+  hover to reveal".
+
+### Status / Next Steps
+* Implementation complete on this branch; not yet verified by Fabio in the
+  running app.
+

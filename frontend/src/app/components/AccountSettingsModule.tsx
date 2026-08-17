@@ -2,6 +2,7 @@ import { useState } from "react";
 import { UserCog, Save, KeyRound } from "lucide-react";
 import { updateMe, SystemUser } from "@/lib/api";
 import { CurrentUser } from "@/lib/authStorage";
+import { HeaderHideMode } from "@/lib/headerHideModeStorage";
 
 // New self-service tab (2026-08-16) -- every role gets this (see Header.tsx's
 // ACCOUNT_MODULE), unlike UserManagementModule.tsx which is the admin-only
@@ -12,11 +13,17 @@ import { CurrentUser } from "@/lib/authStorage";
 interface AccountSettingsModuleProps {
   currentUser: CurrentUser;
   onUpdated: (user: SystemUser) => void;
+  // Header hide-mode preference (2026-08-18) -- unlike everything else on
+  // this screen, this is client-only (localStorage, see
+  // headerHideModeStorage.ts), not part of SystemUser/updateMe(), so it's
+  // a controlled pair from App.tsx rather than local state + a Save button.
+  headerHideMode: HeaderHideMode;
+  onHeaderHideModeChange: (mode: HeaderHideMode) => void;
 }
 
 const SESSION_TIMEOUT_OPTIONS = [0, 5, 10, 15, 30] as const;
 
-export function AccountSettingsModule({ currentUser, onUpdated }: AccountSettingsModuleProps) {
+export function AccountSettingsModule({ currentUser, onUpdated, headerHideMode, onHeaderHideModeChange }: AccountSettingsModuleProps) {
   const [name, setName] = useState(currentUser.name);
   const [email, setEmail] = useState(currentUser.email);
   const [sessionTimeout, setSessionTimeout] = useState(currentUser.session_timeout_minutes);
@@ -135,6 +142,30 @@ export function AccountSettingsModule({ currentUser, onUpdated }: AccountSetting
             >
               <Save size={11} /> {isSavingProfile ? "Saving…" : "Save Changes"}
             </button>
+          </div>
+        </div>
+
+        {/* Display Preferences (2026-08-18) -- client-only settings that
+            apply immediately, no Save button: unlike Profile & Preferences
+            above, none of this round-trips through updateMe()/SystemUser,
+            so a Save/dirty-check flow would be misleading here. */}
+        <div className="bg-card border border-border rounded-xl p-4">
+          <p className="text-xs font-bold mb-3">Display Preferences</p>
+          <div className="p-3 rounded-xl bg-muted/40 border border-border space-y-3">
+            <div>
+              <label className="text-[11px] font-semibold block mb-1">Header Visibility</label>
+              <select
+                value={headerHideMode}
+                onChange={e => onHeaderHideModeChange(e.target.value as HeaderHideMode)}
+                className="w-full border border-border rounded-lg px-3 py-2 text-[11px] bg-background focus:outline-none focus:border-[#166534]"
+              >
+                <option value="manual">Manual -- click a button to hide/show</option>
+                <option value="auto">Auto-hide -- hides itself, hover to reveal</option>
+              </select>
+              <p className="mt-1 text-[9px] text-muted-foreground">
+                Applies immediately. This device/browser only -- not saved to your account.
+              </p>
+            </div>
           </div>
         </div>
 
