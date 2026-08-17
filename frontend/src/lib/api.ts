@@ -297,9 +297,11 @@ export interface GetFarmsResult {
 
 // Omitting params returns the full, unpaginated farm list. Pass
 // `limit`/`after_id` to page through the list, `active_only` to restrict to
-// farms with a currently-active InsuranceRecord, and `municipality` to
-// restrict to one AdminBoundary.municipality -- see useFarmsData.ts and
-// SpatialAnalysisModule.tsx.
+// farms with a currently-active InsuranceRecord, `municipality` to restrict
+// to one AdminBoundary.municipality, and `farmer_id` to restrict to one
+// farmer's own farms (resolved via searchFarmers() below) -- see
+// useFarmsData.ts and SpatialAnalysisModule.tsx. `municipality`/`farmer_id`
+// combine (both, either, or neither), same as backend/app/api/farms.py.
 //
 // `after_id` is a keyset (cursor) position, not an OFFSET: pass the highest
 // `farm_id` already seen (0 to start from the beginning). Unlike OFFSET,
@@ -311,22 +313,27 @@ export function getFarms(params?: {
   after_id?: number;
   active_only?: boolean;
   municipality?: string;
+  farmer_id?: number;
 }): Promise<GetFarmsResult> {
   const query = new URLSearchParams();
   if (params?.limit != null) query.set('limit', String(params.limit));
   if (params?.after_id != null) query.set('after_id', String(params.after_id));
   if (params?.active_only != null) query.set('active_only', String(params.active_only));
   if (params?.municipality) query.set('municipality', params.municipality);
+  if (params?.farmer_id != null) query.set('farmer_id', String(params.farmer_id));
   const qs = query.toString();
   return request<GetFarmsResult>(`/api/farms/${qs ? `?${qs}` : ''}`);
 }
 
 // Viewport-scoped polygon fetch backing GISLeafletMap.tsx -- pass `bbox`
 // ("minLon,minLat,maxLon,maxLat") for the normal moveend/zoomend case, or
-// `farm_id` (which ignores bbox/active_only/municipality server-side) to
-// resolve one specific farm's geometry regardless of the map's current
-// viewport/filters -- e.g. FlyToSelectedFarm's out-of-view case. See
-// backend/app/api/farms.py's get_farms_geometry docstring.
+// `farm_id` (which ignores bbox/active_only/municipality/farmer_id
+// server-side) to resolve one specific farm's geometry regardless of the
+// map's current viewport/filters -- e.g. FlyToSelectedFarm's out-of-view
+// case. `farmer_id` without `bbox` similarly bypasses the viewport and
+// returns every one of that farmer's farms, for flying to a searched
+// farmer's farm(s) -- see backend/app/api/farms.py's get_farms_geometry
+// docstring.
 export interface FarmGeometry {
   farm_id: number;
   location_geom: GeoJsonMultiPolygon;
@@ -340,12 +347,14 @@ export interface GetFarmsGeometryResult {
 export function getFarmsGeometry(params: {
   bbox?: string;
   farm_id?: number;
+  farmer_id?: number;
   active_only?: boolean;
   municipality?: string;
 }): Promise<GetFarmsGeometryResult> {
   const query = new URLSearchParams();
   if (params.bbox) query.set('bbox', params.bbox);
   if (params.farm_id != null) query.set('farm_id', String(params.farm_id));
+  if (params.farmer_id != null) query.set('farmer_id', String(params.farmer_id));
   if (params.active_only != null) query.set('active_only', String(params.active_only));
   if (params.municipality) query.set('municipality', params.municipality);
   return request<GetFarmsGeometryResult>(`/api/farms/geometry?${query.toString()}`);
@@ -357,6 +366,20 @@ export function getFarmsGeometry(params: {
 // See backend/app/api/farms.py's list_farm_municipalities docstring.
 export function getMunicipalities(): Promise<{ status: string; data: string[] }> {
   return request<{ status: string; data: string[] }>('/api/farms/municipalities');
+}
+
+// Debounced farmer-name search backing the Farm Records search box's
+// farmer field -- unlike municipalities, farmers can't be preloaded whole
+// (tbl_farmers_profile scales with farm count), so the caller re-queries
+// this per keystroke (with its own debounce) instead. See
+// backend/app/api/farms.py's search_farmers docstring.
+export interface FarmerSearchResult {
+  farmer_id: number;
+  name: string;
+}
+
+export function searchFarmers(q: string): Promise<{ status: string; data: FarmerSearchResult[] }> {
+  return request<{ status: string; data: FarmerSearchResult[] }>(`/api/farms/farmers?q=${encodeURIComponent(q)}`);
 }
 
 export interface InsuranceSummary {

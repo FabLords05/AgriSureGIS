@@ -20,19 +20,22 @@ const PAGE_SIZE = 1000;
 // what it asked for.
 //
 // This hook is now purely on-demand and filter-scoped: it fetches for any
-// (activeOnly, municipality) combination *except* one -- `activeOnly:
-// false, municipality: null` ("every farm, active or not, no municipality
-// scope") is the one combination that's genuinely unbounded at 100k-1M
-// scale, so it's a no-op instead (`farms` stays whatever it already was,
-// no new request). The default `activeOnly: true, municipality: null`
-// (App.tsx's initial state) fetches normally -- it's bounded by however
-// many farms actually have active insurance, same as the original
-// pre-redesign default view. Once scoped (either by activeOnly or a real
-// municipality), only page 1 fetches eagerly; every later page requires an
-// explicit requestMore() call (SpatialAnalysisModule's existing scroll
-// IntersectionObserver). No background pacing loop, no IndexedDB -- a
-// filter-scoped page set is small enough that a plain re-fetch on
-// remount/filter-change is cheap.
+// (activeOnly, municipality, farmerId) combination *except* one --
+// `activeOnly: false, municipality: null, farmerId: null` ("every farm,
+// active or not, no municipality or farmer scope") is the one combination
+// that's genuinely unbounded at 100k-1M scale, so it's a no-op instead
+// (`farms` stays whatever it already was, no new request). The default
+// `activeOnly: true, municipality: null, farmerId: null` (App.tsx's
+// initial state) fetches normally -- it's bounded by however many farms
+// actually have active insurance, same as the original pre-redesign
+// default view. A real `farmerId` (2026-08-18, farmer search) scopes
+// exactly like a real `municipality` does -- a specific farmer's own farms
+// are always a small, bounded set, so either one alone is enough to allow
+// activeOnly: false. Once scoped, only page 1 fetches eagerly; every later
+// page requires an explicit requestMore() call (SpatialAnalysisModule's
+// existing scroll IntersectionObserver). No background pacing loop, no
+// IndexedDB -- a filter-scoped page set is small enough that a plain
+// re-fetch on remount/filter-change is cheap.
 //
 // One-time cleanup of any pre-existing state from the old model.
 try {
@@ -60,10 +63,14 @@ export interface UseFarmsDataParams {
   activeOnly: boolean;
   // null = no municipality searched/picked yet. See App.tsx's
   // `filterMuni === "All" ? null : filterMuni`. Combined with activeOnly:
-  // false, this is the one combination the hook refuses to fetch for (see
-  // the module docstring) -- App.tsx guards against staying in it (forces
-  // activeOnly back to true whenever municipality reverts to null).
+  // false AND farmerId: null, this is the one combination the hook refuses
+  // to fetch for (see the module docstring) -- App.tsx guards against
+  // staying in it (forces activeOnly back to true whenever both
+  // municipality and farmerId revert to null).
   municipality: string | null;
+  // null = no farmer searched/picked yet. Scopes exactly like municipality
+  // -- either one alone is enough to allow activeOnly: false.
+  farmerId: number | null;
 }
 
 export interface FarmsData {
@@ -91,7 +98,7 @@ export interface FarmsData {
   requestMore: () => void;
 }
 
-export function useFarmsData({ enabled, activeOnly, municipality }: UseFarmsDataParams): FarmsData {
+export function useFarmsData({ enabled, activeOnly, municipality, farmerId }: UseFarmsDataParams): FarmsData {
   const [farms, setFarms] = useState<Farm[]>([]);
   const [isLoadingFirstPage, setIsLoadingFirstPage] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -124,6 +131,7 @@ export function useFarmsData({ enabled, activeOnly, municipality }: UseFarmsData
         after_id: afterIdRef.current,
         active_only: activeOnly,
         municipality: municipality ?? undefined,
+        farmer_id: farmerId ?? undefined,
       });
       if (myGeneration !== generationRef.current) return; // superseded by a restart -- discard
 
@@ -165,12 +173,13 @@ export function useFarmsData({ enabled, activeOnly, municipality }: UseFarmsData
   // own display filter (SpatialAnalysisModule's filteredFarms) excludes them.
   const start = () => {
     // No-op for the one combination that's genuinely unbounded at 100k-1M
-    // scale: "every farm, active or not, no municipality scope" (see the
-    // module docstring). Any other combination -- including the default
-    // activeOnly=true/municipality=null -- is fine to fetch. Covers a
-    // CSV/GPX upload's refresh() firing while this combination is briefly
-    // in effect (App.tsx's guard normally corrects it before this matters).
-    if (!activeOnly && municipality == null) return;
+    // scale: "every farm, active or not, no municipality or farmer scope"
+    // (see the module docstring). Any other combination -- including the
+    // default activeOnly=true/municipality=null/farmerId=null -- is fine
+    // to fetch. Covers a CSV/GPX upload's refresh() firing while this
+    // combination is briefly in effect (App.tsx's guard normally corrects
+    // it before this matters).
+    if (!activeOnly && municipality == null && farmerId == null) return;
     generationRef.current += 1;
     const myGeneration = generationRef.current;
     fetchInFlightRef.current = false;
@@ -182,7 +191,7 @@ export function useFarmsData({ enabled, activeOnly, municipality }: UseFarmsData
   };
 
   useEffect(() => {
-    if (!enabled || (!activeOnly && municipality == null)) {
+    if (!enabled || (!activeOnly && municipality == null && farmerId == null)) {
       // Hook disabled, or the one unbounded combination (see start() above)
       // -- nothing to fetch. Bump generation so any in-flight fetch from a
       // just-changed filter discards its result instead of landing after this.
@@ -202,7 +211,7 @@ export function useFarmsData({ enabled, activeOnly, municipality }: UseFarmsData
     }
     start();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, activeOnly, municipality]);
+  }, [enabled, activeOnly, municipality, farmerId]);
 
   return {
     farms,

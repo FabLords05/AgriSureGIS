@@ -10,7 +10,7 @@ from app.core.database import get_db
 from app.core.farms_cache import cache_farms_page, get_cached_farms_page
 from app.core.farms_view import fetch_latest_insurance_from_view, materialized_view_available
 from app.core.security import get_current_user
-from app.models.models import AdminBoundary, Farm, InsuranceRecord
+from app.models.models import AdminBoundary, Farm, FarmerProfile, InsuranceRecord
 
 router = APIRouter(prefix="/farms", tags=["farms"], dependencies=[Depends(get_current_user)])
 
@@ -22,6 +22,7 @@ def list_farms(
     after_id: int = Query(0, ge=0),
     active_only: bool = Query(False),
     municipality: str | None = Query(None),
+    farmer_id: int | None = Query(None),
 ):
     """
     Lists farms with farmer/boundary identity, insurance coverage dates (from
@@ -70,6 +71,13 @@ def list_farms(
     a client-side filter over the fully-loaded array into the query, since
     the redesign no longer loads the full array client-side to filter over.
 
+    `farmer_id` (2026-08-18, farmer search) restricts results to one
+    farmer's own farms -- an exact FK filter (`Farm.farmer_id == farmer_id`),
+    always cheap regardless of table size. Combines with `active_only`/
+    `municipality` (both, either, or neither) rather than replacing them --
+    see GET /farms/farmers below for how a caller resolves a typed name to
+    this id in the first place.
+
     Pagination is keyset (cursor), not OFFSET/LIMIT: `after_id` is the
     highest `farm_id` already seen by the caller (0 to start from the
     beginning), and each page filters `Farm.farm_id > after_id` instead of
@@ -101,7 +109,7 @@ def list_farms(
     on every request the way a live feed would.
     """
     cached = get_cached_farms_page(
-        limit=limit, after_id=after_id, active_only=active_only, municipality=municipality
+        limit=limit, after_id=after_id, active_only=active_only, municipality=municipality, farmer_id=farmer_id
     )
     if cached is not None:
         return cached
@@ -132,6 +140,9 @@ def list_farms(
         base_query = base_query.join(AdminBoundary, Farm.boundary_id == AdminBoundary.boundary_id).filter(
             AdminBoundary.municipality == municipality
         )
+
+    if farmer_id is not None:
+        base_query = base_query.filter(Farm.farmer_id == farmer_id)
 
     total: int | None = None
     if limit is not None and after_id == 0:
@@ -229,7 +240,7 @@ def list_farms(
         }
 
     cache_farms_page(
-        limit=limit, after_id=after_id, active_only=active_only, municipality=municipality, result=result
+        limit=limit, after_id=after_id, active_only=active_only, municipality=municipality, farmer_id=farmer_id, result=result
     )
     return result
 
@@ -242,7 +253,11 @@ def get_farms_geometry(
     ),
     farm_id: int | None = Query(
         None,
-        description="When set, ignores bbox/active_only/municipality entirely and returns just this one farm's geometry, if it has one.",
+        description="When set, ignores bbox/active_only/municipality/farmer_id entirely and returns just this one farm's geometry, if it has one.",
+    ),
+    farmer_id: int | None = Query(
+        None,
+        description="Combines with active_only/municipality in the normal bbox-scoped query. If bbox is omitted (and farm_id isn't set), returns every one of this farmer's farms with geometry, ignoring active_only/municipality/bbox -- used to fly the map to a searched farmer's farm(s) regardless of viewport.",
     ),
     active_only: bool = Query(False),
     municipality: str | None = Query(None),
@@ -276,6 +291,15 @@ def get_farms_geometry(
     geometry wouldn't be in the bbox result set yet -- this lets the map
     resolve that one farm's geometry directly, reusing this endpoint/route
     instead of adding a second one.
+
+    `farmer_id` (2026-08-18, farmer search) has two roles depending on
+    whether `bbox` is also given: combined with a real `bbox` request it's
+    just another AND'd filter on the normal viewport query (same as
+    `active_only`/`municipality`); given alone (no `bbox`, no `farm_id`) it
+    behaves like `farm_id`'s bypass -- every farm belonging to that farmer,
+    regardless of viewport/active_only/municipality -- so
+    GISLeafletMap.tsx's fly-to-farmer can compute real bounds over ALL of a
+    searched farmer's farms even if none are currently on screen.
     """
     if farm_id is not None:
         row = (
@@ -286,8 +310,17 @@ def get_farms_geometry(
         data = [{"farm_id": row.farm_id, "location_geom": mapping(to_shape(row.location_geom))}] if row else []
         return {"status": "success", "data": data}
 
+    if bbox is None and farmer_id is not None:
+        rows = (
+            db.query(Farm.farm_id, Farm.location_geom)
+            .filter(Farm.farmer_id == farmer_id, Farm.location_geom.isnot(None))
+            .all()
+        )
+        data = [{"farm_id": fid, "location_geom": mapping(to_shape(geom))} for fid, geom in rows]
+        return {"status": "success", "data": data}
+
     if bbox is None:
-        raise HTTPException(status_code=400, detail="bbox is required unless farm_id is provided")
+        raise HTTPException(status_code=400, detail="bbox is required unless farm_id or farmer_id is provided")
 
     try:
         min_lon, min_lat, max_lon, max_lat = (float(part) for part in bbox.split(","))
@@ -313,6 +346,9 @@ def get_farms_geometry(
         query = query.join(AdminBoundary, Farm.boundary_id == AdminBoundary.boundary_id).filter(
             AdminBoundary.municipality == municipality
         )
+
+    if farmer_id is not None:
+        query = query.filter(Farm.farmer_id == farmer_id)
 
     # ST_MakeEnvelope(..., 4326) builds the bbox as a real PostGIS geometry;
     # ST_Intersects lets Postgres use location_geom's spatial (GiST) index
@@ -353,3 +389,39 @@ def list_farm_municipalities(db: Session = Depends(get_db)):
         .all()
     )
     return {"status": "success", "data": [row.municipality for row in rows]}
+
+
+@router.get("/farmers")
+def search_farmers(
+    q: str = Query(..., min_length=1, description="Partial, case-insensitive match against the farmer's full name."),
+    db: Session = Depends(get_db),
+):
+    """
+    Farmer name search backing the Farm Records search box's farmer field
+    (2026-08-18). Debounced, server-side, and capped at 20 results --
+    unlike tbl_admin_boundaries (list_farm_municipalities above),
+    tbl_farmers_profile scales with the farm count (seed_100k_farms.py
+    adds one new synthetic farmer per new farm), so it can't be preloaded
+    whole for a client-side type-ahead the same way municipalities are.
+
+    Matches against `first_name || ' ' || last_name` as one concatenated
+    string (a single ILIKE '%q%') rather than checking first_name/last_name
+    separately -- this one expression already covers a query that's just a
+    first name, just a last name, or both together, without an OR of
+    multiple conditions.
+    """
+    pattern = f"%{q.strip()}%"
+    rows = (
+        db.query(FarmerProfile.farmer_id, FarmerProfile.first_name, FarmerProfile.last_name)
+        .filter(func.concat(FarmerProfile.first_name, " ", FarmerProfile.last_name).ilike(pattern))
+        .order_by(FarmerProfile.last_name.asc(), FarmerProfile.first_name.asc())
+        .limit(20)
+        .all()
+    )
+    return {
+        "status": "success",
+        "data": [
+            {"farmer_id": r.farmer_id, "name": f"{r.first_name} {r.last_name}".strip()}
+            for r in rows
+        ],
+    }

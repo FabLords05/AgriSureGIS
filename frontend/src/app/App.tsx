@@ -68,26 +68,35 @@ export default function App() {
   // activeModule === "spatial"), so keeping the hook + its filter state at
   // this level means switching tabs away and back doesn't drop progress or
   // re-fetch from scratch. Default (`filterMuni === "All"`, i.e.
-  // municipality: null) fetches active-insurance farms across every
-  // municipality, same default view as before the on-demand-pagination
-  // redesign (2026-08-18, stage 2 -- .claude/FUNCTION_CHANGES.md) -- small
-  // and safe, bounded by however many farms actually have active insurance.
-  // Only "every farm, active or not, no municipality scope" is unbounded at
-  // 100k-1M scale (see useFarmsData.ts's module docstring), so that's the
-  // one combination the hook refuses to fetch for.
+  // municipality: null, and no farmer picked) fetches active-insurance
+  // farms across every municipality, same default view as before the
+  // on-demand-pagination redesign (2026-08-18, stage 2 --
+  // .claude/FUNCTION_CHANGES.md) -- small and safe, bounded by however many
+  // farms actually have active insurance. Only "every farm, active or not,
+  // no municipality or farmer scope" is unbounded at 100k-1M scale (see
+  // useFarmsData.ts's module docstring), so that's the one combination the
+  // hook refuses to fetch for. `filterFarmerId` (2026-08-18, farmer
+  // search) scopes exactly like `filterMuni` -- either one alone is enough
+  // to allow Active Insurance Only to be turned off. The search box's own
+  // typed text/suggestions stay local to SpatialAnalysisModule (same
+  // pattern as muniQuery) -- only the committed farmer_id lives here.
   const [activeInsuranceOnly, setActiveInsuranceOnly] = useState(true);
   const [filterMuni, setFilterMuni] = useState("All");
-  // Guards against landing in that unbounded combination: if the user had
-  // turned Active Insurance Only off while a municipality was selected,
-  // then clears the search back to "All", this forces it back on rather
-  // than leaving the table/map stuck showing nothing.
+  const [filterFarmerId, setFilterFarmerId] = useState<number | null>(null);
+  // Guards against landing in the unbounded combination: if the user had
+  // turned Active Insurance Only off while a municipality or farmer was
+  // selected, then clears both back to "nothing selected", this forces it
+  // back on rather than leaving the table/map stuck showing nothing.
   useEffect(() => {
-    if (filterMuni === "All" && !activeInsuranceOnly) setActiveInsuranceOnly(true);
-  }, [filterMuni, activeInsuranceOnly]);
+    if (filterMuni === "All" && filterFarmerId == null && !activeInsuranceOnly) {
+      setActiveInsuranceOnly(true);
+    }
+  }, [filterMuni, filterFarmerId, activeInsuranceOnly]);
   const farmsData = useFarmsData({
     enabled: !!currentUser,
     activeOnly: activeInsuranceOnly,
     municipality: filterMuni === "All" ? null : filterMuni,
+    farmerId: filterFarmerId,
   });
 
   const handleLogin = (user: CurrentUser, token: string) => {
@@ -299,6 +308,8 @@ export default function App() {
                   onActiveInsuranceOnlyChange={setActiveInsuranceOnly}
                   filterMuni={filterMuni}
                   onFilterMuniChange={setFilterMuni}
+                  filterFarmerId={filterFarmerId}
+                  onFilterFarmerIdChange={setFilterFarmerId}
                 />
               )}
               {activeModule === "assessment"  && (

@@ -17,6 +17,10 @@ interface GISLeafletMapProps {
   selectedBulletin: Bulletin | null;
   darkMode: boolean;
   focusMunicipality?: string | null;
+  // Farmer search (2026-08-18) -- scopes/flies exactly like
+  // focusMunicipality, and combines with it (both, either, or neither).
+  // null = no farmer picked.
+  focusFarmerId?: number | null;
   // Passed through to GET /farms/geometry alongside focusMunicipality --
   // matches whatever active-insurance scope SpatialAnalysisModule's Farm
   // Records table is currently using, so the map's polygon layer is scoped
@@ -95,13 +99,17 @@ function labelBoundary(feature: Feature, layer: Layer) {
 // waiting for a pan/zoom to bring it into the bbox fetch, and reports the
 // result back via onGeometryFetched so it also becomes render-eligible
 // immediately rather than only after this flight lands.
+// `onGeometryFetched` takes a batch (not just one entry) -- shared with
+// FlyToFarmer below, which can resolve several farms' geometry at once.
+type GeomEntry = { farmId: number; geom: GeoJsonMultiPolygon };
+
 function FlyToSelectedFarm({
   farm, approxPos, geomCache, onGeometryFetched,
 }: {
   farm: FarmRow | null;
   approxPos: [number, number] | null;
   geomCache: Map<number, GeoJsonMultiPolygon>;
-  onGeometryFetched: (farmId: number, geom: GeoJsonMultiPolygon) => void;
+  onGeometryFetched: (entries: GeomEntry[]) => void;
 }) {
   const map = useMap();
   useEffect(() => {
@@ -117,7 +125,7 @@ function FlyToSelectedFarm({
         .then(res => {
           const entry = res.data[0];
           if (!entry) return;
-          onGeometryFetched(entry.farm_id, entry.location_geom);
+          onGeometryFetched([{ farmId: entry.farm_id, geom: entry.location_geom }]);
           const bounds = L.geoJSON(entry.location_geom as any).getBounds();
           if (bounds.isValid()) map.flyToBounds(bounds, { maxZoom: 16, padding: [40, 40] });
         })
@@ -150,6 +158,52 @@ function FlyToMunicipality({ municipality, boundaries }: { municipality: string 
     map.flyTo(bounds.getCenter(), Math.max(fitZoom, 12));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [municipality, boundaries]);
+  return null;
+}
+
+// Flies the map to a searched farmer's farm(s) (2026-08-18, farmer search),
+// same idea as FlyToMunicipality/FlyToSelectedFarm but there's no static
+// boundary outline for a farmer -- instead this resolves that farmer's
+// geometry directly (GET /farms/geometry?farmer_id=..., ignoring the map's
+// current viewport/active_only/municipality -- see
+// backend/app/api/farms.py's get_farms_geometry docstring) and flies to the
+// combined bounds over all of it, so it works regardless of whether any of
+// their farms are already on screen. Falls back to the first matching
+// farm's approximate position if the farmer has no surveyed farms at all.
+function FlyToFarmer({
+  farmerId, farms, approxPlacements, onGeometryFetched,
+}: {
+  farmerId: number | null;
+  farms: FarmRow[];
+  approxPlacements: Map<number, [number, number]>;
+  onGeometryFetched: (entries: GeomEntry[]) => void;
+}) {
+  const map = useMap();
+  useEffect(() => {
+    if (farmerId == null) return;
+    getFarmsGeometry({ farmer_id: farmerId })
+      .then(res => {
+        if (res.data.length > 0) {
+          onGeometryFetched(res.data.map(d => ({ farmId: d.farm_id, geom: d.location_geom })));
+          const collection = {
+            type: "FeatureCollection",
+            features: res.data.map(d => ({ type: "Feature", properties: {}, geometry: d.location_geom })),
+          } as FeatureCollection;
+          const bounds = L.geoJSON(collection).getBounds();
+          if (bounds.isValid()) map.flyToBounds(bounds, { maxZoom: 16, padding: [40, 40] });
+          return;
+        }
+        // No surveyed farms for this farmer -- fall back to the approximate
+        // marker position of one of their farms, if any is currently loaded
+        // into the (already farmer-scoped, via SpatialAnalysisModule's
+        // filteredFarms) `farms` prop.
+        const theirFarm = farms.find(f => f.farmer_id === farmerId);
+        const approx = theirFarm ? approxPlacements.get(theirFarm.farm_id) : null;
+        if (approx) map.flyTo(approx, 14);
+      })
+      .catch(() => { /* leave the map where it is on failure */ });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [farmerId]);
   return null;
 }
 
@@ -225,7 +279,7 @@ function approximateFarmPosition(municipality: string | null, indexInMunicipalit
   return [base[0] + row * step, base[1] + (col - 1) * step];
 }
 
-export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBulletin, darkMode, focusMunicipality, activeOnly }: GISLeafletMapProps) {
+export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBulletin, darkMode, focusMunicipality, focusFarmerId, activeOnly }: GISLeafletMapProps) {
   const [affectedAreas, setAffectedAreas] = useState<TcbSignal[]>([]);
   const [regionXBoundaries, setRegionXBoundaries] = useState<FeatureCollection | null>(null);
   const [showFarmsWmsOverlay, setShowFarmsWmsOverlay] = useState(false);
@@ -292,9 +346,17 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
   // in-place as new bbox pages/single-farm lookups land otherwise.
   const [geomCache, setGeomCache] = useState<Map<number, GeoJsonMultiPolygon>>(new Map());
 
+  const mergeGeomEntries = useCallback((entries: GeomEntry[]) => {
+    setGeomCache(prev => {
+      const next = new Map(prev);
+      for (const { farmId, geom } of entries) next.set(farmId, geom);
+      return next;
+    });
+  }, []);
+
   useEffect(() => {
     setGeomCache(new Map());
-  }, [activeOnly, focusMunicipality]);
+  }, [activeOnly, focusMunicipality, focusFarmerId]);
 
   const bboxString = mapBounds
     ? `${mapBounds.west},${mapBounds.south},${mapBounds.east},${mapBounds.north}`
@@ -303,22 +365,22 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
   useEffect(() => {
     if (!bboxString) return;
     // Same gating useFarmsData.ts applies to the table: "every farm, active
-    // or not, no municipality scope" is the one combination that's
+    // or not, no municipality/farmer scope" is the one combination that's
     // unbounded at 100k-1M scale -- skip the fetch rather than pull every
     // surveyed farm's polygon nationwide. Every other combination,
-    // including the default activeOnly=true/focusMunicipality=null, fetches
-    // normally (bounded by the viewport bbox either way).
-    if (!activeOnly && !focusMunicipality) return;
-    getFarmsGeometry({ bbox: bboxString, active_only: activeOnly, municipality: focusMunicipality ?? undefined })
-      .then(res => {
-        setGeomCache(prev => {
-          const next = new Map(prev);
-          for (const { farm_id, location_geom } of res.data) next.set(farm_id, location_geom);
-          return next;
-        });
-      })
+    // including the default activeOnly=true/focusMunicipality=null/
+    // focusFarmerId=null, fetches normally (bounded by the viewport bbox
+    // either way).
+    if (!activeOnly && !focusMunicipality && !focusFarmerId) return;
+    getFarmsGeometry({
+      bbox: bboxString,
+      active_only: activeOnly,
+      municipality: focusMunicipality ?? undefined,
+      farmer_id: focusFarmerId ?? undefined,
+    })
+      .then(res => mergeGeomEntries(res.data.map(d => ({ farmId: d.farm_id, geom: d.location_geom }))))
       .catch(() => { /* leave the cache as-is on failure -- next moveend/zoomend retries */ });
-  }, [bboxString, activeOnly, focusMunicipality]);
+  }, [bboxString, activeOnly, focusMunicipality, focusFarmerId, mergeGeomEntries]);
 
   // Rendered-layer set -- viewport-culled subset of geomCache, used ONLY by
   // the polygon render loop below. Deliberately NOT used for `selectedFarm`,
@@ -371,9 +433,15 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
           farm={selectedFarm}
           approxPos={selectedFarm ? approxPlacements.get(selectedFarm.farm_id) ?? null : null}
           geomCache={geomCache}
-          onGeometryFetched={(farmId, geom) => setGeomCache(prev => new Map(prev).set(farmId, geom))}
+          onGeometryFetched={mergeGeomEntries}
         />
         <FlyToMunicipality municipality={focusMunicipality ?? null} boundaries={regionXBoundaries} />
+        <FlyToFarmer
+          farmerId={focusFarmerId ?? null}
+          farms={farms}
+          approxPlacements={approxPlacements}
+          onGeometryFetched={mergeGeomEntries}
+        />
         <MapBoundsWatcher onBoundsChange={handleBoundsChange} />
 
         {/* Esri World Imagery -- free, no API key/billing required. High-resolution

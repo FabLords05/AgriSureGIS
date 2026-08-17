@@ -4801,7 +4801,108 @@ including the default, is fine to fetch outright.
   combination, including the default, fetches viewport geometry normally.
 
 ### Status / Next Steps
-* Awaiting Fabio's re-verification that the default view now shows
-  active-insurance farms again, and that the municipality-gated
-  inactive-farm browse still works as designed.
+* Fabio confirmed the default view now shows active-insurance farms again,
+  and the municipality-gated inactive-farm browse works as designed.
+
+---
+
+## [2026-08-18] - Farmer Search + Farm Records Toolbar Consolidation
+
+Fabio asked for a farmer search, then requested it live in the Farm Records
+toolbar alongside the (moved-down) municipality search, and asked for the
+two upload buttons to move there too so the map's own toolbar clears down
+to just its title, for more map visibility.
+
+Farmer names can't be preloaded whole for a client-side type-ahead the way
+municipalities are -- `tbl_farmers_profile` scales with the farm count
+(`seed_100k_farms.py` adds one new synthetic farmer per new farm) -- so
+this is a debounced, server-side search instead. `filterFarmerId` scopes
+exactly like `filterMuni` (either one alone allows Active Insurance Only to
+be turned off) and combines with it (both, either, or neither), per Fabio's
+explicit direction that the two filters be independent and combinable.
+
+### 1. File: `backend/app/core/farms_cache.py`
+* `_cache_key()`/`get_cached_farms_page()`/`cache_farms_page()` all gained
+  a `farmer_id: int | None = None` param, folded into the Redis cache key
+  -- otherwise a farmer-scoped request and an unscoped one at the same
+  `limit`/`after_id`/`active_only`/`municipality` would collide.
+
+### 2. File: `backend/app/api/farms.py`
+* **`list_farms()`** (`GET /farms/`): new `farmer_id: int | None` query
+  param, an exact `Farm.farmer_id == farmer_id` filter -- combines with
+  `active_only`/`municipality` rather than replacing them.
+* **`get_farms_geometry()`** (`GET /farms/geometry`): new `farmer_id`
+  param with two roles depending on whether `bbox` is also given: combined
+  with a real `bbox` request it's just another AND'd filter on the normal
+  viewport query; given alone (no `bbox`, no `farm_id`) it behaves like
+  `farm_id`'s existing bypass -- every farm belonging to that farmer,
+  regardless of viewport/active_only/municipality -- backing
+  `GISLeafletMap.tsx`'s new fly-to-farmer.
+* **New: `search_farmers()`** (`GET /farms/farmers?q=...`): farmer name
+  search backing the new search box. Matches
+  `first_name || ' ' || last_name` as one concatenated string (single
+  `ILIKE '%q%'`, via `func.concat`) rather than checking first/last
+  separately -- covers a query that's just a first name, just a last name,
+  or both, in one expression. Capped at 20 results, ordered by last then
+  first name.
+
+### 3. File: `frontend/src/lib/api.ts`
+* `getFarms()`/`getFarmsGeometry()` both gained an optional `farmer_id`
+  param.
+* New `FarmerSearchResult` type + `searchFarmers(q)` calling
+  `GET /farms/farmers`.
+
+### 4. File: `frontend/src/lib/useFarmsData.ts`
+* New `farmerId: number | null` param, alongside `activeOnly`/
+  `municipality`. The one combination the hook refuses to fetch for
+  widened from `activeOnly: false, municipality: null` to `activeOnly:
+  false, municipality: null, farmerId: null` -- a real `farmerId` scopes
+  exactly like a real `municipality` (a specific farmer's own farms are
+  always a small, bounded set).
+
+### 5. File: `frontend/src/app/App.tsx`
+* New `filterFarmerId` state (default `null`), passed into `useFarmsData`
+  and down to `SpatialAnalysisModule`. The existing "force Active Insurance
+  Only back on" guard effect now also checks `filterFarmerId == null`, not
+  just `filterMuni === "All"` -- clearing either scope alone doesn't
+  trigger it if the other is still set.
+
+### 6. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* New farmer search box: `farmerQuery`/`showFarmerSuggestions`/
+  `farmerSuggestions` state, a 300ms-debounced effect calling
+  `searchFarmers()` (discards a stale response via a bumped sequence ref if
+  a newer keystroke has already superseded it), `selectFarmer()`. Mirrors
+  the municipality box's interaction pattern (type-ahead dropdown, clearing
+  the input resets the filter) but backed by a live query instead of a
+  preloaded list.
+* `filteredFarms` also filters by `filterFarmerId` now; "Active Insurance
+  Only" toggle's `disabled`/tooltip condition extended to
+  `filterMuni === "All" && filterFarmerId == null`.
+* **Toolbar consolidation** (per Fabio's explicit request): the map
+  toolbar (top panel) is stripped down to just its title/icon. The
+  municipality search box and the Upload CSV/Upload GPX buttons (+ their
+  hidden file inputs) all move down into the Farm Records toolbar (bottom
+  panel), alongside the new farmer search box -- the row already had
+  `flex-wrap`, so it wraps gracefully at narrow widths. `<GISLeafletMap>`
+  gains `focusFarmerId={filterFarmerId}`.
+
+### 7. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* New `focusFarmerId?: number | null` prop.
+* `FlyToSelectedFarm`'s `onGeometryFetched` callback generalized from a
+  single `(farmId, geom)` pair to a batch `(entries: GeomEntry[])`, shared
+  with the new `FlyToFarmer` below via a new `mergeGeomEntries()` helper
+  (`useCallback`-wrapped, merges into `geomCache`).
+* **New `FlyToFarmer()`**: same idea as `FlyToMunicipality`, but there's no
+  static boundary outline for a farmer -- resolves that farmer's geometry
+  directly (`getFarmsGeometry({ farmer_id })`, bypassing viewport/
+  active_only/municipality) and flies to the combined bounds over all of
+  it; falls back to the first matching farm's approximate marker position
+  if the farmer has no surveyed farms at all.
+* `geomCache`'s reset effect and the viewport bbox-fetch effect (and its
+  gating condition) both extended to include `focusFarmerId`, mirroring
+  `focusMunicipality`.
+
+### Status / Next Steps
+* Implementation complete on this branch; not yet verified by Fabio in the
+  running app.
 
