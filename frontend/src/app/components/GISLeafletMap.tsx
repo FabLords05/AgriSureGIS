@@ -302,6 +302,13 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
 
   useEffect(() => {
     if (!bboxString) return;
+    // Same gating useFarmsData.ts applies to the table: "every farm, active
+    // or not, no municipality scope" is the one combination that's
+    // unbounded at 100k-1M scale -- skip the fetch rather than pull every
+    // surveyed farm's polygon nationwide. Every other combination,
+    // including the default activeOnly=true/focusMunicipality=null, fetches
+    // normally (bounded by the viewport bbox either way).
+    if (!activeOnly && !focusMunicipality) return;
     getFarmsGeometry({ bbox: bboxString, active_only: activeOnly, municipality: focusMunicipality ?? undefined })
       .then(res => {
         setGeomCache(prev => {

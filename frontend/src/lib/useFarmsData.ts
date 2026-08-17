@@ -19,10 +19,16 @@ const PAGE_SIZE = 1000;
 // MonitoringModule.tsx) and SpatialAnalysisModule.tsx had no way to scope
 // what it asked for.
 //
-// This hook is now purely on-demand and filter-scoped: `municipality` gates
-// fetching entirely (App.tsx passes `null` until the user searches a
-// municipality in SpatialAnalysisModule.tsx -- see its "All" sentinel), and
-// once set, only page 1 fetches eagerly; every later page requires an
+// This hook is now purely on-demand and filter-scoped: it fetches for any
+// (activeOnly, municipality) combination *except* one -- `activeOnly:
+// false, municipality: null` ("every farm, active or not, no municipality
+// scope") is the one combination that's genuinely unbounded at 100k-1M
+// scale, so it's a no-op instead (`farms` stays whatever it already was,
+// no new request). The default `activeOnly: true, municipality: null`
+// (App.tsx's initial state) fetches normally -- it's bounded by however
+// many farms actually have active insurance, same as the original
+// pre-redesign default view. Once scoped (either by activeOnly or a real
+// municipality), only page 1 fetches eagerly; every later page requires an
 // explicit requestMore() call (SpatialAnalysisModule's existing scroll
 // IntersectionObserver). No background pacing loop, no IndexedDB -- a
 // filter-scoped page set is small enough that a plain re-fetch on
@@ -52,17 +58,19 @@ function mergeFarmsPage(current: Farm[], page: Farm[]): Farm[] {
 export interface UseFarmsDataParams {
   enabled: boolean;
   activeOnly: boolean;
-  // null = no municipality searched/picked yet -- the hook does nothing
-  // (no request, `farms` stays []) until this becomes a real value. See
-  // App.tsx's `filterMuni === "All" ? null : filterMuni`.
+  // null = no municipality searched/picked yet. See App.tsx's
+  // `filterMuni === "All" ? null : filterMuni`. Combined with activeOnly:
+  // false, this is the one combination the hook refuses to fetch for (see
+  // the module docstring) -- App.tsx guards against staying in it (forces
+  // activeOnly back to true whenever municipality reverts to null).
   municipality: string | null;
 }
 
 export interface FarmsData {
   farms: Farm[];
-  // True until a first determination has been made for the *current*
-  // municipality -- false immediately (no perpetual spinner) while
-  // municipality is null, since there's nothing to load.
+  // True until a first determination has been made for the current
+  // activeOnly/municipality combination -- false immediately (no perpetual
+  // spinner) for the one unbounded combination the hook refuses to fetch.
   isLoadingFirstPage: boolean;
   // True while a refresh() (CSV/GPX upload) is restarting the fetch from
   // scratch. Existing `farms` stay visible/interactive throughout.
@@ -156,12 +164,13 @@ export function useFarmsData({ enabled, activeOnly, municipality }: UseFarmsData
   // old rows only disappear once nothing new matches them AND the caller's
   // own display filter (SpatialAnalysisModule's filteredFarms) excludes them.
   const start = () => {
-    // No-op if nothing's actually scoped to fetch (e.g. a CSV/GPX upload's
-    // refresh() firing while the user hasn't searched a municipality yet --
-    // the empty state has nothing to refresh). The mount/filter-change
-    // effect below already handles clearing `farms` for this case; start()
-    // only needs to avoid issuing a real request here.
-    if (municipality == null) return;
+    // No-op for the one combination that's genuinely unbounded at 100k-1M
+    // scale: "every farm, active or not, no municipality scope" (see the
+    // module docstring). Any other combination -- including the default
+    // activeOnly=true/municipality=null -- is fine to fetch. Covers a
+    // CSV/GPX upload's refresh() firing while this combination is briefly
+    // in effect (App.tsx's guard normally corrects it before this matters).
+    if (!activeOnly && municipality == null) return;
     generationRef.current += 1;
     const myGeneration = generationRef.current;
     fetchInFlightRef.current = false;
@@ -173,10 +182,10 @@ export function useFarmsData({ enabled, activeOnly, municipality }: UseFarmsData
   };
 
   useEffect(() => {
-    if (!enabled || municipality == null) {
-      // Nothing to fetch -- no municipality searched yet (or hook disabled).
-      // Bump generation so any in-flight fetch from a just-cleared
-      // municipality discards its result instead of landing after this.
+    if (!enabled || (!activeOnly && municipality == null)) {
+      // Hook disabled, or the one unbounded combination (see start() above)
+      // -- nothing to fetch. Bump generation so any in-flight fetch from a
+      // just-changed filter discards its result instead of landing after this.
       generationRef.current += 1;
       fetchInFlightRef.current = false;
       afterIdRef.current = 0;

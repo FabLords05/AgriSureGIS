@@ -46,11 +46,12 @@ interface SpatialAnalysisModuleProps {
   // from scratch. See useFarmsData.ts for the fetch mechanics.
   farmsData: FarmsData;
   // activeInsuranceOnly/filterMuni also live in App.tsx for the same
-  // reason. filterMuni === "All" means "nothing searched yet" -- the Farm
-  // Records table/map show nothing at all until a municipality is picked
-  // (2026-08-18, stage 2 of the on-demand-pagination redesign -- see
-  // .claude/FUNCTION_CHANGES.md), so there's no default "browse everything"
-  // view to gate here anymore.
+  // reason. filterMuni === "All" means "nothing searched yet" -- the default
+  // view (active-insurance farms across every municipality) is still shown
+  // in that state; only turning Active Insurance Only *off* requires a real
+  // municipality first, since "every farm, active or not, unscoped" is the
+  // one combination that's unbounded at 100k-1M scale (2026-08-18, stage 2
+  // of the on-demand-pagination redesign -- see .claude/FUNCTION_CHANGES.md).
   activeInsuranceOnly: boolean;
   onActiveInsuranceOnlyChange: (value: boolean) => void;
   filterMuni: string;
@@ -488,16 +489,14 @@ export function SpatialAnalysisModule({
               <Table2 size={13} className="text-[#166534]" />
               <span className="text-[11px] font-semibold">Farm Records</span>
               <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">
-                {filterMuni === "All"
-                  ? "No municipality selected"
-                  : isLoadingFirstPage ? "Loading…" : isRefreshing ? "Refreshing…" : `${filteredFarms.length} records`}
+                {isLoadingFirstPage ? "Loading…" : isRefreshing ? "Refreshing…" : `${filteredFarms.length} records`}
               </span>
               {loadError && <span className="text-[10px] text-red-500">{loadError}</span>}
             </div>
             <button
               onClick={() => onActiveInsuranceOnlyChange(!activeInsuranceOnly)}
               disabled={filterMuni === "All"}
-              title={filterMuni === "All" ? "Search a municipality to view farm records" : undefined}
+              title={filterMuni === "All" ? "Search a municipality to view inactive/all-status farms" : undefined}
               className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors border disabled:opacity-50 disabled:cursor-not-allowed ${activeInsuranceOnly ? "bg-[#166534] text-white border-[#166534]" : "border-[#166534] text-[#166534] hover:bg-[#166534]/10"}`}
             >
               <ShieldCheck size={11} /> Active Insurance Only
@@ -512,14 +511,7 @@ export function SpatialAnalysisModule({
             ref={scrollContainerRef}
             onScroll={e => setTableScrollTop(e.currentTarget.scrollTop)}
           >
-            {filterMuni === "All" ? (
-              <div className="flex flex-col items-center justify-center h-full gap-1.5 text-center px-6">
-                <Filter size={18} className="text-muted-foreground/50" />
-                <p className="text-[11px] text-muted-foreground">
-                  Search a municipality above to view farm records
-                </p>
-              </div>
-            ) : isLoadingFirstPage ? (
+            {isLoadingFirstPage ? (
               <div className="flex items-center justify-center h-full text-[11px] text-muted-foreground">
                 Loading farm records…
               </div>

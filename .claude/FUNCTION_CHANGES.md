@@ -4757,3 +4757,51 @@ now stay empty until the user searches a specific municipality.
   bounded by however many farms in that municipality have a real GPX
   boundary today.
 
+---
+
+## [2026-08-18] - Stage 2 Correction: Restore Default Active-Insurance View
+
+Fabio tested the above and reported the default screen showed nothing --
+the "no default view at all" decision went further than intended. Corrected
+gating: the default view (no municipality searched) should behave like
+before the redesign -- show active-insurance farms across every
+municipality. Only turning Active Insurance Only *off* (to browse
+inactive/all-status farms) should require a specific municipality first,
+since "every farm, active or not, no municipality scope" is the one
+combination that's actually unbounded at 100k-1M scale -- everything else,
+including the default, is fine to fetch outright.
+
+### 1. File: `frontend/src/lib/useFarmsData.ts`
+* Gating condition changed from "fetch only when `municipality != null`" to
+  "fetch for every `(activeOnly, municipality)` combination except
+  `activeOnly: false, municipality: null`" -- in both `start()` and the
+  mount/filter-change effect. The default `activeOnly: true,
+  municipality: null` now fetches normally, same as the original
+  pre-redesign default (bounded by however many farms have active
+  insurance).
+
+### 2. File: `frontend/src/app/App.tsx`
+* Re-added a guard effect: if `filterMuni` reverts to `"All"` while
+  `activeInsuranceOnly` is still `false` (e.g. the user clears the search
+  box after browsing one municipality's inactive farms), it's forced back
+  to `true` -- keeps the app out of the one blocked combination rather than
+  leaving the table/map stuck empty.
+
+### 3. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* Removed the "no municipality selected" empty-state prompt and record-count
+  badge text added in the prior entry -- the table now renders normally
+  (loading state, then rows) for the default view again, same as before
+  this stage's first pass. "Active Insurance Only" toggle's disabled
+  tooltip reworded to reflect that it's gating the *inactive-farms* browse
+  specifically, not farm records in general.
+
+### 4. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* Geometry-fetch effect gated the same way as `useFarmsData.ts` --
+  `!activeOnly && !focusMunicipality` skips the fetch; every other
+  combination, including the default, fetches viewport geometry normally.
+
+### Status / Next Steps
+* Awaiting Fabio's re-verification that the default view now shows
+  active-insurance farms again, and that the municipality-gated
+  inactive-farm browse still works as designed.
+
