@@ -16,6 +16,7 @@ import { Bulletin, getBulletins, logoutUser, SystemUser } from "@/lib/api";
 import { useFarmsData } from "@/lib/useFarmsData";
 import { CurrentUser, loadPersistedUser, persistUser, persistToken, clearPersistedUser } from "@/lib/authStorage";
 import { loadPersistedDarkMode, persistDarkMode } from "@/lib/themeStorage";
+import { loadPersistedHeaderHideMode, persistHeaderHideMode, HeaderHideMode } from "@/lib/headerHideModeStorage";
 import { SESSION_EXPIRED_EVENT } from "@/lib/sessionEvents";
 
 const BULLETIN_POLL_MS = 60_000;
@@ -49,6 +50,21 @@ export default function App() {
     const user = loadPersistedUser();
     return user ? loadPersistedDarkMode(user.email) : false;
   });
+  // Same lazy-init/per-user pattern as darkMode above, for the header's
+  // hide-mode preference (2026-08-18, set from Account Settings' "Display
+  // Preferences" card -- see AccountSettingsModule.tsx and Header.tsx).
+  const [headerHideMode, setHeaderHideModeState] = useState<HeaderHideMode>(() => {
+    const user = loadPersistedUser();
+    return user ? loadPersistedHeaderHideMode(user.email) : "manual";
+  });
+  // Persists alongside updating state, same shape as onToggleDark below --
+  // passed to AccountSettingsModule so picking a new mode there applies
+  // immediately (no Save button; this is client-only, not part of
+  // SystemUser/updateMe()) and survives a refresh for this user.
+  const handleHeaderHideModeChange = (mode: HeaderHideMode) => {
+    setHeaderHideModeState(mode);
+    if (currentUser) persistHeaderHideMode(currentUser.email, mode);
+  };
   // Set only for *involuntary* logout (idle timeout / expired session token)
   // -- see the two effects below. null means either "still logged in" or
   // "logged out on purpose" (the Header's Sign Out button calls handleLogout
@@ -62,21 +78,53 @@ export default function App() {
   const [selectedBulletin, setSelectedBulletin] = useState<Bulletin | null>(null);
   const seenMaxTcbId = useRef<number | null>(null);
 
-  // Starts fetching farm records the moment login succeeds, regardless of
-  // which tab is active -- shared by MonitoringModule (needs the complete
-  // dataset for its aggregate stat cards) and SpatialAnalysisModule (its
-  // table/map), instead of each independently fetching its own copy.
-  const farmsData = useFarmsData(!!currentUser);
+  // SpatialAnalysisModule's Farm Records table/map filters -- owned here
+  // (not locally in that module) because useFarmsData is owned here too:
+  // SpatialAnalysisModule is conditionally mounted (only while
+  // activeModule === "spatial"), so keeping the hook + its filter state at
+  // this level means switching tabs away and back doesn't drop progress or
+  // re-fetch from scratch. Default (`filterMuni === "All"`, i.e.
+  // municipality: null, and no farmer picked) fetches active-insurance
+  // farms across every municipality, same default view as before the
+  // on-demand-pagination redesign (2026-08-18, stage 2 --
+  // .claude/FUNCTION_CHANGES.md) -- small and safe, bounded by however many
+  // farms actually have active insurance. Only "every farm, active or not,
+  // no municipality or farmer scope" is unbounded at 100k-1M scale (see
+  // useFarmsData.ts's module docstring), so that's the one combination the
+  // hook refuses to fetch for. `filterFarmerId` (2026-08-18, farmer
+  // search) scopes exactly like `filterMuni` -- either one alone is enough
+  // to allow Active Insurance Only to be turned off. The search box's own
+  // typed text/suggestions stay local to SpatialAnalysisModule (same
+  // pattern as muniQuery) -- only the committed farmer_id lives here.
+  const [activeInsuranceOnly, setActiveInsuranceOnly] = useState(true);
+  const [filterMuni, setFilterMuni] = useState("All");
+  const [filterFarmerId, setFilterFarmerId] = useState<number | null>(null);
+  // Guards against landing in the unbounded combination: if the user had
+  // turned Active Insurance Only off while a municipality or farmer was
+  // selected, then clears both back to "nothing selected", this forces it
+  // back on rather than leaving the table/map stuck showing nothing.
+  useEffect(() => {
+    if (filterMuni === "All" && filterFarmerId == null && !activeInsuranceOnly) {
+      setActiveInsuranceOnly(true);
+    }
+  }, [filterMuni, filterFarmerId, activeInsuranceOnly]);
+  const farmsData = useFarmsData({
+    enabled: !!currentUser,
+    activeOnly: activeInsuranceOnly,
+    municipality: filterMuni === "All" ? null : filterMuni,
+    farmerId: filterFarmerId,
+  });
 
   const handleLogin = (user: CurrentUser, token: string) => {
     setCurrentUser(user);
     persistUser(user);
     persistToken(token);
     setActiveModule(user.role === "System Administrator" ? "calibration" : "monitoring");
-    // Switch to *this* user's own dark-mode preference -- otherwise a
-    // shared device would keep showing whichever mode the previous user
-    // left it in until this user happens to toggle it themselves.
+    // Switch to *this* user's own dark-mode/header-hide-mode preferences --
+    // otherwise a shared device would keep showing whichever settings the
+    // previous user left it in until this user happens to change them.
     setDarkMode(loadPersistedDarkMode(user.email));
+    setHeaderHideModeState(loadPersistedHeaderHideMode(user.email));
   };
 
   // Account Settings tab hands back the full updated row after a save --
@@ -233,6 +281,7 @@ export default function App() {
           onClearNotification={handleClearNotification}
           currentUser={currentUser}
           onLogout={handleLogout}
+          hideMode={headerHideMode}
         />
 
         {/* isAdmin gates rendering itself, not just Header's nav -- defense in
@@ -245,7 +294,12 @@ export default function App() {
             unlike every other tab, it's available to both roles alike. */}
         <main className="flex-1 overflow-hidden">
           {activeModule === "account" ? (
-            <AccountSettingsModule currentUser={currentUser} onUpdated={handleAccountUpdate} />
+            <AccountSettingsModule
+              currentUser={currentUser}
+              onUpdated={handleAccountUpdate}
+              headerHideMode={headerHideMode}
+              onHeaderHideModeChange={handleHeaderHideModeChange}
+            />
           ) : currentUser.role === "System Administrator" ? (
             activeModule === "users" ? (
               <UserManagementModule />
@@ -266,7 +320,6 @@ export default function App() {
                   darkMode={darkMode}
                   selectedBulletin={selectedBulletin}
                   onSelectBulletin={setSelectedBulletin}
-                  farmsData={farmsData}
                 />
               )}
               {activeModule === "spatial"     && (
@@ -274,6 +327,12 @@ export default function App() {
                   darkMode={darkMode}
                   selectedBulletin={selectedBulletin}
                   farmsData={farmsData}
+                  activeInsuranceOnly={activeInsuranceOnly}
+                  onActiveInsuranceOnlyChange={setActiveInsuranceOnly}
+                  filterMuni={filterMuni}
+                  onFilterMuniChange={setFilterMuni}
+                  filterFarmerId={filterFarmerId}
+                  onFilterFarmerIdChange={setFilterFarmerId}
                 />
               )}
               {activeModule === "assessment"  && (

@@ -1,11 +1,14 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { toast } from "sonner";
 import {
-  Map as MapIcon, ChevronUp, ChevronDown,
-  Filter, ArrowUpDown, UploadCloud, CheckCircle2, Table2, ShieldCheck, X, AlertCircle, Loader2
+  ChevronUp, ChevronDown,
+  Filter, User, ArrowUpDown, UploadCloud, CheckCircle2, Table2, ShieldCheck, X, AlertCircle, Loader2
 } from "lucide-react";
 import { GISLeafletMap } from "./GISLeafletMap";
-import { getAssessments, uploadCsv, uploadGpx, getCsvUploadStatus, Farm, Assessment, Bulletin } from "@/lib/api";
+import {
+  getAssessments, getMunicipalities, searchFarmers, uploadCsv, uploadGpx, getCsvUploadStatus,
+  Farm, Assessment, Bulletin, FarmerSearchResult,
+} from "@/lib/api";
 import { FarmsData } from "@/lib/useFarmsData";
 
 interface FarmRow extends Farm {
@@ -40,11 +43,28 @@ const OVERSCAN = 10;
 interface SpatialAnalysisModuleProps {
   darkMode: boolean;
   selectedBulletin: Bulletin | null;
-  // Shared with MonitoringModule and owned by App.tsx (useFarmsData) --
-  // fetching starts the moment the app opens, not when this module mounts,
-  // so data is often already there (or well underway) by the time a user
-  // navigates here. See useFarmsData.ts for the fetch/pagination mechanics.
+  // Owned by App.tsx (useFarmsData), not locally -- this module is
+  // conditionally mounted, so keeping the hook + these filters one level up
+  // means switching tabs away and back doesn't drop progress or re-fetch
+  // from scratch. See useFarmsData.ts for the fetch mechanics.
   farmsData: FarmsData;
+  // activeInsuranceOnly/filterMuni also live in App.tsx for the same
+  // reason. filterMuni === "All" means "nothing searched yet" -- the default
+  // view (active-insurance farms across every municipality) is still shown
+  // in that state; only turning Active Insurance Only *off* requires a real
+  // municipality first, since "every farm, active or not, unscoped" is the
+  // one combination that's unbounded at 100k-1M scale (2026-08-18, stage 2
+  // of the on-demand-pagination redesign -- see .claude/FUNCTION_CHANGES.md).
+  activeInsuranceOnly: boolean;
+  onActiveInsuranceOnlyChange: (value: boolean) => void;
+  filterMuni: string;
+  onFilterMuniChange: (value: string) => void;
+  // Farmer search (2026-08-18) -- scopes exactly like filterMuni (either
+  // one alone is enough to allow Active Insurance Only off), and combines
+  // with it rather than replacing it (both filters AND together when both
+  // are set). null = no farmer picked.
+  filterFarmerId: number | null;
+  onFilterFarmerIdChange: (value: number | null) => void;
 }
 
 // ─── Upload Failures Modal ───────────────────────────────────────────────────
@@ -83,7 +103,11 @@ function UploadFailuresModal({ failures, onClose }: { failures: string[]; onClos
   );
 }
 
-export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }: SpatialAnalysisModuleProps) {
+export function SpatialAnalysisModule({
+  darkMode, selectedBulletin, farmsData,
+  activeInsuranceOnly, onActiveInsuranceOnlyChange, filterMuni, onFilterMuniChange,
+  filterFarmerId, onFilterFarmerIdChange,
+}: SpatialAnalysisModuleProps) {
   const {
     farms,
     isLoadingFirstPage,
@@ -96,17 +120,24 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
   } = farmsData;
   const [assessments, setAssessments] = useState<Assessment[]>([]);
   const [selectedFarmId, setSelectedFarmId] = useState<number | null>(null);
-  const [filterMuni, setFilterMuni] = useState("All");
-  // Defaults to true: a farm with no currently-active insurance policy is
-  // rarely useful to look at day to day. This is purely a client-side
-  // display filter over the shared `farms` cache -- toggling it does not
-  // trigger a fetch, since useFarmsData already fetches active-insurance
-  // farms first and the complete dataset shortly after, regardless of this
-  // toggle's state (MonitoringModule's stat cards need the complete set
-  // either way).
-  const [activeInsuranceOnly, setActiveInsuranceOnly] = useState(true);
+  // All real municipality names, for the search box's suggestions --
+  // fetched once from a dedicated endpoint (not derived from `farms`,
+  // which is empty until a municipality is actually picked -- see
+  // getMunicipalities()'s doc comment in api.ts).
+  const [allMunicipalities, setAllMunicipalities] = useState<string[]>([]);
   const [muniQuery, setMuniQuery] = useState("");
   const [showMuniSuggestions, setShowMuniSuggestions] = useState(false);
+  // Farmer search box -- unlike municipalities, farmer names can't be
+  // preloaded whole (tbl_farmers_profile scales with farm count), so
+  // suggestions come from a debounced server-side query instead (see the
+  // effect below and searchFarmers() in api.ts).
+  const [farmerQuery, setFarmerQuery] = useState("");
+  const [showFarmerSuggestions, setShowFarmerSuggestions] = useState(false);
+  const [farmerSuggestions, setFarmerSuggestions] = useState<FarmerSearchResult[]>([]);
+  // Bumped on every keystroke -- a slow search response landing after a
+  // newer one has already resolved is discarded rather than overwriting
+  // fresher suggestions with stale ones.
+  const farmerSearchSeqRef = useRef(0);
   const [sortField, setSortField] = useState<SortField>("farm_id");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [topPanelH, setTopPanelH] = useState(55);
@@ -143,6 +174,7 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
 
   useEffect(() => {
     getAssessments().then(res => setAssessments(res.data)).catch(() => setAssessments([]));
+    getMunicipalities().then(res => setAllMunicipalities(res.data)).catch(() => setAllMunicipalities([]));
   }, []);
 
   // Infinite scroll: observe a sentinel row at the end of the table body and
@@ -186,25 +218,50 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
     [farms, assessmentByFarmId]
   );
 
-  const municipalities = useMemo(() => {
-    const set = new Set(farmRows.map(f => f.municipality).filter((m): m is string => !!m));
-    return ["All", ...Array.from(set).sort()];
-  }, [farmRows]);
-
   // Type-ahead suggestions for the municipality search box -- matches on the
   // typed letters as a prefix (case-insensitive), same idea as the old select
-  // dropdown but searchable instead of scroll-to-find.
+  // dropdown but searchable instead of scroll-to-find. Sourced from
+  // `allMunicipalities` (always populated, see the mount effect above), not
+  // from `farms` -- `farms` is empty until a municipality is actually picked.
   const muniSuggestions = useMemo(() => {
-    const options = municipalities.filter(m => m !== "All");
     const q = muniQuery.trim().toLowerCase();
-    if (!q) return options;
-    return options.filter(m => m.toLowerCase().startsWith(q));
-  }, [municipalities, muniQuery]);
+    if (!q) return allMunicipalities;
+    return allMunicipalities.filter(m => m.toLowerCase().startsWith(q));
+  }, [allMunicipalities, muniQuery]);
 
   const selectMunicipality = (m: string) => {
-    setFilterMuni(m);
+    onFilterMuniChange(m);
     setMuniQuery(m);
     setShowMuniSuggestions(false);
+  };
+
+  // Debounced farmer-name search -- waits 300ms after the last keystroke
+  // before actually calling the backend, so a fast typist doesn't fire a
+  // request per character. Cleared immediately (no request at all) once
+  // the box is emptied.
+  useEffect(() => {
+    const q = farmerQuery.trim();
+    if (!q) {
+      setFarmerSuggestions([]);
+      return;
+    }
+    const mySeq = ++farmerSearchSeqRef.current;
+    const timer = setTimeout(() => {
+      searchFarmers(q)
+        .then(res => {
+          if (mySeq === farmerSearchSeqRef.current) setFarmerSuggestions(res.data);
+        })
+        .catch(() => {
+          if (mySeq === farmerSearchSeqRef.current) setFarmerSuggestions([]);
+        });
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [farmerQuery]);
+
+  const selectFarmer = (farmerId: number, name: string) => {
+    onFilterFarmerIdChange(farmerId);
+    setFarmerQuery(name);
+    setShowFarmerSuggestions(false);
   };
 
   // Mirrors the "active" definition used by GET /api/insurance/summary:
@@ -228,6 +285,7 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
   const filteredFarms = useMemo(
     () => farmRows
       .filter(f => filterMuni === "All" || f.municipality === filterMuni)
+      .filter(f => filterFarmerId == null || f.farmer_id === filterFarmerId)
       .filter(f => !activeInsuranceOnly || isActiveInsurance(f))
       .sort((a, b) => {
         const va = a[sortField] ?? "";
@@ -237,7 +295,7 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
           : String(va).localeCompare(String(vb));
         return sortDir === "asc" ? cmp : -cmp;
       }),
-    [farmRows, filterMuni, activeInsuranceOnly, sortField, sortDir]
+    [farmRows, filterMuni, filterFarmerId, activeInsuranceOnly, sortField, sortDir]
   );
 
   // Windowed slice of filteredFarms actually mounted as <tr>s -- see the
@@ -353,46 +411,141 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
     <div className="h-full flex flex-col overflow-hidden">
       {/* Top Panel – GIS Map */}
       <div style={{ height: `${topPanelH}%` }} className="flex flex-col overflow-hidden">
-        {/* Map toolbar */}
-        <div className="flex items-center gap-3 px-4 py-2 bg-card border-b border-border shrink-0">
-          <div className="flex items-center gap-2">
-            <MapIcon size={14} className="text-[#166534]" />
-            <span className="text-xs font-semibold">
-              {selectedBulletin ? `${selectedBulletin.typhoon_name} Impact Map` : "Spatial Impact Map"}
-            </span>
-          </div>
-          <div className="flex items-center gap-2 ml-auto">
-            <Filter size={11} className="text-muted-foreground" />
-            <span className="text-[11px] text-muted-foreground">Filter map:</span>
-            <div className="relative">
-              <input
-                type="text"
-                value={muniQuery}
-                placeholder={filterMuni === "All" ? "All municipalities" : filterMuni}
-                onChange={e => {
-                  const value = e.target.value;
-                  setMuniQuery(value);
-                  setShowMuniSuggestions(true);
-                  if (value.trim() === "") setFilterMuni("All");
-                }}
-                onFocus={() => setShowMuniSuggestions(true)}
-                onBlur={() => setShowMuniSuggestions(false)}
-                className="text-[11px] border border-border rounded px-2 py-1 bg-background w-40"
-              />
-              {showMuniSuggestions && muniSuggestions.length > 0 && (
-                <div className="absolute top-full left-0 mt-1 w-40 max-h-48 overflow-auto bg-card border border-border rounded-lg shadow-lg z-20">
-                  {muniSuggestions.map(m => (
-                    <button
-                      key={m}
-                      onMouseDown={() => selectMunicipality(m)}
-                      className={`w-full text-left px-2 py-1.5 text-[11px] hover:bg-muted transition-colors ${m === filterMuni ? "bg-[#166534]/10 font-semibold text-[#166534]" : ""}`}
-                    >
-                      {m}
-                    </button>
-                  ))}
-                </div>
-              )}
+        {/* Map toolbar removed entirely (2026-08-18, per Fabio's request) --
+            it only ever held the title, and the map canvas below now gets
+            that space instead. Search/filter/upload controls already live
+            in the Farm Records toolbar further down. */}
+        {showUploadDetails && uploadFailureDetails && (
+          <UploadFailuresModal failures={uploadFailureDetails} onClose={() => setShowUploadDetails(false)} />
+        )}
+
+        {/* Map canvas */}
+        <div className="flex-1 overflow-hidden p-2 relative">
+          <GISLeafletMap
+            farms={filteredFarms}
+            selectedFarmId={selectedFarmId}
+            onSelectFarm={setSelectedFarmId}
+            selectedBulletin={selectedBulletin}
+            darkMode={darkMode}
+            focusMunicipality={filterMuni === "All" ? null : filterMuni}
+            focusFarmerId={filterFarmerId}
+            activeOnly={activeInsuranceOnly}
+          />
+        </div>
+      </div>
+
+      {/* Resize Handle */}
+      <div
+        className="h-1.5 bg-border cursor-row-resize hover:bg-[#166534]/50 transition-colors shrink-0 flex items-center justify-center"
+        onMouseDown={e => {
+          const startY = e.clientY;
+          const startH = topPanelH;
+          const move = (mv: MouseEvent) => {
+            const delta = ((mv.clientY - startY) / window.innerHeight) * 100;
+            setTopPanelH(Math.max(30, Math.min(70, startH + delta)));
+          };
+          document.addEventListener("mousemove", move);
+          document.addEventListener("mouseup", () => document.removeEventListener("mousemove", move), { once:true });
+        }}
+      >
+        <div className="w-8 h-0.5 rounded bg-muted-foreground/40" />
+      </div>
+
+      {/* Bottom Panel – Farm Records Table */}
+      <div className="flex-1 flex overflow-hidden">
+        <div className="flex-1 flex flex-col overflow-hidden">
+          <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-card shrink-0 flex-wrap gap-y-1.5">
+            <div className="flex items-center gap-1.5">
+              <Table2 size={13} className="text-[#166534]" />
+              <span className="text-[11px] font-semibold">Farm Records</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">
+                {isLoadingFirstPage ? "Loading…" : isRefreshing ? "Refreshing…" : `${filteredFarms.length} records`}
+              </span>
+              {loadError && <span className="text-[10px] text-red-500">{loadError}</span>}
             </div>
+            <button
+              onClick={() => onActiveInsuranceOnlyChange(!activeInsuranceOnly)}
+              disabled={filterMuni === "All" && filterFarmerId == null}
+              title={filterMuni === "All" && filterFarmerId == null ? "Search a municipality or farmer to view inactive/all-status farms" : undefined}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors border disabled:opacity-50 disabled:cursor-not-allowed ${activeInsuranceOnly ? "bg-[#166534] text-white border-[#166534]" : "border-[#166534] text-[#166534] hover:bg-[#166534]/10"}`}
+            >
+              <ShieldCheck size={11} /> Active Insurance Only
+            </button>
+
+            {/* Municipality search -- moved down from the map toolbar
+                (2026-08-18) so both filters and the upload actions live
+                together with the table they affect, freeing the map's own
+                toolbar down to just its title. */}
+            <div className="flex items-center gap-1.5">
+              <Filter size={11} className="text-muted-foreground shrink-0" />
+              <div className="relative">
+                <input
+                  type="text"
+                  value={muniQuery}
+                  placeholder={filterMuni === "All" ? "Search municipality…" : filterMuni}
+                  onChange={e => {
+                    const value = e.target.value;
+                    setMuniQuery(value);
+                    setShowMuniSuggestions(true);
+                    if (value.trim() === "") onFilterMuniChange("All");
+                  }}
+                  onFocus={() => setShowMuniSuggestions(true)}
+                  onBlur={() => setShowMuniSuggestions(false)}
+                  className="text-[11px] border border-border rounded px-2 py-1 bg-background w-36"
+                />
+                {showMuniSuggestions && muniSuggestions.length > 0 && (
+                  <div className="absolute top-full left-0 mt-1 w-40 max-h-48 overflow-auto bg-card border border-border rounded-lg shadow-lg z-20">
+                    {muniSuggestions.map(m => (
+                      <button
+                        key={m}
+                        onMouseDown={() => selectMunicipality(m)}
+                        className={`w-full text-left px-2 py-1.5 text-[11px] hover:bg-muted transition-colors ${m === filterMuni ? "bg-[#166534]/10 font-semibold text-[#166534]" : ""}`}
+                      >
+                        {m}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Farmer search (2026-08-18, new) -- server-side/debounced,
+                see the effect near selectFarmer above. */}
+            <div className="flex items-center gap-1.5">
+              <User size={11} className="text-muted-foreground shrink-0" />
+              <div className="relative">
+                <input
+                  type="text"
+                  value={farmerQuery}
+                  placeholder="Search farmer…"
+                  onChange={e => {
+                    const value = e.target.value;
+                    setFarmerQuery(value);
+                    setShowFarmerSuggestions(true);
+                    if (value.trim() === "") onFilterFarmerIdChange(null);
+                  }}
+                  onFocus={() => setShowFarmerSuggestions(true)}
+                  onBlur={() => setShowFarmerSuggestions(false)}
+                  className="text-[11px] border border-border rounded px-2 py-1 bg-background w-36"
+                />
+                {showFarmerSuggestions && farmerSuggestions.length > 0 && (
+                  <div className="absolute top-full left-0 mt-1 w-48 max-h-48 overflow-auto bg-card border border-border rounded-lg shadow-lg z-20">
+                    {farmerSuggestions.map(f => (
+                      <button
+                        key={f.farmer_id}
+                        onMouseDown={() => selectFarmer(f.farmer_id, f.name)}
+                        className={`w-full text-left px-2 py-1.5 text-[11px] hover:bg-muted transition-colors ${f.farmer_id === filterFarmerId ? "bg-[#166534]/10 font-semibold text-[#166534]" : ""}`}
+                      >
+                        {f.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Upload actions -- moved down from the map toolbar (2026-08-18),
+                same reasoning as the municipality search above. */}
             <button
               onClick={() => csvInputRef.current?.click()}
               disabled={csvUploadProgress !== null}
@@ -436,61 +589,7 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
               hidden
               onChange={handleGpxFilesSelected}
             />
-          </div>
-        </div>
 
-        {showUploadDetails && uploadFailureDetails && (
-          <UploadFailuresModal failures={uploadFailureDetails} onClose={() => setShowUploadDetails(false)} />
-        )}
-
-        {/* Map canvas */}
-        <div className="flex-1 overflow-hidden p-2 relative">
-          <GISLeafletMap
-            farms={filteredFarms}
-            selectedFarmId={selectedFarmId}
-            onSelectFarm={setSelectedFarmId}
-            selectedBulletin={selectedBulletin}
-            darkMode={darkMode}
-            focusMunicipality={filterMuni === "All" ? null : filterMuni}
-          />
-        </div>
-      </div>
-
-      {/* Resize Handle */}
-      <div
-        className="h-1.5 bg-border cursor-row-resize hover:bg-[#166534]/50 transition-colors shrink-0 flex items-center justify-center"
-        onMouseDown={e => {
-          const startY = e.clientY;
-          const startH = topPanelH;
-          const move = (mv: MouseEvent) => {
-            const delta = ((mv.clientY - startY) / window.innerHeight) * 100;
-            setTopPanelH(Math.max(30, Math.min(70, startH + delta)));
-          };
-          document.addEventListener("mousemove", move);
-          document.addEventListener("mouseup", () => document.removeEventListener("mousemove", move), { once:true });
-        }}
-      >
-        <div className="w-8 h-0.5 rounded bg-muted-foreground/40" />
-      </div>
-
-      {/* Bottom Panel – Farm Records Table */}
-      <div className="flex-1 flex overflow-hidden">
-        <div className="flex-1 flex flex-col overflow-hidden">
-          <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-card shrink-0 flex-wrap gap-y-1">
-            <div className="flex items-center gap-1.5">
-              <Table2 size={13} className="text-[#166534]" />
-              <span className="text-[11px] font-semibold">Farm Records</span>
-              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">
-                {isLoadingFirstPage ? "Loading…" : isRefreshing ? "Refreshing…" : `${filteredFarms.length} records`}
-              </span>
-              {loadError && <span className="text-[10px] text-red-500">{loadError}</span>}
-            </div>
-            <button
-              onClick={() => setActiveInsuranceOnly(v => !v)}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors border ${activeInsuranceOnly ? "bg-[#166534] text-white border-[#166534]" : "border-[#166534] text-[#166534] hover:bg-[#166534]/10"}`}
-            >
-              <ShieldCheck size={11} /> Active Insurance Only
-            </button>
             <div className="ml-auto text-[9px] text-muted-foreground">
               Click a row to zoom the map to that farm
             </div>
@@ -558,7 +657,7 @@ export function SpatialAnalysisModule({ darkMode, selectedBulletin, farmsData }:
                     <td className="px-2.5 py-2 text-muted-foreground">{f.barangay ?? "—"}</td>
                     <td className="px-2.5 py-2 text-right">{f.area_size != null ? f.area_size.toFixed(2) : "—"}</td>
                     <td className="px-2.5 py-2">
-                      {f.location_geom
+                      {f.has_geometry
                         ? <span className="text-emerald-600 flex items-center gap-0.5"><CheckCircle2 size={10} />Yes</span>
                         : <span className="text-muted-foreground">No</span>
                       }

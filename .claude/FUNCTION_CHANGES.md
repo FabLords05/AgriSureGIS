@@ -4594,3 +4594,412 @@ expected behavior. Credit to Cristian Aton for this fix.
   dark-mode-per-user, and this logout-notice change) -- merging to
   `develop` and pushing next.
 
+---
+
+## [2026-08-18] - Farms On-Demand Pagination Stage 2: Split Polygons from List Data
+
+New branch `fabio/perf/farms-polygon-split`, off `develop` (which now
+contains Stage 1, commit `273532d`). Fabio asked what happens at
+100k-1M farm polygons -- the backend was already fine (keyset pagination,
+bbox-indexed `/farms/geometry`, materialized view), but the frontend's
+`useFarmsData.ts` was still proactively background-walking the *entire*
+farms table into browser memory + IndexedDB every session regardless of
+what was on screen, and `GISLeafletMap.tsx` still culled geometry
+client-side over that fully-loaded array instead of using the already-built
+bbox endpoint. Settled design: split "polygon or not" cleanly between the
+list endpoint (table) and the geometry endpoint (map); remove the
+background-walk entirely; and -- the stricter of two options discussed --
+no default "browse everything" view at all. The Farm Records table and map
+now stay empty until the user searches a specific municipality.
+
+### 1. File: `backend/app/api/farms.py`
+* **`list_farms()`** (`GET /farms/`): replaced the per-row `location_geom`
+  GeoJSON (`to_shape()`/`shapely.mapping()`) with a cheap
+  `has_geometry: bool` (`farm.location_geom is not None`) -- the only
+  consumer of geometry content here was a Yes/No "Surveyed" badge, nothing
+  ever drew a polygon with it. Skips real per-row CPU cost at 100k-1M scale.
+* **`get_farms_geometry()`** (`GET /farms/geometry`): added an optional
+  `farm_id: int | None` param that, when set, ignores
+  `bbox`/`active_only`/`municipality` and returns just that one farm's
+  geometry -- backs `GISLeafletMap.tsx`'s `FlyToSelectedFarm` for a farm
+  selected from a table row that's outside the map's current viewport
+  fetch. `bbox` is now optional (`Query(None)`), required only when
+  `farm_id` is absent.
+* **New: `list_farm_municipalities()`** (`GET /farms/municipalities`):
+  distinct municipality names from `tbl_admin_boundaries` (not
+  `tbl_farms`), `ORDER BY municipality`. Required fix, not optional --
+  without a default farm-list view, the search box's old suggestion source
+  (whatever farms happened to already be loaded) would be permanently empty
+  before a first search.
+
+### 2. File: `backend/app/api/assessments.py`
+* **`get_assessments_summary()`** (`GET /assessments/summary`): extended
+  the existing totals aggregate (built 2026-08-17, previously had no
+  frontend caller) with two more, each following the same
+  `DISTINCT ON`-latest-assessment-per-farm CTE pattern:
+  `growth_stage_distribution` (per-crop-stage farm counts across all farms,
+  `LEFT JOIN`, bucketed to `"Not Assessed"`) and `signal_breakdown`
+  (per-`wind_velocity` farm count + summed area, affected farms only).
+  Three separate `db.execute(text(...))` calls, one HTTP response --
+  replaces `MonitoringModule.tsx`'s Growth Stage pie and Farms by Signal
+  Number bar chart, which used to reduce over the full client-side `farms`
+  array. Deliberately not municipality-scoped -- a dashboard summary, not
+  something a user searches into.
+
+### 3. File: `frontend/src/lib/api.ts`
+* `Farm.location_geom` (`GeoJsonMultiPolygon | null`) replaced with
+  `Farm.has_geometry: boolean`.
+* **`getFarms()`**: added the missing `municipality` param (backend already
+  supported it).
+* New **`getFarmsGeometry()`** + `FarmGeometry`/`GetFarmsGeometryResult`
+  types, calling `GET /farms/geometry` (`bbox`/`farm_id`/`active_only`/
+  `municipality`).
+* New **`getAssessmentsSummary()`** + `AssessmentsSummary`/
+  `GrowthStageBucket`/`SignalBucket` types, calling the extended
+  `GET /assessments/summary`.
+* New **`getMunicipalities()`**, calling `GET /farms/municipalities`.
+
+### 4. File: `frontend/src/lib/useFarmsData.ts` (rewritten)
+* New signature: `useFarmsData({ enabled, activeOnly, municipality })`.
+  `municipality: string | null` now gates fetching entirely, not just what's
+  fetched -- `null` means no request is ever sent, `farms` stays `[]`.
+* Removed entirely: the two-fixed-phase (`active` -> `all`) model, the
+  self-pacing background loop (`runBackgroundLoop`/`sleep`/
+  `BACKGROUND_FETCH_DELAY_MS`) that walked the whole table to completion
+  regardless of scroll position, and the IndexedDB cache +
+  `agrisuregis_farms_progress_v3` localStorage progress marker built to
+  survive that walk across reloads. One-time cleanup of any pre-existing
+  browser state (`indexedDB.deleteDatabase("agrisuregis")`, both old
+  localStorage keys) runs on module load.
+* Kept: `mergeFarmsPage()` (farm_id-keyed merge, not replace), `PAGE_SIZE`,
+  keyset cursor semantics.
+* New behavior: page 1 fetches eagerly on mount/enable and on every
+  `activeOnly`/`municipality` change (cursor reset, old rows merged over);
+  every later page only via an explicit `requestMore()` call (unchanged
+  `IntersectionObserver` scroll trigger in `SpatialAnalysisModule.tsx`).
+  `refresh()` (`start()` internally) is a no-op while `municipality` is
+  `null`.
+
+### 5. File: `frontend/src/app/App.tsx`
+* `activeInsuranceOnly` (default `true`) and `filterMuni` (default `"All"`)
+  lifted up from `SpatialAnalysisModule` into controlled state here, since
+  `useFarmsData` stays owned here (shared/eager, and `SpatialAnalysisModule`
+  is conditionally mounted -- moving the hook down would drop progress on
+  every tab switch). `useFarmsData({ enabled: !!currentUser, activeOnly:
+  activeInsuranceOnly, municipality: filterMuni === "All" ? null :
+  filterMuni })`.
+* `MonitoringModule` no longer receives a `farmsData` prop.
+  `SpatialAnalysisModule` gains `activeInsuranceOnly`/
+  `onActiveInsuranceOnlyChange`/`filterMuni`/`onFilterMuniChange`.
+
+### 6. File: `frontend/src/app/components/MonitoringModule.tsx`
+* Dropped the `FarmsData` prop/import entirely. Removed `farms`,
+  `assessments` state + its `getAssessments()` fetch, `assessmentByFarmId`,
+  the local `FarmRow` type, `farmRows`, `affectedFarmRows` -- all dead once
+  stats moved server-side (also removes an extra unpaginated
+  `GET /assessments/` call this module was making just to build
+  `assessmentByFarmId`).
+* `totalFarms`/`affectedFarms`/`totalArea`/`totalIndemnity`/
+  `growthStageData`/`signalChartData` now derive from one
+  `getAssessmentsSummary()` call instead of reducing over `farms`. Stat-card
+  and chart JSX unchanged -- same variable names, new source.
+
+### 7. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* `activeInsuranceOnly`/`filterMuni` are now props, not local state.
+* `municipalities`/`muniSuggestions` no longer derive from `farmRows`
+  (would be permanently empty pre-search under the new gating) -- new
+  `allMunicipalities` state fetched once via `getMunicipalities()`, filtered
+  by `muniQuery` for suggestions exactly as before.
+* New empty state: while `filterMuni === "All"`, the table area shows a
+  "Search a municipality above to view farm records" prompt instead of an
+  empty/loading table; the record-count badge shows "No municipality
+  selected".
+* "Active Insurance Only" toggle: `disabled={filterMuni === "All"}` with an
+  explanatory tooltip -- turning off active-insurance scope only makes
+  sense once a municipality narrows what's being browsed.
+* `f.location_geom` Yes/No badge check -> `f.has_geometry`.
+* `<GISLeafletMap>` now also receives `activeOnly={activeInsuranceOnly}`.
+
+### 8. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* New `activeOnly: boolean` prop.
+* Removed client-side geometry culling built from the `farms` prop
+  (`surveyedFarms`-as-render-source, `bboxCacheRef`, `surveyedBBoxByFarmId`,
+  `visibleSurveyedFarms`) -- `farms` no longer carries geometry at all.
+  `computeGeoJsonBBox`/`bboxIntersects`/`BBox`/`SimpleBounds` kept, now
+  applied to the new fetched geometry cache instead.
+* New `geomCache: Map<farm_id, GeoJsonMultiPolygon>` state, refetched via
+  `getFarmsGeometry({ bbox, active_only, municipality })` on
+  `moveend`/`zoomend` (existing `MapBoundsWatcher`), reset (not merged)
+  whenever `activeOnly`/`focusMunicipality` change. Render loop iterates the
+  viewport-culled subset of `geomCache` directly (no longer joined against
+  farm attributes for rendering -- geometry and attributes now arrive
+  independently).
+* **`FlyToSelectedFarm()`**: checks `geomCache` first; if the selected farm
+  `has_geometry` but isn't cached (out of viewport), calls
+  `getFarmsGeometry({ farm_id })` directly, reports the result back via a
+  new `onGeometryFetched` callback (so it's immediately render-eligible too,
+  not just used for the flight), then flies to its bounds. Falls back to
+  `approxPos`/`flyTo` unchanged when the farm has no geometry.
+* `unsurveyedFarms` filter and the Selected Farm Info Panel's
+  "Surveyed"/"Not yet uploaded" check both switched from `f.location_geom`
+  to `f.has_geometry`.
+
+### Status / Next Steps
+* Implementation complete on this branch; not yet verified by Fabio in the
+  running app (backend venv/DB and frontend npm are his environment per
+  the Python/DB/Frontend execution rules -- verification steps are listed
+  in the approved plan at
+  `/home/fabio/.claude/plans/rippling-launching-pond.md`).
+* Scale-testing note: `backend/seed_100k_farms.py` exercises `GET /farms/`
+  pagination at real scale once a search lands on a padded municipality,
+  but adds no `location_geom`, so it doesn't exercise
+  `GET /farms/geometry`'s `ST_Intersects` query at scale -- that stays
+  bounded by however many farms in that municipality have a real GPX
+  boundary today.
+
+---
+
+## [2026-08-18] - Stage 2 Correction: Restore Default Active-Insurance View
+
+Fabio tested the above and reported the default screen showed nothing --
+the "no default view at all" decision went further than intended. Corrected
+gating: the default view (no municipality searched) should behave like
+before the redesign -- show active-insurance farms across every
+municipality. Only turning Active Insurance Only *off* (to browse
+inactive/all-status farms) should require a specific municipality first,
+since "every farm, active or not, no municipality scope" is the one
+combination that's actually unbounded at 100k-1M scale -- everything else,
+including the default, is fine to fetch outright.
+
+### 1. File: `frontend/src/lib/useFarmsData.ts`
+* Gating condition changed from "fetch only when `municipality != null`" to
+  "fetch for every `(activeOnly, municipality)` combination except
+  `activeOnly: false, municipality: null`" -- in both `start()` and the
+  mount/filter-change effect. The default `activeOnly: true,
+  municipality: null` now fetches normally, same as the original
+  pre-redesign default (bounded by however many farms have active
+  insurance).
+
+### 2. File: `frontend/src/app/App.tsx`
+* Re-added a guard effect: if `filterMuni` reverts to `"All"` while
+  `activeInsuranceOnly` is still `false` (e.g. the user clears the search
+  box after browsing one municipality's inactive farms), it's forced back
+  to `true` -- keeps the app out of the one blocked combination rather than
+  leaving the table/map stuck empty.
+
+### 3. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* Removed the "no municipality selected" empty-state prompt and record-count
+  badge text added in the prior entry -- the table now renders normally
+  (loading state, then rows) for the default view again, same as before
+  this stage's first pass. "Active Insurance Only" toggle's disabled
+  tooltip reworded to reflect that it's gating the *inactive-farms* browse
+  specifically, not farm records in general.
+
+### 4. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* Geometry-fetch effect gated the same way as `useFarmsData.ts` --
+  `!activeOnly && !focusMunicipality` skips the fetch; every other
+  combination, including the default, fetches viewport geometry normally.
+
+### Status / Next Steps
+* Fabio confirmed the default view now shows active-insurance farms again,
+  and the municipality-gated inactive-farm browse works as designed.
+
+---
+
+## [2026-08-18] - Farmer Search + Farm Records Toolbar Consolidation
+
+Fabio asked for a farmer search, then requested it live in the Farm Records
+toolbar alongside the (moved-down) municipality search, and asked for the
+two upload buttons to move there too so the map's own toolbar clears down
+to just its title, for more map visibility.
+
+Farmer names can't be preloaded whole for a client-side type-ahead the way
+municipalities are -- `tbl_farmers_profile` scales with the farm count
+(`seed_100k_farms.py` adds one new synthetic farmer per new farm) -- so
+this is a debounced, server-side search instead. `filterFarmerId` scopes
+exactly like `filterMuni` (either one alone allows Active Insurance Only to
+be turned off) and combines with it (both, either, or neither), per Fabio's
+explicit direction that the two filters be independent and combinable.
+
+### 1. File: `backend/app/core/farms_cache.py`
+* `_cache_key()`/`get_cached_farms_page()`/`cache_farms_page()` all gained
+  a `farmer_id: int | None = None` param, folded into the Redis cache key
+  -- otherwise a farmer-scoped request and an unscoped one at the same
+  `limit`/`after_id`/`active_only`/`municipality` would collide.
+
+### 2. File: `backend/app/api/farms.py`
+* **`list_farms()`** (`GET /farms/`): new `farmer_id: int | None` query
+  param, an exact `Farm.farmer_id == farmer_id` filter -- combines with
+  `active_only`/`municipality` rather than replacing them.
+* **`get_farms_geometry()`** (`GET /farms/geometry`): new `farmer_id`
+  param with two roles depending on whether `bbox` is also given: combined
+  with a real `bbox` request it's just another AND'd filter on the normal
+  viewport query; given alone (no `bbox`, no `farm_id`) it behaves like
+  `farm_id`'s existing bypass -- every farm belonging to that farmer,
+  regardless of viewport/active_only/municipality -- backing
+  `GISLeafletMap.tsx`'s new fly-to-farmer.
+* **New: `search_farmers()`** (`GET /farms/farmers?q=...`): farmer name
+  search backing the new search box. Matches
+  `first_name || ' ' || last_name` as one concatenated string (single
+  `ILIKE '%q%'`, via `func.concat`) rather than checking first/last
+  separately -- covers a query that's just a first name, just a last name,
+  or both, in one expression. Capped at 20 results, ordered by last then
+  first name.
+
+### 3. File: `frontend/src/lib/api.ts`
+* `getFarms()`/`getFarmsGeometry()` both gained an optional `farmer_id`
+  param.
+* New `FarmerSearchResult` type + `searchFarmers(q)` calling
+  `GET /farms/farmers`.
+
+### 4. File: `frontend/src/lib/useFarmsData.ts`
+* New `farmerId: number | null` param, alongside `activeOnly`/
+  `municipality`. The one combination the hook refuses to fetch for
+  widened from `activeOnly: false, municipality: null` to `activeOnly:
+  false, municipality: null, farmerId: null` -- a real `farmerId` scopes
+  exactly like a real `municipality` (a specific farmer's own farms are
+  always a small, bounded set).
+
+### 5. File: `frontend/src/app/App.tsx`
+* New `filterFarmerId` state (default `null`), passed into `useFarmsData`
+  and down to `SpatialAnalysisModule`. The existing "force Active Insurance
+  Only back on" guard effect now also checks `filterFarmerId == null`, not
+  just `filterMuni === "All"` -- clearing either scope alone doesn't
+  trigger it if the other is still set.
+
+### 6. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* New farmer search box: `farmerQuery`/`showFarmerSuggestions`/
+  `farmerSuggestions` state, a 300ms-debounced effect calling
+  `searchFarmers()` (discards a stale response via a bumped sequence ref if
+  a newer keystroke has already superseded it), `selectFarmer()`. Mirrors
+  the municipality box's interaction pattern (type-ahead dropdown, clearing
+  the input resets the filter) but backed by a live query instead of a
+  preloaded list.
+* `filteredFarms` also filters by `filterFarmerId` now; "Active Insurance
+  Only" toggle's `disabled`/tooltip condition extended to
+  `filterMuni === "All" && filterFarmerId == null`.
+* **Toolbar consolidation** (per Fabio's explicit request): the map
+  toolbar (top panel) is stripped down to just its title/icon. The
+  municipality search box and the Upload CSV/Upload GPX buttons (+ their
+  hidden file inputs) all move down into the Farm Records toolbar (bottom
+  panel), alongside the new farmer search box -- the row already had
+  `flex-wrap`, so it wraps gracefully at narrow widths. `<GISLeafletMap>`
+  gains `focusFarmerId={filterFarmerId}`.
+
+### 7. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* New `focusFarmerId?: number | null` prop.
+* `FlyToSelectedFarm`'s `onGeometryFetched` callback generalized from a
+  single `(farmId, geom)` pair to a batch `(entries: GeomEntry[])`, shared
+  with the new `FlyToFarmer` below via a new `mergeGeomEntries()` helper
+  (`useCallback`-wrapped, merges into `geomCache`).
+* **New `FlyToFarmer()`**: same idea as `FlyToMunicipality`, but there's no
+  static boundary outline for a farmer -- resolves that farmer's geometry
+  directly (`getFarmsGeometry({ farmer_id })`, bypassing viewport/
+  active_only/municipality) and flies to the combined bounds over all of
+  it; falls back to the first matching farm's approximate marker position
+  if the farmer has no surveyed farms at all.
+* `geomCache`'s reset effect and the viewport bbox-fetch effect (and its
+  gating condition) both extended to include `focusFarmerId`, mirroring
+  `focusMunicipality`.
+
+### Status / Next Steps
+* Fabio confirmed the toolbar consolidation and farmer search both work as
+  expected.
+
+---
+
+## [2026-08-18] - Remove Map Toolbar Entirely
+
+Fabio: the map toolbar (by this point just a title, everything else having
+moved down to the Farm Records toolbar per the prior entry) was still
+taking up vertical space the map itself could use -- asked to remove it
+outright.
+
+### File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* Deleted the map toolbar `<div>` (icon + `"{typhoon} Impact Map"` /
+  `"Spatial Impact Map"` title) entirely -- the map canvas `<div>`
+  (`flex-1`) now fills the whole top panel on its own. Dropped the
+  now-unused `Map as MapIcon` import.
+
+---
+
+## [2026-08-18] - Collapsible Main Header
+
+Fabio: "make this panel like on word that it can be hide," pointing at the
+main nav header (logo/tabs/status/icons) -- same idea as Word's
+ribbon-collapse toggle. Confirmed interaction: a toggle button collapses
+the whole header down to a thin strip with just that button, click again
+to bring it back (not auto-hide-on-idle).
+
+### File: `frontend/src/app/components/Header.tsx`
+* New `collapsed` state (component-local, not persisted -- a per-session
+  convenience, not a saved preference like `darkMode`). `false` renders the
+  header exactly as before, plus a new `ChevronUp` "Hide menu" button
+  appended to the end of Right Controls. `true` short-circuits the whole
+  render to a `h-5` strip (same background color as the real header, so it
+  reads as "the header, collapsed" rather than a different element) holding
+  a centered `ChevronDown` "Show menu" button.
+* No `App.tsx` changes needed -- `<main>` is already `flex-1` inside a
+  `flex flex-col` shell, so it automatically expands to fill the space the
+  collapsed header frees up.
+
+---
+
+## [2026-08-18] - Header Hide Mode: Manual or Auto, Set from Account Settings
+
+Fabio: "give user option for auto hide or manual hide in the settings" --
+turns the prior entry's manual-only collapse into a per-user choice between
+the existing manual toggle and a new auto-hide-on-idle/reveal-on-hover mode,
+set from Account Settings. Client-only preference (like `darkMode`), not
+part of `SystemUser`/`updateMe()` -- there's no backend preferences field
+to put it in, and it doesn't need to sync across devices.
+
+### 1. File: `frontend/src/lib/headerHideModeStorage.ts` (new)
+* `HeaderHideMode = "manual" | "auto"` + `loadPersistedHeaderHideMode(email)`/
+  `persistHeaderHideMode(email, mode)` -- exact same per-user
+  localStorage-keyed-by-email pattern as `themeStorage.ts`'s dark-mode
+  persistence, mirrored file-for-file (private `keyFor()`, try/catch
+  fail-safes, default `"manual"` on any read failure).
+
+### 2. File: `frontend/src/app/components/Header.tsx`
+* New required `hideMode: HeaderHideMode` prop.
+* The old single `collapsed` boolean is now two independent pieces of
+  state, one per mode, so switching `hideMode` never has to reconcile one
+  against the other: `collapsed` (manual, click-driven, unchanged from the
+  prior entry) and `autoVisible` (auto, driven by a `setTimeout` +
+  `AUTO_HIDE_DELAY_MS = 900`). `isHidden = hideMode === "manual" ? collapsed : !autoVisible`
+  is the single value the render branches on.
+* Auto mode: `<header>` gets `onMouseEnter`/`onMouseLeave` (cancel/schedule
+  the hide timer); the collapsed strip gets `onMouseEnter` too (reveal on
+  hover, no click needed) instead of manual's `onClick`. A `useEffect`
+  keyed on `hideMode` re-arms auto-hide on mount/mode-switch (shows the
+  header, then schedules the same hide-after-a-pause used on mouseLeave) --
+  covers landing directly in "auto" mode or switching into it while the
+  cursor isn't already over the header to trigger a real `mouseLeave`.
+* The manual `ChevronUp` "Hide menu" button now only renders when
+  `hideMode === "manual"` -- "auto" hides itself, no button needed.
+
+### 3. File: `frontend/src/app/App.tsx`
+* New `headerHideMode` state, lazy-initialized from
+  `loadPersistedHeaderHideMode()` exactly like `darkMode`, re-read in
+  `handleLogin()` alongside it. New `handleHeaderHideModeChange(mode)`
+  updates state and persists in one call -- passed to
+  `AccountSettingsModule` as `onHeaderHideModeChange`. `headerHideMode`
+  itself passed to `<Header>` as `hideMode`.
+
+### 4. File: `frontend/src/app/components/AccountSettingsModule.tsx`
+* New props `headerHideMode`/`onHeaderHideModeChange` (controlled from
+  App.tsx, not local state -- this screen's other fields all round-trip
+  through `updateMe()`/`SystemUser`, this one doesn't).
+* New "Display Preferences" card (its own card, deliberately separate from
+  "Profile & Preferences" -- no Save button, since the change applies
+  immediately via `onHeaderHideModeChange` on `<select>` change, unlike the
+  Profile card's dirty-check-then-Save flow) with a "Header Visibility"
+  `<select>` (same visual pattern as the existing Session Timeout field):
+  "Manual -- click a button to hide/show" / "Auto-hide -- hides itself,
+  hover to reveal".
+
+### Status / Next Steps
+* Implementation complete on this branch; not yet verified by Fabio in the
+  running app.
+
