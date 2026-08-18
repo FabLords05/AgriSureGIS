@@ -5003,3 +5003,39 @@ to put it in, and it doesn't need to sync across devices.
 * Implementation complete on this branch; not yet verified by Fabio in the
   running app.
 
+---
+
+## [2026-08-18] - Tab-Key Module Switching
+
+Fabio: make the module tabs (Monitoring/Spatial/Assessment/Admin/Users/
+Backup/Activity/Account) navigable with the Tab key. Clarified scope: plain
+`Tab` (not Ctrl+Tab -- browsers/OS reserve that combo for real tab/window
+switching, so a page's `keydown` handler never sees it), only while focus is
+already on one of the module tab buttons (not a global app-wide shortcut),
+wrapping around at both ends.
+
+### File: `frontend/src/app/components/Header.tsx`
+* New `tabRefs` (`useRef<Array<HTMLButtonElement | null>>`), one entry per
+  rendered module tab, set via a callback ref on each `<button>`.
+* New **`handleTabKeyDown(e, idx)`**: on `Tab`/`Shift+Tab`, `preventDefault`s
+  the browser's default focus-move, computes the next/previous index
+  (wrapping via `% modules.length`), calls the existing `onModuleChange()`
+  with that module's id, and moves DOM focus onto its button ref -- so
+  focus and the active module stay in sync as you tab through. Wired via
+  `onKeyDown` on each tab button; scoped to those buttons only, so `Tab`
+  behavior everywhere else in the app (search boxes, form fields, modals)
+  is untouched.
+
+### Status / Next Steps
+* Deliberately diverges from the ARIA tabs authoring pattern (which
+  reserves `Tab` for leaving the tablist and uses arrow keys to move
+  between tabs) per Fabio's explicit request -- flagged to him before
+  implementing, confirmed as intended.
+* Fabio reported Tab "doesn't do its job" on first test. Likely cause:
+  the handler only fires when a tab button already has DOM focus, but
+  clicking a `<button>` doesn't reliably grant it focus across browsers
+  -- Chrome does, Firefox and Safari (macOS) don't by default. Fixed by
+  having `onClick` explicitly call `e.currentTarget.focus()` in addition
+  to `onModuleChange()`, so a click always leaves the clicked tab
+  focused regardless of browser. **Not yet re-verified by Fabio.**
+
