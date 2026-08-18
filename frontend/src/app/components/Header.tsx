@@ -106,6 +106,24 @@ export function Header({ activeModule, onModuleChange, darkMode, onToggleDark, n
   const isHidden = hideMode === "manual" ? collapsed : !autoVisible;
   const isAdmin = currentUser?.role === "System Administrator";
   const modules = [...(isAdmin ? ADMIN_MODULES : SPECIALIST_MODULES), ACCOUNT_MODULE];
+
+  // Tab-key module switching (2026-08-18, per Fabio's request): while focus
+  // is on one of the module tab buttons below, Tab/Shift+Tab moves the
+  // active module to the next/previous one and carries focus with it,
+  // instead of the browser's default "move focus to the next focusable
+  // element on the page" behavior. Wraps around at both ends. Scoped to the
+  // tab buttons themselves (via onKeyDown on each button) so it never
+  // touches Tab behavior anywhere else in the app -- typing in a search box
+  // or form field is unaffected.
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const handleTabKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>, idx: number) => {
+    if (e.key !== "Tab") return;
+    e.preventDefault();
+    const nextIdx = (idx + (e.shiftKey ? -1 : 1) + modules.length) % modules.length;
+    onModuleChange(modules[nextIdx].id);
+    tabRefs.current[nextIdx]?.focus();
+  };
+
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshDone, setRefreshDone] = useState(false);
   const unread = notifications.filter(n => !n.read).length;
@@ -161,10 +179,12 @@ export function Header({ activeModule, onModuleChange, darkMode, onToggleDark, n
 
       {/* Module Tabs */}
       <nav className="flex items-center h-full flex-1 px-1">
-        {modules.map(m => (
+        {modules.map((m, idx) => (
           <button
             key={m.id}
-            onClick={() => onModuleChange(m.id)}
+            ref={el => { tabRefs.current[idx] = el; }}
+            onClick={e => { onModuleChange(m.id); e.currentTarget.focus(); }}
+            onKeyDown={e => handleTabKeyDown(e, idx)}
             className="relative h-full flex items-center gap-1.5 px-4 text-[12px] transition-all"
             style={{
               color: activeModule === m.id ? "#ffffff" : "rgba(255,255,255,0.65)",
