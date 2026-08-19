@@ -201,7 +201,13 @@ CREATE TABLE tbl_tcb_signals (
     tcb_id INT REFERENCES tbl_tropical_cyclone_bulletins(tcb_id) ON DELETE CASCADE,
     signal_level INT NOT NULL,
     island_group INT NOT NULL,
-    area_name VARCHAR(100) NOT NULL
+    area_name VARCHAR(100) NOT NULL,
+    -- The AdminBoundary province this signal was matched against (see
+    -- backend/migrations/2026-08-20_tcb_signal_province.sql). Nullable --
+    -- lets exposure_calculator.py key boundary lookups on (province,
+    -- municipality) instead of municipality alone, which collides once
+    -- AdminBoundary covers the whole country (nationwide PSGC expansion).
+    province VARCHAR(100)
 );
 
 CREATE TABLE tbl_area_exposure_summary (

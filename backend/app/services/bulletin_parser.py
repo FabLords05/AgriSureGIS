@@ -345,39 +345,6 @@ class BulletinParserService:
 
         return typhoon
 
-    @staticmethod
-    def _split_named_areas(cell_text: str) -> list[str]:
-        """
-        Best-effort split of a PAGASA TCWS cell's free-text area list into
-        individual province/region-level phrases — used for Luzon/Visayas,
-        which have no AdminBoundary data to validate matches against (unlike
-        Mindanao). Strips parenthetical municipality detail (e.g. "the
-        northern portion of Cagayan (Santa Ana, Gonzaga, ...)" becomes "the
-        northern portion of Cagayan") since keeping it can run well past
-        TcbSignal.area_name's varchar(100) limit, then splits the remainder
-        on commas. Real PAGASA phrasing confirmed against
-        docs/TCB#11_kiyapo.pdf.
-
-        Every cell also carries a fixed boilerplate block after the area list
-        itself ("Warning lead time: ...", "Range of wind speeds: ...",
-        "Potential impacts of winds: ...") which the Mindanao path never had
-        to worry about (it never string-matches a real municipality, so it
-        was silently dropped there) but must be cut off here before splitting,
-        or it shows up as bogus "area" entries — confirmed against a live
-        PAGASA scrape of this same sample bulletin.
-        """
-        cell_text = re.split(r"Warning lead time", cell_text, maxsplit=1, flags=re.IGNORECASE)[0]
-        no_parens = re.sub(r"\([^)]*\)", "", cell_text)
-        no_parens = re.sub(r"\s+", " ", no_parens).strip()
-        areas: list[str] = []
-        for part in no_parens.split(","):
-            area = part.strip()
-            area = re.sub(r"^(and|including)\s+", "", area, flags=re.IGNORECASE)
-            area = area.rstrip(".").strip()
-            if area and area not in areas:
-                areas.append(area[:100])
-        return areas
-
     @classmethod
     def save_bulletin_to_db(cls, parsed_data: dict, db: Session) -> TropicalCycloneBulletin:
         """
@@ -412,48 +379,36 @@ class BulletinParserService:
             db.refresh(bulletin)
 
             # 2. Parse and seed tcb_signals
-            # Load boundaries to check for affected provinces & municipalities
+            # Load boundaries to check for affected provinces & municipalities.
+            # As of the nationwide PSGC expansion (2026-08-20), AdminBoundary
+            # covers the whole country, not just Region X + Caraga -- so this
+            # precise province+municipality match, previously reserved for
+            # Mindanao (island_group=2) only, now runs for every island group.
+            # A bulletin cell that only names a province/region without a
+            # specific municipality yields no matched rows for that group,
+            # same as an unmatched area always has -- no free-text fallback.
             boundaries = db.query(AdminBoundary).all()
 
             for level, island_texts in parsed_data["signals"].items():
-                # Mindanao (island_group=2): match against seeded Region X
-                # AdminBoundary rows -- unchanged from before, since this is
-                # what feeds exposure/indemnity calculations and must stay
-                # precise, not best-effort.
-                mindanao_text = island_texts.get(2, "")
-                if mindanao_text:
+                for group, cell_text in island_texts.items():
+                    if not cell_text:
+                        continue
                     seen_areas = set()
                     for b in boundaries:
-                        prov_match = b.province.lower() in mindanao_text.lower()
-                        mun_match = b.municipality.lower() in mindanao_text.lower()
+                        prov_match = b.province.lower() in cell_text.lower()
+                        mun_match = b.municipality.lower() in cell_text.lower()
 
                         if prov_match and mun_match:
-                            area_key = (level, b.municipality)
+                            area_key = (level, group, b.municipality)
                             if area_key not in seen_areas:
                                 seen_areas.add(area_key)
                                 db.add(TcbSignal(
                                     tcb_id=bulletin.tcb_id,
                                     signal_level=level,
-                                    island_group=2,
+                                    island_group=group,
                                     area_name=b.municipality,
+                                    province=b.province,
                                 ))
-
-                # Luzon/Visayas: no AdminBoundary data exists to validate
-                # against outside Region X -- informational only (a GIS
-                # specialist seeing the storm's full national footprint), so
-                # this is a best-effort split into province/region-level
-                # phrases rather than a validated municipality match.
-                for group in (0, 1):
-                    cell_text = island_texts.get(group, "")
-                    if not cell_text:
-                        continue
-                    for area_name in cls._split_named_areas(cell_text):
-                        db.add(TcbSignal(
-                            tcb_id=bulletin.tcb_id,
-                            signal_level=level,
-                            island_group=group,
-                            area_name=area_name,
-                        ))
             db.commit()
             
         return bulletin

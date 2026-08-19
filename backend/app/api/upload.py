@@ -29,7 +29,7 @@ router = APIRouter(prefix="/api/upload", tags=["upload"], dependencies=[Depends(
 
 logger = logging.getLogger(__name__)
 
-_PSGC_LOOKUP_PATH = Path(__file__).resolve().parent.parent / "data" / "psgc_region10_boundaries.csv"
+_PSGC_LOOKUP_PATH = Path(__file__).resolve().parent.parent / "data" / "psgc_nationwide_boundaries.csv"
 
 # Batch size for the prefetch WHERE ... IN (...) queries below -- keeps a single
 # query's parameter list bounded even for a very large CSV, instead of one
@@ -78,14 +78,14 @@ _TRAILING_PARENTHETICAL_RE = re.compile(r"\s*\([^)]*\)\s*$")
 def _strip_trailing_parenthetical(name: str) -> str:
     """Drops a trailing '(...)' qualifier, e.g. 'POBLACION (TUBOD)' -> 'POBLACION',
     'DIAZ (ROMUALDEZ)' -> 'DIAZ'. Only ever tried as a fallback after an exact match
-    already failed -- confirmed against the full psgc_region10_boundaries.csv that no
+    already failed -- confirmed against the full psgc_nationwide_boundaries.csv that no
     municipality has two distinct barangays whose only difference is such a suffix,
     so this can't accidentally collapse two real places into one."""
     return _TRAILING_PARENTHETICAL_RE.sub("", name).strip()
 
 
 def _municipality_alias_variants(municipality: str) -> list[str]:
-    """Real PABS exports and psgc_region10_boundaries.csv disagree on a couple of
+    """Real PABS exports and psgc_nationwide_boundaries.csv disagree on a couple of
     common PH municipality-naming conventions ('Surigao City' vs 'City of Surigao',
     'Sta. Josefa' vs 'Santa Josefa') -- generate the alternate spelling(s) so a
     lookup miss on the literal name gets another shot before being reported as a
@@ -318,8 +318,9 @@ def _prefetch_caches(prepared_rows: list[tuple[int, dict[str, Any]]], db: Sessio
     """
     caches = _IngestCaches()
 
-    # tbl_admin_boundaries is small (bounded by the number of barangays in one
-    # PSGC region, ~2-3k rows) -- cheaper to load it whole once than to build a
+    # tbl_admin_boundaries now covers the whole country (~42k barangay-level
+    # rows as of the nationwide PSGC expansion, 2026-08-20) -- still cheaper to
+    # load it whole once per upload (a few MB, one query) than to build a
     # composite IN(...) filter per distinct (province, municipality, barangay)
     # combination in the file.
     for boundary in db.query(models.AdminBoundary).all():
@@ -384,7 +385,7 @@ def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> 
             if psgc_code is None:
                 raise ValueError(
                     f"No PSGC code on file for {boundary_key}. Add it to "
-                    "app/data/psgc_region10_boundaries.csv before ingesting this row."
+                    "app/data/psgc_nationwide_boundaries.csv before ingesting this row."
                 )
             boundary = models.AdminBoundary(psgc_code=psgc_code, **payload["boundary"])
             db.add(boundary)

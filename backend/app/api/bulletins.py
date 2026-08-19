@@ -226,7 +226,8 @@ def get_bulletin_signals(tcb_id: int, db: Session = Depends(get_db)):
             "signal_id": s.signal_id,
             "signal_level": s.signal_level,
             "island_group": s.island_group,
-            "area_name": s.area_name
+            "area_name": s.area_name,
+            "province": s.province,
         })
     return results
 

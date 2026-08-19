@@ -21,11 +21,14 @@ def run_setup():
 
     # --- 1. SEED BOUNDARIES ---
     print("Ingesting Admin Boundaries...")
-    # Real PSGC codes for Region X (Northern Mindanao), sourced from the PSA/NAMRIA-derived
-    # 2023 PSGC dataset (via github.com/faeldon/philippines-json-maps). Covers every barangay
-    # in Bukidnon (22 municipalities) and Misamis Oriental (25 municipalities) — the two
-    # provinces pabs_results.csv currently has farms in.
-    psgc_lookup = pd.read_csv("app/data/psgc_region10_boundaries.csv")
+    # Nationwide PSGC codes (expanded 2026-08-20 from the original Region X + Caraga
+    # subset, for testing whether typhoon-signal exposure calculation works when fed
+    # real data outside the insured area -- see .claude/FUNCTION_CHANGES.md). Sourced
+    # from the official PSA PSGC Publication via backend/scripts/convert_psgc_publication.py.
+    # Covers every barangay in the country, not just the provinces pabs_results.csv
+    # currently has farms in -- a row for any (province, municipality, barangay) combo
+    # actually present in pabs_results.csv is guaranteed to resolve.
+    psgc_lookup = pd.read_csv("app/data/psgc_nationwide_boundaries.csv")
     psgc_lookup = psgc_lookup.set_index(['province', 'municipality', 'barangay'])['psgc_code']
 
     boundaries = df[['Province', 'Municipality', 'Barangay']].drop_duplicates()
@@ -41,7 +44,7 @@ def run_setup():
             if key not in psgc_lookup.index:
                 raise ValueError(
                     f"No PSGC code on file for {key}. Add it to "
-                    "app/data/psgc_region10_boundaries.csv before seeding."
+                    "app/data/psgc_nationwide_boundaries.csv before seeding."
                 )
             psgc_code = str(psgc_lookup.loc[key])
             cur.execute("""

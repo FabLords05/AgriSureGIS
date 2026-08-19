@@ -241,6 +241,14 @@ class TcbSignal(Base):
     signal_level = Column(Integer, nullable=False)
     island_group = Column(Integer, nullable=False)
     area_name = Column(String(100), nullable=False)
+    # The AdminBoundary province this signal was matched against (see
+    # backend/migrations/2026-08-20_tcb_signal_province.sql). Nullable --
+    # rows saved before the nationwide PSGC expansion (2026-08-20) never had
+    # this populated. Exists so exposure_calculator.py can key boundary
+    # lookups on (province, municipality) instead of municipality alone,
+    # which collides once AdminBoundary covers the whole country (e.g.
+    # multiple "Santa Cruz" across different provinces).
+    province = Column(String(100), nullable=True)
 
     bulletin = relationship("TropicalCycloneBulletin")
 

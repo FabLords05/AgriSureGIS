@@ -5039,3 +5039,188 @@ wrapping around at both ends.
   to `onModuleChange()`, so a click always leaves the clicked tab
   focused regardless of browser. **Not yet re-verified by Fabio.**
 
+---
+
+## [2026-08-20] - CSV/GPX Upload Notifications Survive Module Switching
+
+Fabio: "i want to have notification for ingestion if it was done cause
+there is no way to tell user is it done or not." Root cause: CSV/GPX
+upload progress state and the handlers driving it
+(`handleCsvFileSelected`/`handleGpxFilesSelected`, plus the CSV job-status
+poll and the GPX upload-failures modal) lived as local state inside
+`SpatialAnalysisModule`, which is conditionally mounted only while
+`activeModule === "spatial"` (see App.tsx). Switching to another module tab
+before an upload finished unmounted the component running the poll loop,
+so its completion toast could be silently missed with no record anywhere
+that the upload had even happened -- unlike bulletin-parse notifications,
+which already post to both a toast *and* the persistent notification bell.
+
+### 1. File: `frontend/src/app/App.tsx`
+* New state: `csvUploadProgress`, `gpxUploadProgress`,
+  `uploadFailureDetails`, `showUploadDetails` -- moved up from
+  `SpatialAnalysisModule`, same reasoning already documented there for why
+  `useFarmsData` lives here instead of locally.
+* New **`handleCsvFileSelected()`** / **`handleGpxFilesSelected()`** --
+  moved up verbatim from `SpatialAnalysisModule` (same polling/upload
+  logic, `farmsData.refresh()` call unchanged), with one addition: on
+  completion (success, partial failure, or error) each now also pushes an
+  `AppNotification` into the existing notification-bell list (`type:
+  "success"` or `"warning"`), not just a `toast()` call -- so the outcome
+  is still visible later even if the toast faded or was missed while the
+  user was on a different module.
+* New **`UploadFailuresModal`** (moved verbatim from
+  `SpatialAnalysisModule`) and its render call, now sitting at the App
+  root next to `<Toaster>` instead of inside the conditionally-mounted
+  module -- so the toast's "View details" action still works no matter
+  which module is active when it's clicked.
+* `<SpatialAnalysisModule>` now passes `csvUploadProgress`,
+  `gpxUploadProgress`, `onCsvFileSelected`, `onGpxFilesSelected` as props.
+
+### 2. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* Removed the local `csvUploadProgress`/`gpxUploadProgress`/
+  `uploadFailureDetails`/`showUploadDetails` state, `handleCsvFileSelected`/
+  `handleGpxFilesSelected`, `CSV_POLL_MS`, and `UploadFailuresModal` (all
+  moved to App.tsx as above). Also dropped the now-unused
+  `refresh: refreshFarms` destructure from `farmsData`.
+* `SpatialAnalysisModuleProps` gained `csvUploadProgress`,
+  `gpxUploadProgress`, `onCsvFileSelected`, `onGpxFilesSelected`; the
+  upload buttons/inputs now read/call these props instead of local
+  state/handlers. No visual change -- same buttons, same progress text.
+
+### Status / Next Steps
+* Frontend-only fix, scoped per Fabio's explicit confirmation (module-switch
+  gap, not page-refresh/browser-close persistence -- the CSV job itself
+  stays in-memory on the backend per `upload_jobs.py`'s existing
+  single-worker-process design, unchanged here).
+* Not yet verified by Fabio in the running app.
+
+---
+
+## [2026-08-20] - Nationwide PSGC Expansion + Remove Mindanao-Only Exposure Restriction
+
+Fabio: wants to test whether typhoon-signal exposure calculation actually
+works when fed real data for the whole country, not just the previous
+Region X + Caraga subset. This is a **testing-scoped change, not a change to
+the documented insured-area business scope** -- `.claude/PROJECT_CONTEXT.md`
+and `.claude/MASTER_DEVELOPMENT_CONTEXT.md`'s "PCIC Regional Office X"
+deployment scope are unchanged; this only expands what the ingestion/
+exposure code is *capable* of computing so it can be tested end to end.
+Full plan: `/home/fabio/.claude/plans/why-it-does-not-prancy-pony.md`.
+
+### 1. File: `backend/scripts/convert_psgc_publication.py` (new)
+* Converts the official PSA PSGC Publication Excel file (Fabio downloads
+  it himself -- automated fetching from psa.gov.ph/the FOI portal returns
+  403) into the flat `psgc_code,province,municipality,barangay` CSV the app
+  already expects. Written defensively: an `--inspect` flag prints the raw
+  file's actual sheets/columns/geographic-level values before any
+  conversion logic assumes a layout, since PSA's exact export format
+  wasn't in hand while writing this.
+* Convention for Highly Urbanized/NCR cities, which have no parent province
+  in PSA's own hierarchy: `province` is set to the city's own name. See the
+  script's module docstring for the full reasoning.
+
+### 2. File: `backend/app/data/psgc_nationwide_boundaries.csv` (renamed from `psgc_region10_boundaries.csv`)
+* Was 2,258 rows / 8 provinces (Bukidnon, Camiguin, Misamis Oriental +
+  all 5 Caraga provinces). Regenerated nationwide via the script above once
+  Fabio supplies the source file -- row/province counts to be confirmed
+  once that run happens.
+
+### 3. File: `backend/app/api/upload.py`
+* `_PSGC_LOOKUP_PATH` now points at the renamed file. Updated the
+  `ValueError` message and the `_prefetch_caches()` sizing comment (was
+  "~2-3k rows", now describes nationwide scale, ~42k). No logic changes --
+  `_boundary_key()`/`_resolve_psgc_code()`/the alias-variant matching were
+  already geography-agnostic, confirmed fine performance-wise at nationwide
+  scale (single in-memory dict, a few MB).
+
+### 4. File: `backend/seed_database.py`
+* Read path and surrounding comments updated for nationwide sourcing.
+  Confirmed idempotent for the boundary-seeding section (existence-check
+  per row before insert, no truncate/drop) -- safe to re-run against an
+  already-provisioned DB.
+
+### 5. File: `backend/scripts/benchmark_csv_ingestion.py`
+* `_PSGC_LOOKUP_PATH` updated in lockstep (duplicates the constant rather
+  than importing it from `upload.py`).
+
+### 6. File: `backend/app/services/bulletin_parser.py`
+* `save_bulletin_to_db()`: collapsed the old two-branch logic (precise
+  `AdminBoundary` match for Mindanao/`island_group=2` only, free-text split
+  for Luzon/Visayas) into one loop applying the same precise
+  province+municipality substring match to every island group. Per Fabio's
+  explicit choice: **no free-text fallback** -- a bulletin cell naming only
+  a province/region with no specific municipality now yields zero matched
+  rows for that group, same as an unmatched area always has.
+* Deleted `_split_named_areas()` (dead code under the above).
+* Each inserted `TcbSignal` now also records `province` (the matched
+  boundary's province) -- see next item.
+
+### 7. File: `backend/app/models/models.py`, `backend/init_schema.sql`, `backend/migrations/2026-08-20_tcb_signal_province.sql` (new)
+* Added `TcbSignal.province` (nullable `VARCHAR(100)`). Existing rows from
+  before this migration are left `NULL`, not backfilled.
+* **Why:** `exposure_calculator.py` previously matched signal areas to
+  boundaries by municipality name alone, which was safe at Region X +
+  Caraga scale (8 provinces, no name collisions) but silently wrong
+  nationwide -- duplicate municipality names across provinces (e.g.
+  multiple "Santa Cruz") could attribute exposure to the wrong province
+  with no visible symptom. This surfaced during this session's design pass,
+  not something explicitly asked for -- flagged to Fabio and fixed in the
+  same pass per his confirmation, since deferring it would mean shipping
+  known-wrong data.
+* Run against any already-provisioned DB: `psql -U agrisure_admin -d
+  agrisure_db -f backend/migrations/2026-08-20_tcb_signal_province.sql`.
+
+### 8. File: `backend/app/services/exposure_calculator.py`
+* `boundaries_by_municipality` (keyed on municipality name alone) replaced
+  with `boundaries_by_province_municipality` (keyed on `(province,
+  municipality)`), matched against the new `TcbSignal.province`. A signal
+  with no recorded province (pre-migration rows) is skipped rather than
+  guessed.
+
+### 9. File: `backend/app/api/bulletins.py`
+* `GET /api/bulletins/{tcb_id}/signals` now includes `province` in each
+  signal's response dict, so the frontend can do the same disambiguation.
+
+### 10. File: `frontend/src/lib/api.ts`
+* `TcbSignal` interface gained `province: string | null`.
+
+### 11. File: `frontend/src/app/components/AssessmentModule.tsx`
+* `AreasAffectedModal`: removed the hardcoded `island_group === 2`
+  restriction on exposure enrichment -- now matches every island group's
+  areas against `typhoonSummary.areas_hit` by `(province, municipality)`
+  instead of a `"2:"`-prefixed municipality-only key (same collision-safety
+  reasoning as the backend fix above).
+* `MergedArea`/the row-merge key now include `province` for the same
+  reason.
+* Removed `mindanaoCount`; the info banner text no longer claims
+  Luzon/Visayas areas "never have exposure data" (no longer true) --
+  replaced with a generic "{matched} of {total} area(s) have computed
+  exposure data" message. Updated the stale doc-comments above
+  `ISLAND_GROUP_LABELS` and the enrichment loop that documented the
+  Mindanao-only rule as intentional design.
+
+### 12. File: `backend/tests/test_bulletin_parser.py`, `backend/tests/test_exposure_calculator.py`
+* Removed the two `_split_named_areas()` unit tests (method deleted).
+* Replaced the old "Luzon/Visayas free-text fallback" test with one
+  confirming Luzon/Visayas now match `AdminBoundary` precisely like
+  Mindanao, plus a new test confirming an unmatched area now yields zero
+  rows (no fallback).
+* Added `test_compute_for_typhoon_disambiguates_same_named_municipality_by_province`
+  and a companion "no province recorded -> skipped" test, as direct
+  regression coverage for the collision-bug fix (item 8).
+
+### Status / Next Steps
+* **Not yet run against a real database or a real PSA file** -- Fabio still
+  needs to (a) download the PSA PSGC Publication, (b) run the conversion
+  script and review its output, (c) re-run `seed_database.py` locally, then
+  on the remote box (192.168.1.41), (d) apply the
+  `2026-08-20_tcb_signal_province.sql` migration on both, per
+  [[project_migrations_not_auto_applied]] -- a new migration file is never
+  auto-applied from `git pull` alone.
+* `frontend/public/data/region10-boundaries.geojson` (the Spatial Analysis
+  map's polygon overlay, unrelated to exposure calculation) stays
+  Region-X-only by design -- not part of this change.
+* Branch: `fabio/data/nationwide-psgc-exposure`, off `develop`, per
+  `.claude/GITHUB_WORKFLOW.md`'s protected-branch policy (not committed
+  directly to `develop`).
+

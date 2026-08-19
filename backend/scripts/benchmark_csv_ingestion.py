@@ -1,8 +1,8 @@
 """Benchmark for POST /api/upload/csv against a running backend.
 
 Generates a synthetic CSV of realistic shape (same headers `upload_csv()`
-expects, rows spread across real Region X barangays from
-`app/data/psgc_region10_boundaries.csv` so nothing gets rejected for a missing
+expects, rows spread across real barangays from
+`app/data/psgc_nationwide_boundaries.csv` so nothing gets rejected for a missing
 PSGC code) and times how long the endpoint takes to ingest it end to end.
 
 Intended use: run once against the code/DB state *before* the CSV ingestion
@@ -31,7 +31,7 @@ from pathlib import Path
 
 import httpx
 
-_PSGC_LOOKUP_PATH = Path(__file__).resolve().parent.parent / "app" / "data" / "psgc_region10_boundaries.csv"
+_PSGC_LOOKUP_PATH = Path(__file__).resolve().parent.parent / "app" / "data" / "psgc_nationwide_boundaries.csv"
 
 _HEADER = [
     "Province", "Municipality", "Barangay", "Policy No.", "Program Type", "Product Name",

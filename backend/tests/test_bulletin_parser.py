@@ -261,39 +261,10 @@ class BulletinParserTests(unittest.TestCase):
         self.assertIn("Batanes", result["signals"][2][0])
         self.assertIn("Isabela", result["signals"][1][0])
 
-    def test_split_named_areas_strips_parens_and_splits_on_commas(self):
-        # Real Luzon Signal No. 2 cell text from docs/TCB#11_kiyapo.pdf.
-        cell_text = (
-            "Batanes, the northern portion of Cagayan (Santa Ana, Gonzaga, Santa "
-            "Teresita) including Babuyan Islands, the northern portion of Apayao "
-            "(Luna, Santa Marcela), and the northern portion of Ilocos Norte "
-            "(Pagudpud, Dumalneg)."
-        )
-        areas = BulletinParserService._split_named_areas(cell_text)
-        self.assertEqual(areas, [
-            "Batanes",
-            "the northern portion of Cagayan including Babuyan Islands",
-            "the northern portion of Apayao",
-            "the northern portion of Ilocos Norte",
-        ])
-        for area in areas:
-            self.assertLessEqual(len(area), 100)  # must fit TcbSignal.area_name's varchar(100)
-
-    def test_split_named_areas_strips_warning_lead_time_boilerplate(self):
-        # Regression test: a live PAGASA scrape against docs/TCB#11_kiyapo.pdf
-        # showed the fixed boilerplate block that follows every TCWS cell's
-        # area list ("Warning lead time: ...", "Range of wind speeds: ...",
-        # "Potential impacts of winds: ...") leaking into the split as bogus
-        # "area" entries -- the Mindanao path never had this problem since
-        # that text never matches a real municipality name.
-        cell_text = (
-            "The rest of mainland Cagayan, Isabela, Quirino, Nueva Vizcaya\n"
-            "Warning lead time: 36 hours\n"
-            "Range of wind speeds: 39 to 61 km/h (Beaufort 6 to 7)\n"
-            "Potential impacts of winds: Minimal to minor threat to life and property"
-        )
-        areas = BulletinParserService._split_named_areas(cell_text)
-        self.assertEqual(areas, ["The rest of mainland Cagayan", "Isabela", "Quirino", "Nueva Vizcaya"])
+    # `_split_named_areas()` and its free-text Luzon/Visayas fallback were
+    # removed 2026-08-20 as part of the nationwide PSGC expansion -- every
+    # island group now goes through the same precise AdminBoundary match as
+    # Mindanao previously did (see BulletinParserSaveToDbTests below).
 
 
 class BulletinParserSaveToDbTests(unittest.TestCase):
@@ -370,11 +341,48 @@ class BulletinParserSaveToDbTests(unittest.TestCase):
         self.assertEqual(signal_rows[0].area_name, "Claveria")
         self.assertEqual(signal_rows[0].signal_level, 2)
         self.assertEqual(signal_rows[0].island_group, 2)
+        self.assertEqual(signal_rows[0].province, "Misamis Oriental")
 
-    def test_save_bulletin_to_db_creates_best_effort_luzon_visayas_signals(self):
-        # Luzon/Visayas have no AdminBoundary rows to validate against, so
-        # every comma-separated phrase in the cell text (parens stripped)
-        # becomes its own TcbSignal row.
+    def test_save_bulletin_to_db_matches_luzon_visayas_against_admin_boundary_too(self):
+        # As of the nationwide PSGC expansion (2026-08-20), Luzon/Visayas go
+        # through the same precise province+municipality AdminBoundary match
+        # Mindanao always used -- no more free-text fallback.
+        boundary = MagicMock()
+        boundary.province = "Cagayan"
+        boundary.municipality = "Santa Ana"
+
+        mock_db = self._build_mock_db(boundaries=[boundary])
+        created_objects = []
+        mock_db.add.side_effect = created_objects.append
+
+        parsed_data = {
+            "typhoon_name": "LEON",
+            "bulletin_count": 5,
+            "category": "Typhoon",
+            "max_sustained_winds": 155,
+            "gustiness": 190,
+            "latitude": 16.2,
+            "longitude": 123.5,
+            "issued_at": None,
+            "signals": {
+                2: {0: "Batanes, the northern portion of Cagayan (Santa Ana, Gonzaga)"},
+            },
+            "raw_text": "",
+        }
+
+        BulletinParserService.save_bulletin_to_db(parsed_data, mock_db)
+
+        signal_rows = [obj for obj in created_objects if isinstance(obj, TcbSignal)]
+        self.assertEqual(len(signal_rows), 1)
+        self.assertEqual(signal_rows[0].area_name, "Santa Ana")
+        self.assertEqual(signal_rows[0].island_group, 0)
+        self.assertEqual(signal_rows[0].signal_level, 2)
+        self.assertEqual(signal_rows[0].province, "Cagayan")
+
+    def test_save_bulletin_to_db_drops_unmatched_area_with_no_fallback(self):
+        # A cell that only names a province/region, with no municipality
+        # AdminBoundary can match, now yields zero rows for that group --
+        # confirms the free-text "always show something" fallback is gone.
         mock_db = self._build_mock_db(boundaries=[])
         created_objects = []
         mock_db.add.side_effect = created_objects.append
@@ -397,12 +405,7 @@ class BulletinParserSaveToDbTests(unittest.TestCase):
         BulletinParserService.save_bulletin_to_db(parsed_data, mock_db)
 
         signal_rows = [obj for obj in created_objects if isinstance(obj, TcbSignal)]
-        self.assertEqual(len(signal_rows), 2)
-        self.assertEqual(signal_rows[0].area_name, "Batanes")
-        self.assertEqual(signal_rows[0].island_group, 0)
-        self.assertEqual(signal_rows[0].signal_level, 2)
-        self.assertEqual(signal_rows[1].area_name, "the northern portion of Cagayan")
-        self.assertEqual(signal_rows[1].island_group, 0)
+        self.assertEqual(signal_rows, [])
 
     def test_reuses_existing_typhoon_when_a_bulletin_is_within_30_days(self):
         # Bulletin No. 10 for an already-known typhoon should still land under the

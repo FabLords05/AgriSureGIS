@@ -113,6 +113,9 @@ export interface TcbSignal {
   signal_level: number;
   island_group: number;
   area_name: string;
+  // Null for signals saved before the nationwide PSGC expansion
+  // (2026-08-20) -- see backend/migrations/2026-08-20_tcb_signal_province.sql.
+  province: string | null;
 }
 
 export interface AreaExposureSummary {

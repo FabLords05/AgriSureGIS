@@ -32,8 +32,17 @@ class ExposureCalculatorService:
         if not bulletins:
             return []
 
-        boundaries_by_municipality = {
-            b.municipality.lower(): b for b in db.query(AdminBoundary).all()
+        # Keyed on (province, municipality), not municipality alone -- at
+        # Region X + Caraga scale (8 provinces) municipality names never
+        # collided, but nationwide (81 provinces) duplicate municipality
+        # names across different provinces are common (e.g. multiple "Santa
+        # Cruz"), so municipality-only keying could silently attribute
+        # exposure to the wrong province's boundary. Relies on
+        # TcbSignal.province, populated by bulletin_parser.py's matching --
+        # see backend/migrations/2026-08-20_tcb_signal_province.sql.
+        boundaries_by_province_municipality = {
+            (b.province.lower(), b.municipality.lower()): b
+            for b in db.query(AdminBoundary).all()
         }
 
         # boundary_id -> {"boundary": AdminBoundary, "start": dt, "end": dt, "max_signal_level": int}
@@ -42,7 +51,14 @@ class ExposureCalculatorService:
         for bulletin in bulletins:
             signals = db.query(TcbSignal).filter(TcbSignal.tcb_id == bulletin.tcb_id).all()
             for signal in signals:
-                boundary = boundaries_by_municipality.get(signal.area_name.lower())
+                if not signal.province:
+                    # Signal predates the province column (pre-2026-08-20) --
+                    # can't disambiguate safely, skip rather than risk a
+                    # wrong-province match.
+                    continue
+                boundary = boundaries_by_province_municipality.get(
+                    (signal.province.lower(), signal.area_name.lower())
+                )
                 if boundary is None:
                     continue
 

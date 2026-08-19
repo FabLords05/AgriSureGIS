@@ -126,22 +126,23 @@ function CSVPreviewModal({ rows, onClose }: { rows: PabsAssessmentRow[]; onClose
 // ─── Areas Affected Modal ────────────────────────────────────────────────────
 // Every area named in the typhoon's TCB signals, merged across all its
 // bulletins -- unlike `typhoonSummary.areas_hit` (tbl_area_exposure_summary),
-// this does not drop areas whose name failed to match an AdminBoundary row
-// in ExposureCalculatorService (backend/app/services/exposure_calculator.py),
-// so it stays the authoritative "all areas listed in the TCB" view even when
-// exposure hasn't been computed for some of them.
+// which only has rows after "Compute Assessments" has run, this shows a
+// matched area (bulletin_parser.py already validates each signal against
+// AdminBoundary at scrape time, nationwide as of 2026-08-20) as soon as it's
+// in a bulletin, so it stays the authoritative "all areas listed in the TCB"
+// view even when exposure hasn't been computed for some of them yet.
 interface MergedArea {
   area_name: string;
+  province: string | null;
   island_group: number;
   max_signal_level: number;
   exposure: TyphoonSummaryArea | null;
 }
 
 // PAGASA's fixed TCWS column order (backend/app/services/bulletin_parser.py).
-// Only Mindanao (2) is matched against AdminBoundary and feeds exposure/
-// indemnity calculations -- Luzon/Visayas are informational only, listed
-// as-named in the bulletin so a GIS specialist can see the storm's full
-// national footprint.
+// As of the nationwide PSGC expansion (2026-08-20), every island group is
+// matched against AdminBoundary and feeds exposure/indemnity calculations --
+// previously this was Mindanao (2) only.
 const ISLAND_GROUP_LABELS: Record<number, string> = { 0: "Luzon", 1: "Visayas", 2: "Mindanao" };
 
 function AreasAffectedModal({
@@ -164,18 +165,22 @@ function AreasAffectedModal({
         const merged = new Map<string, MergedArea>();
         for (const signals of signalLists) {
           for (const s of signals as TcbSignal[]) {
-            const key = `${s.island_group}:${s.area_name.trim().toLowerCase()}`;
+            // Keyed on province+municipality, not municipality alone -- a
+            // same-named municipality can exist in more than one province
+            // nationwide (e.g. multiple "Santa Cruz"), so province is needed
+            // to avoid merging two distinct areas into one row.
+            const key = `${(s.province ?? "").trim().toLowerCase()}:${s.area_name.trim().toLowerCase()}`;
             const existing = merged.get(key);
             if (existing) existing.max_signal_level = Math.max(existing.max_signal_level, s.signal_level);
-            else merged.set(key, { area_name: s.area_name, island_group: s.island_group, max_signal_level: s.signal_level, exposure: null });
+            else merged.set(key, { area_name: s.area_name, province: s.province, island_group: s.island_group, max_signal_level: s.signal_level, exposure: null });
           }
         }
-        // Exposure/indemnity data only ever exists for Mindanao (island_group
-        // 2, this project's insured Region X area) -- match only within that
-        // group so a same-named Luzon/Visayas phrase can never wrongly pick up
-        // a Region X municipality's exposure numbers.
+        // Match on the same province+municipality key so exposure numbers
+        // never get attributed to the wrong same-named area in a different
+        // province -- see backend/app/services/exposure_calculator.py.
         for (const area of typhoonSummary?.areas_hit ?? []) {
-          const m = merged.get(`2:${area.municipality.trim().toLowerCase()}`);
+          const key = `${area.province.trim().toLowerCase()}:${area.municipality.trim().toLowerCase()}`;
+          const m = merged.get(key);
           if (m) m.exposure = area;
         }
         setAreas(Array.from(merged.values()).sort((a, b) =>
@@ -188,7 +193,6 @@ function AreasAffectedModal({
       .finally(() => setIsLoading(false));
   }, [tcbIds, typhoonSummary]);
 
-  const mindanaoCount = areas.filter(a => a.island_group === 2).length;
   const matchedCount = areas.filter(a => a.exposure !== null).length;
 
   return (
@@ -213,7 +217,7 @@ function AreasAffectedModal({
           <div className="flex items-center gap-2 px-5 py-2 bg-blue-50 dark:bg-blue-950/30 border-b border-blue-100 shrink-0">
             <AlertCircle size={11} className="text-blue-600 shrink-0" />
             <p className="text-[10px] text-blue-700 dark:text-blue-300">
-              {matchedCount} of {mindanaoCount} Mindanao (Region X) area(s) have computed exposure data (Compute Assessments requires this). Luzon/Visayas areas are listed as-named in the bulletin for situational awareness only — they're outside the insured area and never have exposure data.
+              {matchedCount} of {areas.length} area(s) have computed exposure data (Compute Assessments requires this). An area only appears here if the bulletin named a specific municipality that matched a known administrative boundary.
             </p>
           </div>
         )}
@@ -239,7 +243,7 @@ function AreasAffectedModal({
               </thead>
               <tbody>
                 {areas.map((a, i) => (
-                  <tr key={`${a.island_group}:${a.area_name}`} className={`border-t border-border ${i % 2 === 0 ? "" : "bg-muted/10"}`}>
+                  <tr key={`${a.province}:${a.area_name}`} className={`border-t border-border ${i % 2 === 0 ? "" : "bg-muted/10"}`}>
                     <td className="px-2.5 py-1.5 text-muted-foreground">{ISLAND_GROUP_LABELS[a.island_group] ?? "—"}</td>
                     <td className="px-2.5 py-1.5 font-semibold text-[#166534]">{a.area_name}</td>
                     <td className="px-2.5 py-1.5">Signal No. {a.max_signal_level}</td>
