@@ -1,12 +1,11 @@
 import { useState, useEffect, useMemo, useRef } from "react";
-import { toast } from "sonner";
 import {
   ChevronUp, ChevronDown,
-  Filter, User, ArrowUpDown, UploadCloud, CheckCircle2, Table2, ShieldCheck, X, AlertCircle, Loader2
+  Filter, User, ArrowUpDown, UploadCloud, CheckCircle2, Table2, ShieldCheck, Loader2
 } from "lucide-react";
 import { GISLeafletMap } from "./GISLeafletMap";
 import {
-  getAssessments, getMunicipalities, searchFarmers, uploadCsv, uploadGpx, getCsvUploadStatus,
+  getAssessments, getMunicipalities, searchFarmers,
   Farm, Assessment, Bulletin, FarmerSearchResult,
 } from "@/lib/api";
 import { FarmsData } from "@/lib/useFarmsData";
@@ -65,48 +64,25 @@ interface SpatialAnalysisModuleProps {
   // are set). null = no farmer picked.
   filterFarmerId: number | null;
   onFilterFarmerIdChange: (value: number | null) => void;
-}
-
-// ─── Upload Failures Modal ───────────────────────────────────────────────────
-// A batch GPX upload can produce dozens of per-file failures -- these used to
-// get joined into one giant string and dumped straight into the status
-// banner with no size limit, which could balloon to the point of visually
-// swallowing the whole page (reported by Fabio). Each failure is now its own
-// row in a scrollable, height-capped panel instead.
-function UploadFailuresModal({ failures, onClose }: { failures: string[]; onClose: () => void }) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-      <div className="bg-card border border-border rounded-2xl shadow-2xl w-[560px] max-h-[70vh] flex flex-col overflow-hidden">
-        <div className="flex items-center justify-between px-5 py-3 border-b border-border shrink-0" style={{ background: "#0f1e0f" }}>
-          <div className="flex items-center gap-2.5">
-            <AlertCircle size={15} className="text-red-400" />
-            <p className="text-[12px] font-bold text-white">{failures.length} file(s) failed to upload</p>
-          </div>
-          <button onClick={onClose} className="w-6 h-6 flex items-center justify-center rounded hover:bg-white/10 text-white/60 hover:text-white transition-colors">
-            <X size={13} />
-          </button>
-        </div>
-        <div className="flex-1 overflow-auto p-3">
-          <ul className="space-y-1.5">
-            {failures.map((f, i) => (
-              <li key={i} className="text-[11px] px-3 py-2 rounded-lg bg-red-50 dark:bg-red-950/30 text-red-700 dark:text-red-300 border border-red-100 dark:border-red-900">
-                {f}
-              </li>
-            ))}
-          </ul>
-        </div>
-        <div className="flex items-center justify-end px-5 py-3 border-t border-border shrink-0">
-          <button onClick={onClose} className="px-3 py-1.5 rounded-lg border border-border text-xs hover:bg-muted transition-colors">Close</button>
-        </div>
-      </div>
-    </div>
-  );
+  // CSV/GPX upload progress + handlers now live in App.tsx, not here --
+  // this module is conditionally mounted (only while activeModule ===
+  // "spatial"), so an in-flight upload's progress/polling used to freeze
+  // (and its completion toast could be missed entirely) the moment the user
+  // switched to another module tab before it finished. Lifting this one
+  // level up, same reasoning/pattern as farmsData above, means the upload
+  // keeps polling and still notifies (toast + notification bell) no matter
+  // which module is on screen when it completes (2026-08-20, per Fabio).
+  csvUploadProgress: { processed: number; total: number } | null;
+  gpxUploadProgress: { current: number; total: number } | null;
+  onCsvFileSelected: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onGpxFilesSelected: (e: React.ChangeEvent<HTMLInputElement>) => void;
 }
 
 export function SpatialAnalysisModule({
   darkMode, selectedBulletin, farmsData,
   activeInsuranceOnly, onActiveInsuranceOnlyChange, filterMuni, onFilterMuniChange,
   filterFarmerId, onFilterFarmerIdChange,
+  csvUploadProgress, gpxUploadProgress, onCsvFileSelected, onGpxFilesSelected,
 }: SpatialAnalysisModuleProps) {
   const {
     farms,
@@ -115,7 +91,6 @@ export function SpatialAnalysisModule({
     isFetchingMore,
     hasMore,
     loadError,
-    refresh: refreshFarms,
     requestMore,
   } = farmsData;
   const [assessments, setAssessments] = useState<Assessment[]>([]);
@@ -141,17 +116,9 @@ export function SpatialAnalysisModule({
   const [sortField, setSortField] = useState<SortField>("farm_id");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [topPanelH, setTopPanelH] = useState(55);
-  // Transient success/failure now goes through toast() (see handlers below);
-  // this state only sticks around to feed the failure-details modal, which
-  // needs to stay open after the toast itself has faded.
-  const [uploadFailureDetails, setUploadFailureDetails] = useState<string[] | null>(null);
-  const [showUploadDetails, setShowUploadDetails] = useState(false);
-  // Real progress (2026-08-16), not a fake/simulated bar -- CSV is driven by
-  // polling the backend job's actual row count (see getCsvUploadStatus);
-  // GPX is driven by the upload loop's own position, since each file
-  // completing is itself the progress signal. null = no upload in flight.
-  const [csvUploadProgress, setCsvUploadProgress] = useState<{ processed: number; total: number } | null>(null);
-  const [gpxUploadProgress, setGpxUploadProgress] = useState<{ current: number; total: number } | null>(null);
+  // csvUploadProgress/gpxUploadProgress (and the failure-details modal they
+  // used to feed) now live in App.tsx -- see SpatialAnalysisModuleProps'
+  // doc comment above.
   const csvInputRef = useRef<HTMLInputElement>(null);
   const gpxInputRef = useRef<HTMLInputElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
@@ -319,85 +286,6 @@ export function SpatialAnalysisModule({
     else { setSortField(field); setSortDir("asc"); }
   };
 
-  // Polls the backend job every 500ms for real processed/total counts (see
-  // getCsvUploadStatus) -- not a simulated/fake bar. 500ms is frequent
-  // enough to feel live without hammering the backend on every tick of a
-  // large export that can take a while.
-  const CSV_POLL_MS = 500;
-
-  const handleCsvFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    e.target.value = ""; // allow re-selecting the same filename later
-    if (!file) return;
-
-    try {
-      const { job_id, total_rows } = await uploadCsv(file);
-      setCsvUploadProgress({ processed: 0, total: total_rows });
-
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        await new Promise(resolve => setTimeout(resolve, CSV_POLL_MS));
-        const status = await getCsvUploadStatus(job_id);
-        setCsvUploadProgress({ processed: status.processed, total: status.total });
-
-        if (status.status === "done" && status.result) {
-          const result = status.result;
-          const failedSuffix = result.rows_failed > 0 ? `, ${result.rows_failed} failed` : "";
-          toast.success(`${result.message} (${result.rows_inserted} inserted, ${result.rows_skipped} skipped${failedSuffix})`);
-          refreshFarms();
-          break;
-        }
-        if (status.status === "error") {
-          toast.error(status.error ?? "CSV upload failed.");
-          break;
-        }
-      }
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "CSV upload failed.");
-    } finally {
-      setCsvUploadProgress(null);
-    }
-  };
-
-  // Farmer/farm for each file is auto-detected from its filename (see
-  // GpxFarmerMatcherService) -- uploaded one at a time, not in parallel, so a
-  // large batch doesn't hammer the backend all at once. Each file completing
-  // is itself the progress signal (no backend job needed, unlike CSV above).
-  const handleGpxFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = Array.from(e.target.files ?? []);
-    e.target.value = ""; // allow re-selecting the same filename(s) later
-    if (files.length === 0) return;
-
-    let succeeded = 0;
-    const failures: string[] = [];
-    setGpxUploadProgress({ current: 0, total: files.length });
-    try {
-      for (const [index, file] of files.entries()) {
-        try {
-          await uploadGpx(file);
-          succeeded++;
-        } catch (error) {
-          failures.push(`${file.name}: ${error instanceof Error ? error.message : "upload failed"}`);
-        }
-        setGpxUploadProgress({ current: index + 1, total: files.length });
-      }
-
-      if (failures.length === 0) {
-        toast.success(`Uploaded ${succeeded} GPX file(s) successfully.`);
-      } else {
-        toast.error(`${succeeded} succeeded, ${failures.length} failed.`, {
-          action: {
-            label: "View details",
-            onClick: () => { setUploadFailureDetails(failures); setShowUploadDetails(true); },
-          },
-        });
-      }
-      refreshFarms();
-    } finally {
-      setGpxUploadProgress(null);
-    }
-  };
-
   const SortIcon = ({ field }: { field: SortField }) =>
     sortField === field
       ? sortDir === "asc" ? <ChevronUp size={11} /> : <ChevronDown size={11} />
@@ -415,10 +303,6 @@ export function SpatialAnalysisModule({
             it only ever held the title, and the map canvas below now gets
             that space instead. Search/filter/upload controls already live
             in the Farm Records toolbar further down. */}
-        {showUploadDetails && uploadFailureDetails && (
-          <UploadFailuresModal failures={uploadFailureDetails} onClose={() => setShowUploadDetails(false)} />
-        )}
-
         {/* Map canvas */}
         <div className="flex-1 overflow-hidden p-2 relative">
           <GISLeafletMap
@@ -565,7 +449,7 @@ export function SpatialAnalysisModule({
               type="file"
               accept=".csv"
               hidden
-              onChange={handleCsvFileSelected}
+              onChange={onCsvFileSelected}
             />
             <button
               onClick={() => gpxInputRef.current?.click()}
@@ -587,7 +471,7 @@ export function SpatialAnalysisModule({
               accept=".gpx"
               multiple
               hidden
-              onChange={handleGpxFilesSelected}
+              onChange={onGpxFilesSelected}
             />
 
             <div className="ml-auto text-[9px] text-muted-foreground">
