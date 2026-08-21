@@ -122,3 +122,35 @@ gantt
      $$I = \left(\frac{AC}{1000}\right) \times IF \times \text{Area}$$
      - Fetch $IF$ (Indemnity Factor) from `tbl_recsap_matrix` using Yield Loss intersection.
   5. **PCIC CSV Export:** Package results into a final CSV report appended to original row layouts for the PCIC Finance Division.
+
+---
+
+## 4. Resetting the Local Database
+
+[init_schema.sql](../backend/init_schema.sql) starts with `DROP TABLE IF EXISTS
+... CASCADE` for every `tbl_*` table, so re-running it against an existing
+database *is* the reset — it drops and recreates every table empty (the
+`CREATE TABLE` statements right below the drops rebuild the schema). It does
+not touch the `agrisure_db` database or `agrisure_admin` user themselves.
+
+**Fabio runs these himself** — DB superuser credentials and `sudo`/`psql`
+access live only in his environment (see `CLAUDE.md`'s Database Command
+Execution rule):
+
+1. Re-apply the schema (drops + recreates every table, empty):
+   ```bash
+   cd backend
+   psql -U agrisure_admin -d agrisure_db -h localhost -f init_schema.sql
+   ```
+2. Reload whichever data you want back, in any combination:
+   - `python seed_database.py` — legacy `pabs_results.csv` farmers/insurance,
+     plus the PSGC Region X admin boundaries.
+   - `python backfill_admin_boundary_geom.py` — backfills `boundary_geom` on
+     `tbl_admin_boundaries`, needed for the GeoServer/WFS boundary layer in
+     Spatial Analysis (see `.claude/GEOSERVER_SETUP.md`).
+   - `python mock_data/seed_mock_typhoon.py` — mock Talakag/Claveria farmers
+     plus a mock typhoon, for exercising exposure/assessment without waiting
+     on a real PAGASA bulletin.
+
+If the database/user don't exist at all yet (fresh machine), see the
+Quickstart in the repo root [README.md](../README.md) instead.

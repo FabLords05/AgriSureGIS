@@ -1,0 +1,13 @@
+Program Type,Product Name,Province,Municipality,Barangay,Policy No.,Effectivity Date,Expiry Date,Surname,Firstname,Middlename,AreaInsured,AmountofCover,Stage No.,FarmersID,RSBSA No.,FARMID,Georef ID,RiskExposureAmount,Stage,EstimatedDamage
+Rice Parametric,PCIC Rice Parametric,Bukidnon,Talakag,San Isidro,POL-MOCK-90001,06/01/2026,12/31/2026,Santos,Ramon,D,2.00,40000,1,900001,99-99-99-999-900001,9100001,R10-BUK-TAL-9001,6000,Booting,6000
+Rice Parametric,PCIC Rice Parametric,Bukidnon,Talakag,San Isidro,POL-MOCK-90002,06/01/2026,12/31/2026,Reyes,Liza,M,1.50,30000,2,900002,99-99-99-999-900002,9100002,R10-BUK-TAL-9002,9000,Flowering,9000
+Rice Parametric,PCIC Rice Parametric,Bukidnon,Talakag,San Isidro,POL-MOCK-90003,06/01/2026,12/31/2026,Garcia,Noel,P,3.00,60000,3,900003,99-99-99-999-900003,9100003,R10-BUK-TAL-9003,9000,Maturity,9000
+Rice Parametric,PCIC Rice Parametric,Bukidnon,Manolo Fortich,Alae,POL-MOCK-90004,06/01/2026,12/31/2026,Fernandez,Ana,T,1.80,36000,2,900004,99-99-99-999-900004,9100004,R10-BUK-MFO-9004,10800,Flowering,10800
+Rice Parametric,PCIC Rice Parametric,Bukidnon,Manolo Fortich,Alae,POL-MOCK-90005,06/01/2026,12/31/2026,Delos Santos,Mario,C,2.50,50000,3,900005,99-99-99-999-900005,9100005,R10-BUK-MFO-9005,7500,Maturity,7500
+Rice Parametric,PCIC Rice Parametric,Bukidnon,Manolo Fortich,Alae,POL-MOCK-90006,06/01/2026,12/31/2026,Villanueva,Grace,B,1.20,24000,1,900006,99-99-99-999-900006,9100006,R10-BUK-MFO-9006,3600,Booting,3600
+Rice Parametric,PCIC Rice Parametric,Misamis Oriental,Claveria,Poblacion,POL-MOCK-90007,06/01/2026,12/31/2026,Abad,Carlos,R,2.20,44000,2,900007,99-99-99-999-900007,9100007,R10-MIS-CLV-9007,13200,Flowering,13200
+Rice Parametric,PCIC Rice Parametric,Misamis Oriental,Claveria,Poblacion,POL-MOCK-90008,06/01/2026,12/31/2026,Tan,Michelle,S,1.70,34000,3,900008,99-99-99-999-900008,9100008,R10-MIS-CLV-9008,5100,Maturity,5100
+Rice Parametric,PCIC Rice Parametric,Misamis Oriental,Claveria,Poblacion,POL-MOCK-90009,06/01/2026,12/31/2026,Bautista,Edwin,L,2.80,56000,2,900009,99-99-99-999-900009,9100009,R10-MIS-CLV-9009,16800,Flowering,16800
+Rice Parametric,PCIC Rice Parametric,Misamis Oriental,City of Gingoog,Agay-ayan,POL-MOCK-90010,06/01/2026,12/31/2026,Castillo,Rosario,A,1.40,28000,1,900010,99-99-99-999-900010,9100010,R10-MIS-GIN-9010,4200,Booting,4200
+Rice Parametric,PCIC Rice Parametric,Misamis Oriental,City of Gingoog,Agay-ayan,POL-MOCK-90011,06/01/2026,12/31/2026,Domingo,Jerome,V,2.00,40000,3,900011,99-99-99-999-900011,9100011,R10-MIS-GIN-9011,6000,Maturity,6000
+Rice Parametric,PCIC Rice Parametric,Misamis Oriental,City of Gingoog,Agay-ayan,POL-MOCK-90012,06/01/2026,12/31/2026,Espino,Teresa,N,1.90,38000,2,900012,99-99-99-999-900012,9100012,R10-MIS-GIN-9012,11400,Flowering,11400

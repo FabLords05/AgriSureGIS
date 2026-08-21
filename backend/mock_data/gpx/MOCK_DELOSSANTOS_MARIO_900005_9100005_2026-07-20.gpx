@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="AgriSureGIS-mock-data" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk>
+    <name>MOCK FARM BOUNDARY - 900005/9100005 - Manolo Fortich, Bukidnon</name>
+    <trkseg>
+      <trkpt lat="8.2976" lon="124.8894"/>
+      <trkpt lat="8.2974" lon="124.8909"/>
+      <trkpt lat="8.2987" lon="124.8907"/>
+      <trkpt lat="8.2987" lon="124.8891"/>
+      <trkpt lat="8.2976" lon="124.8894"/>
+    </trkseg>
+  </trk>
+</gpx>

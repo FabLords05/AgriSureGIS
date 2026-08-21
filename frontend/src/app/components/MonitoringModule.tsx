@@ -1,37 +1,27 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import { toast } from "sonner";
 import {
-  Activity, Download, CheckCircle, Clock, AlertTriangle, FileDown,
-  Wifi, RefreshCw, Eye, BarChart2, TrendingUp, Zap,
-  Satellite, X, MapPin, User
+  Activity, Download, FileDown,
+  RefreshCw, Eye, BarChart2, TrendingUp, Zap,
+  X, MapPinned, ShieldCheck,
+  ChevronUp, ChevronDown, ArrowUpDown
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip as RTooltip, ResponsiveContainer,
   PieChart, Pie, Cell, LineChart, Line, CartesianGrid, Legend
 } from "recharts";
-import { mockFarmers, FarmerRecord } from "./mockData";
-import { Bulletin, TcbSignal, getBulletins, parseBulletins, getBulletinSignals } from "@/lib/api";
+import {
+  Bulletin, TcbSignal, InsuranceSummary, ActiveTyphoon, AssessmentsSummary,
+  getBulletins, parseBulletins, getBulletinSignals,
+  computeExposure, ComputeExposureResult, getAssessmentsSummary, getInsuranceSummary,
+  getActiveTyphoons,
+} from "@/lib/api";
 
-const signalChartData = [
-  { signal:"Signal 1", farms:6,  area:12.0 },
-  { signal:"Signal 2", farms:11, area:26.0 },
-  { signal:"Signal 3", farms:5,  area:14.5 },
-];
+type BulletinSortField = "bulletin_count" | "typhoon_name" | "issued_at" | "category" | "max_sustained_winds" | "gustiness";
+type SortDir = "asc" | "desc";
 
-const growthPieData = [
-  { name:"Seedling",     value:5, color:"#86efac" },
-  { name:"Vegetative",   value:6, color:"#22c55e" },
-  { name:"Reproductive", value:5, color:"#eab308" },
-  { name:"Ripening",     value:4, color:"#f59e0b" },
-];
-
-const timelineData = [
-  { time:"00:00", bulletins:1, farms:0 },
-  { time:"03:00", bulletins:2, farms:5 },
-  { time:"06:00", bulletins:3, farms:11 },
-  { time:"09:00", bulletins:4, farms:16 },
-  { time:"12:00", bulletins:5, farms:19 },
-  { time:"15:00", bulletins:6, farms:19 },
-];
+const GROWTH_STAGE_COLORS = ["#22c55e", "#eab308", "#f59e0b", "#86efac", "#a3a3a3"];
+const SIGNAL_BAR_COLOR = "#166534";
 
 function uniqueAreas(signals: TcbSignal[]): string[] {
   return Array.from(new Set(signals.map(s => s.area_name)));
@@ -41,11 +31,40 @@ function maxSignalLevel(signals: TcbSignal[]): number {
   return signals.length ? Math.max(...signals.map(s => s.signal_level)) : 0;
 }
 
+// Groups signals by level (highest first) so each level's areas can be shown
+// under its own header, instead of merging every level's areas into one flat
+// list under a single "highest signal" banner.
+function groupAreasBySignalLevel(signals: TcbSignal[]): { level: number; areas: string[] }[] {
+  const byLevel = new Map<number, Set<string>>();
+  for (const s of signals) {
+    if (!byLevel.has(s.signal_level)) byLevel.set(s.signal_level, new Set());
+    byLevel.get(s.signal_level)!.add(s.area_name);
+  }
+  return Array.from(byLevel.entries())
+    .sort((a, b) => b[0] - a[0])
+    .map(([level, areas]) => ({ level, areas: Array.from(areas) }));
+}
+
+function signalLevelColor(level: number): string {
+  return level >= 3 ? "#ef4444" : level === 2 ? "#d97706" : "#166534";
+}
+
+function formatIssuedAt(isoString: string | null | undefined): string {
+  if (!isoString) return "Unknown";
+  const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) return "Unknown";
+  return new Intl.DateTimeFormat("en-PH", {
+    timeZone: "Asia/Manila",
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
+}
+
 // ─── TCB Detail Viewer Modal ─────────────────────────────────────────────────
 function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bulletin: Bulletin; signals: TcbSignal[]; isLoadingSignals: boolean; onClose: () => void }) {
   const highestSignal = maxSignalLevel(signals);
-  const signalColor = highestSignal === 3 ? "#ef4444" : highestSignal === 2 ? "#d97706" : "#166534";
-  const areas = uniqueAreas(signals);
+  const signalColor = signalLevelColor(highestSignal);
+  const areasByLevel = groupAreasBySignalLevel(signals);
 
   const handleDownloadTCB = () => {
     const content = [
@@ -57,12 +76,17 @@ function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bull
       `TROPICAL CYCLONE: ${bulletin.typhoon_name.toUpperCase()}`,
       `BULLETIN NO.: ${bulletin.bulletin_count}`,
       `CATEGORY: ${bulletin.category ?? "Unknown"}`,
-      `ISSUED: ${bulletin.issued_at ?? "Unknown"}`,
+      `ISSUED: ${formatIssuedAt(bulletin.issued_at)}`,
       `MAX SUSTAINED WINDS: ${bulletin.max_sustained_winds ?? "—"} km/h`,
       `GUSTINESS: ${bulletin.gustiness ?? "—"} km/h`,
       "",
       "AREAS UNDER SIGNAL WARNING:",
-      ...(areas.length ? areas.map(a => `  • ${a}`) : ["  (no signal data recorded for this bulletin)"]),
+      ...(areasByLevel.length
+        ? areasByLevel.flatMap(({ level, areas }) => [
+            `  Signal No. ${level}:`,
+            ...areas.map(a => `    • ${a}`),
+          ])
+        : ["  (no signal data recorded for this bulletin)"]),
       "",
       "═══════════════════════════════════════════════════════════════════",
       "This bulletin is intended for PCIC risk assessment purposes.",
@@ -87,7 +111,7 @@ function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bull
             <FileDown size={15} className="text-emerald-400" />
             <div>
               <p className="text-[12px] font-bold text-white">TCB No. {bulletin.bulletin_count} — Tropical Cyclone {bulletin.typhoon_name}</p>
-              <p className="text-[10px] text-white/60">{bulletin.issued_at ?? "Unknown date"}</p>
+              <p className="text-[10px] text-white/60">{formatIssuedAt(bulletin.issued_at)}</p>
             </div>
           </div>
           <button onClick={onClose} className="w-6 h-6 flex items-center justify-center rounded hover:bg-white/10 text-white/60 hover:text-white transition-colors">
@@ -122,7 +146,7 @@ function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bull
                 ["Cyclone Name", bulletin.typhoon_name],
                 ["Bulletin No.", String(bulletin.bulletin_count)],
                 ["Category", bulletin.category ?? "Unknown"],
-                ["Issued", bulletin.issued_at ?? "Unknown"],
+                ["Issued", formatIssuedAt(bulletin.issued_at)],
                 ["Max Winds", `${bulletin.max_sustained_winds ?? "—"} km/h`],
               ].map(([k, v]) => (
                 <div key={k} className="flex gap-2">
@@ -136,15 +160,24 @@ function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bull
               <p className="font-bold text-[11px] mb-2 uppercase tracking-wide">Areas Under Signal Warning</p>
               {isLoadingSignals ? (
                 <p className="text-[10px] text-muted-foreground">Loading affected areas…</p>
-              ) : areas.length ? (
-                <ul className="space-y-0.5">
-                  {areas.map((a, i) => (
-                    <li key={i} className="flex items-center gap-2 text-[10px]">
-                      <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: signalColor }} />
-                      {a}
-                    </li>
+              ) : areasByLevel.length ? (
+                <div className="space-y-2.5">
+                  {areasByLevel.map(({ level, areas: levelAreas }) => (
+                    <div key={level}>
+                      <p className="text-[10px] font-bold mb-1" style={{ color: signalLevelColor(level) }}>
+                        Signal No. {level}
+                      </p>
+                      <ul className="space-y-0.5 pl-1">
+                        {levelAreas.map((a, i) => (
+                          <li key={i} className="flex items-center gap-2 text-[10px]">
+                            <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: signalLevelColor(level) }} />
+                            {a}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
                   ))}
-                </ul>
+                </div>
               ) : (
                 <p className="text-[10px] text-muted-foreground">No signal/area data recorded for this bulletin.</p>
               )}
@@ -174,85 +207,27 @@ function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bull
   );
 }
 
-// ─── SAR Quick-View Modal (mock — no backend GEE integration exists yet) ────
-function SARQuickViewModal({ farmer, onClose }: { farmer: FarmerRecord; onClose: () => void }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    const W = canvas.width, H = canvas.height;
-
-    let seed = farmer.rowId * 1234567;
-    const rand = () => { seed = (seed * 16807 + 0) % 2147483647; return seed / 2147483647; };
-
-    const imgData = ctx.createImageData(W, H);
-    for (let y = 0; y < H; y++) {
-      for (let x = 0; x < W; x++) {
-        const i = (y * W + x) * 4;
-        const n = rand();
-        const isFloodArea = y > H * 0.55 && x > W * 0.3 && x < W * 0.75 && n > 0.35;
-        const isFarmArea  = x > W * 0.25 && x < W * 0.75 && y > H * 0.25 && y < H * 0.75;
-        const brightness  = n * 180;
-        if (isFloodArea) {
-          imgData.data[i]   = Math.floor(10 + rand() * 20);
-          imgData.data[i+1] = Math.floor(20 + rand() * 40);
-          imgData.data[i+2] = Math.floor(60 + rand() * 60);
-        } else if (isFarmArea) {
-          const v = Math.floor(50 + rand() * 100);
-          imgData.data[i]   = Math.floor(v * 0.3);
-          imgData.data[i+1] = Math.floor(v * 0.8);
-          imgData.data[i+2] = Math.floor(v * 0.4);
-        } else {
-          imgData.data[i]   = Math.floor(brightness * 0.5);
-          imgData.data[i+1] = Math.floor(brightness * 0.5);
-          imgData.data[i+2] = Math.floor(brightness * 0.4);
-        }
-        imgData.data[i+3] = 255;
-      }
-    }
-    ctx.putImageData(imgData, 0, 0);
-
-    ctx.strokeStyle = "#fbbf24";
-    ctx.lineWidth = 2;
-    ctx.setLineDash([4, 3]);
-    const fw = W * 0.45, fh = H * 0.42;
-    const fx = (W - fw) / 2, fy = (H - fh) / 2;
-    ctx.strokeRect(fx, fy, fw, fh);
-    ctx.setLineDash([]);
-
-    ctx.fillStyle = "rgba(30, 100, 220, 0.35)";
-    ctx.fillRect(fx + fw * 0.1, fy + fh * 0.6, fw * 0.65, fh * 0.35);
-
-    ctx.fillStyle = "#fbbf24";
-    ctx.font = "bold 10px monospace";
-    ctx.fillText(farmer.farmId, fx + 4, fy - 4);
-
-    ctx.fillStyle = "rgba(0,0,0,0.55)";
-    ctx.fillRect(4, H - 32, 130, 28);
-    ctx.fillStyle = "#86efac"; ctx.fillRect(8, H - 28, 8, 8);
-    ctx.fillStyle = "#fff"; ctx.font = "9px sans-serif";
-    ctx.fillText("Planted Area", 20, H - 20);
-    ctx.fillStyle = "rgba(30,100,220,0.7)"; ctx.fillRect(8, H - 18, 8, 8);
-    ctx.fillStyle = "#fff"; ctx.fillText("Flood Extent", 20, H - 10);
-
-  }, [farmer]);
-
-  const floodPct = 25 + (farmer.rowId * 7) % 45;
-  const plantedPct = 60 + (farmer.rowId * 13) % 35;
-  const coherence = (0.42 + (farmer.rowId * 0.037) % 0.4).toFixed(2);
-
+// ─── TCB Exposure Summary Modal ──────────────────────────────────────────────
+// Per Fabio's request: a view showing, for a given TCB, the list of affected
+// areas and how long each was under a wind signal (POST /{tcb_id}/compute-exposure).
+function ExposureSummaryModal({
+  bulletin, result, isLoading, error, onClose,
+}: {
+  bulletin: Bulletin;
+  result: ComputeExposureResult | null;
+  isLoading: boolean;
+  error: string | null;
+  onClose: () => void;
+}) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65">
-      <div className="bg-card border border-border rounded-2xl shadow-2xl w-[700px] flex flex-col overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-border" style={{ background: "#0f1e0f" }}>
-          <div className="flex items-center gap-2.5">
-            <Satellite size={15} className="text-emerald-400" />
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+      <div className="bg-card border border-border rounded-2xl shadow-2xl w-[640px] max-h-[80vh] flex flex-col overflow-hidden">
+        <div className="flex items-center justify-between px-5 py-3 border-b border-border shrink-0" style={{ background: "#0f1e0f" }}>
+          <div className="flex items-center gap-3">
+            <MapPinned size={15} className="text-emerald-400" />
             <div>
-              <p className="text-[12px] font-bold text-white">Sentinel-1 SAR Imagery — {farmer.farmId}</p>
-              <p className="text-[10px] text-white/60">Google Earth Engine · C-Band SAR · VV+VH · simulated preview</p>
+              <p className="text-[12px] font-bold text-white">Exposure Summary — TCB No. {bulletin.bulletin_count}, {bulletin.typhoon_name}</p>
+              <p className="text-[10px] text-white/60">Areas affected and total wind-signal exposure time</p>
             </div>
           </div>
           <button onClick={onClose} className="w-6 h-6 flex items-center justify-center rounded hover:bg-white/10 text-white/60 hover:text-white transition-colors">
@@ -260,70 +235,52 @@ function SARQuickViewModal({ farmer, onClose }: { farmer: FarmerRecord; onClose:
           </button>
         </div>
 
-        <div className="flex flex-1 overflow-hidden">
-          <div className="flex-1 bg-black relative">
-            <canvas ref={canvasRef} width={420} height={280} className="w-full h-full object-contain" />
-            <div className="absolute top-2 right-2 flex flex-col gap-1">
-              {["VV", "VH", "RGB"].map(b => (
-                <button key={b} className="px-2 py-0.5 rounded bg-black/60 border border-white/20 text-white text-[9px] hover:bg-white/10 transition-colors">{b}</button>
-              ))}
-            </div>
-          </div>
-
-          <div className="w-52 shrink-0 border-l border-border flex flex-col overflow-auto bg-card">
-            <div className="px-3 py-2.5 border-b border-border">
-              <div className="flex items-center gap-1.5 mb-2">
-                <User size={11} className="text-[#166534]" />
-                <p className="text-[11px] font-bold">{farmer.insuredName}</p>
-              </div>
-              <div className="space-y-1 text-[10px]">
-                <div className="flex justify-between"><span className="text-muted-foreground">Farm ID</span><span className="font-mono text-[#166534]">{farmer.farmId}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Municipality</span><span>{farmer.municipality}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Area</span><span>{farmer.areaHectare.toFixed(2)} ha</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Growth Stage</span><span className="font-medium">{farmer.growthStage}</span></div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Signal</span>
-                  <span className={`px-1.5 py-0.5 rounded border text-[9px] font-bold ${farmer.signalNo === 2 ? "bg-amber-100 text-amber-700 border-amber-200" : farmer.signalNo === 3 ? "bg-red-100 text-red-700 border-red-200" : "bg-emerald-100 text-emerald-700 border-emerald-200"}`}>
-                    S{farmer.signalNo}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            <div className="px-3 py-2.5 border-b border-border">
-              <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2">SAR Metrics</p>
-              <div className="space-y-2">
-                {[
-                  { label: "Flood Extent", value: `${floodPct}%`, color: "text-blue-600" },
-                  { label: "Planted Area", value: `${plantedPct}%`, color: "text-emerald-600" },
-                  { label: "Coherence", value: coherence, color: "text-purple-600" },
-                  { label: "Pass Dir.", value: "Descending", color: "" },
-                  { label: "Resolution", value: "10m × 10m", color: "" },
-                ].map((m, i) => (
-                  <div key={i} className="flex justify-between items-center">
-                    <span className="text-[10px] text-muted-foreground">{m.label}</span>
-                    <span className={`text-[10px] font-bold ${m.color}`}>{m.value}</span>
-                  </div>
+        <div className="flex-1 overflow-auto p-4">
+          {isLoading ? (
+            <p className="text-[11px] text-muted-foreground text-center py-6">Computing exposure summary…</p>
+          ) : error ? (
+            <div className="px-3 py-2 text-[11px] text-white bg-red-600 rounded-lg">{error}</div>
+          ) : !result || result.summaries.length === 0 ? (
+            <p className="text-[11px] text-muted-foreground text-center py-6">No affected areas recorded for this bulletin yet.</p>
+          ) : (
+            <table className="w-full text-[11px]">
+              <thead>
+                <tr className="bg-[#166534] text-white">
+                  <th className="px-3 py-2 text-left font-semibold">Province</th>
+                  <th className="px-3 py-2 text-left font-semibold">Municipality</th>
+                  <th className="px-3 py-2 text-left font-semibold">Max Signal</th>
+                  <th className="px-3 py-2 text-left font-semibold">Start</th>
+                  <th className="px-3 py-2 text-left font-semibold">End</th>
+                  <th className="px-3 py-2 text-left font-semibold">Exposure (h)</th>
+                  <th className="px-3 py-2 text-left font-semibold">6h+ Eligible</th>
+                </tr>
+              </thead>
+              <tbody>
+                {result.summaries.map((s, i) => (
+                  <tr key={s.summary_id} className={`border-t border-border ${i % 2 === 0 ? "" : "bg-muted/10"}`}>
+                    <td className="px-3 py-2">{s.province}</td>
+                    <td className="px-3 py-2 font-medium">{s.municipality}</td>
+                    <td className="px-3 py-2">No. {s.max_signal_level}</td>
+                    <td className="px-3 py-2 text-muted-foreground whitespace-nowrap">{s.start_time}</td>
+                    <td className="px-3 py-2 text-muted-foreground whitespace-nowrap">{s.end_time}</td>
+                    <td className="px-3 py-2 font-semibold">{s.total_exposure_hours.toFixed(1)}</td>
+                    <td className="px-3 py-2">
+                      {s.is_eligible_6hr
+                        ? <span className="text-emerald-600 font-medium">Yes</span>
+                        : <span className="text-muted-foreground">No</span>}
+                    </td>
+                  </tr>
                 ))}
-              </div>
-            </div>
-
-            <div className="px-3 py-2.5">
-              <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2">Flood Risk Assessment</p>
-              <div className="w-full h-2 rounded-full bg-muted overflow-hidden mb-1">
-                <div className="h-full rounded-full bg-blue-500 transition-all" style={{ width: `${floodPct}%` }} />
-              </div>
-              <p className="text-[9px] text-muted-foreground">{floodPct}% of farm polygon shows backscatter consistent with inundation.</p>
-              <div className={`mt-2 px-2 py-1.5 rounded-lg text-[10px] font-medium ${floodPct > 50 ? "bg-red-100 text-red-700" : floodPct > 25 ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>
-                {floodPct > 50 ? "High Flood Risk — Recommend field verification" : floodPct > 25 ? "Moderate — Confirm with ground survey" : "Low — SAR shows minimal inundation"}
-              </div>
-            </div>
-          </div>
+              </tbody>
+            </table>
+          )}
         </div>
 
-        <div className="flex items-center justify-between px-4 py-2 border-t border-border bg-muted/20 shrink-0">
-          <p className="text-[9px] text-muted-foreground">Simulated GEE Sentinel-1 result · For assessment reference only · Verify with field data</p>
-          <button onClick={onClose} className="px-3 py-1 rounded-lg bg-[#166534] text-white text-[10px] font-semibold hover:bg-[#14532d] transition-colors">Close</button>
+        <div className="flex items-center justify-between px-5 py-3 border-t border-border shrink-0">
+          <p className="text-[10px] text-muted-foreground">
+            {result ? `${result.boundaries_computed} area(s) computed` : ""}
+          </p>
+          <button onClick={onClose} className="px-3 py-1.5 rounded-lg border border-border text-xs hover:bg-muted transition-colors">Close</button>
         </div>
       </div>
     </div>
@@ -332,16 +289,22 @@ function SARQuickViewModal({ farmer, onClose }: { farmer: FarmerRecord; onClose:
 
 interface MonitoringModuleProps {
   darkMode: boolean;
+  selectedBulletin: Bulletin | null;
+  onSelectBulletin: (bulletin: Bulletin | null) => void;
 }
 
-export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
+export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin }: MonitoringModuleProps) {
   const [bulletins, setBulletins] = useState<Bulletin[]>([]);
   const [isLoadingBulletins, setIsLoadingBulletins] = useState(false);
   const [isParsing, setIsParsing] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [lastCheck, setLastCheck] = useState<string | null>(null);
 
-  const [selectedBulletin, setSelectedBulletin] = useState<Bulletin | null>(null);
+  // Default matches the backend's own ordering (newest issued first) --
+  // chronological by issued_at, not by bulletin_count (which resets per
+  // typhoon and so isn't a true chronological key across typhoons).
+  const [bulletinSortField, setBulletinSortField] = useState<BulletinSortField>("issued_at");
+  const [bulletinSortDir, setBulletinSortDir] = useState<SortDir>("desc");
+
   const [selectedSignals, setSelectedSignals] = useState<TcbSignal[]>([]);
   const [isLoadingSelectedSignals, setIsLoadingSelectedSignals] = useState(false);
 
@@ -349,12 +312,67 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
   const [viewingSignals, setViewingSignals] = useState<TcbSignal[]>([]);
   const [isLoadingViewingSignals, setIsLoadingViewingSignals] = useState(false);
 
-  const [sarFarmer, setSarFarmer] = useState<FarmerRecord | null>(null);
+  const [exposureBulletin, setExposureBulletin] = useState<Bulletin | null>(null);
+  const [exposureResult, setExposureResult] = useState<ComputeExposureResult | null>(null);
+  const [isLoadingExposure, setIsLoadingExposure] = useState(false);
+  const [exposureError, setExposureError] = useState<string | null>(null);
 
-  const totalFarms = mockFarmers.length;
-  const plantedFarms = mockFarmers.filter(f => f.planted).length;
-  const totalArea = mockFarmers.reduce((s, f) => s + (f.planted ? f.areaHectare : 0), 0);
-  const totalIndemnity = mockFarmers.reduce((s, f) => s + f.indemnityPayment, 0);
+  const [assessmentsSummary, setAssessmentsSummary] = useState<AssessmentsSummary | null>(null);
+  const [insuranceSummary, setInsuranceSummary] = useState<InsuranceSummary | null>(null);
+  const [activeTyphoons, setActiveTyphoons] = useState<ActiveTyphoon[]>([]);
+
+  const loadActiveTyphoons = useCallback(async () => {
+    try {
+      const res = await getActiveTyphoons();
+      setActiveTyphoons(res.active_typhoons);
+    } catch {
+      setActiveTyphoons([]);
+    }
+  }, []);
+
+  // Stat cards + charts all come from one server-side aggregate now
+  // (2026-08-18, stage 2 of the on-demand-pagination redesign -- see
+  // .claude/FUNCTION_CHANGES.md) instead of reducing over the full farms
+  // array + a separate unpaginated GET /assessments/ fetch client-side.
+  useEffect(() => {
+    getAssessmentsSummary().then(setAssessmentsSummary).catch(() => setAssessmentsSummary(null));
+    getInsuranceSummary().then(setInsuranceSummary).catch(() => setInsuranceSummary(null));
+    loadActiveTyphoons();
+  }, [loadActiveTyphoons]);
+
+  const totalFarms = assessmentsSummary?.total_farms ?? 0;
+  const affectedFarms = assessmentsSummary?.affected_farms ?? 0;
+  const totalArea = assessmentsSummary?.total_area ?? 0;
+  const totalIndemnity = assessmentsSummary?.total_indemnity ?? 0;
+
+  const growthStageData = useMemo(
+    () => (assessmentsSummary?.growth_stage_distribution ?? []).map((d, i) => ({
+      name: d.crop_stage, value: d.farm_count, color: GROWTH_STAGE_COLORS[i % GROWTH_STAGE_COLORS.length],
+    })),
+    [assessmentsSummary]
+  );
+
+  const signalChartData = useMemo(
+    () => [...(assessmentsSummary?.signal_breakdown ?? [])]
+      .sort((a, b) => a.wind_velocity - b.wind_velocity)
+      .map(d => ({ signal: `Signal ${d.wind_velocity}`, farms: d.farm_count, area: Math.round(d.total_area * 10) / 10 })),
+    [assessmentsSummary]
+  );
+
+  const bulletinTimelineData = useMemo(() => {
+    const byDate = new Map<string, number>();
+    for (const b of bulletins) {
+      if (!b.issued_at) continue;
+      const day = b.issued_at.slice(0, 10);
+      byDate.set(day, (byDate.get(day) ?? 0) + 1);
+    }
+    const sortedDays = Array.from(byDate.keys()).sort();
+    let cumulative = 0;
+    return sortedDays.map(day => {
+      cumulative += byDate.get(day)!;
+      return { day, bulletins: cumulative };
+    });
+  }, [bulletins]);
 
   const loadBulletins = useCallback(async () => {
     setIsLoadingBulletins(true);
@@ -362,7 +380,6 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
     try {
       const data = await getBulletins();
       setBulletins(data);
-      setLastCheck(new Date().toLocaleTimeString());
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : "Failed to load bulletins.");
     } finally {
@@ -376,20 +393,26 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
 
   const handleParseLatest = async () => {
     setIsParsing(true);
-    setLoadError(null);
     try {
-      await parseBulletins();
+      const result = await parseBulletins();
       await loadBulletins();
+      await loadActiveTyphoons();
+      toast.success(
+        result.parsed_count > 0
+          ? `Parsed ${result.parsed_count} new bulletin(s).`
+          : "No new bulletins to parse — already up to date."
+      );
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : "Failed to parse latest bulletin.");
+      toast.error(error instanceof Error ? error.message : "Failed to parse latest bulletin.");
     } finally {
       setIsParsing(false);
     }
   };
 
   const handleSelectBulletin = async (b: Bulletin) => {
-    setSelectedBulletin(prev => (prev?.tcb_id === b.tcb_id ? null : b));
-    if (selectedBulletin?.tcb_id === b.tcb_id) return;
+    const isDeselecting = selectedBulletin?.tcb_id === b.tcb_id;
+    onSelectBulletin(isDeselecting ? null : b);
+    if (isDeselecting) return;
     setSelectedSignals([]);
     setIsLoadingSelectedSignals(true);
     try {
@@ -414,6 +437,20 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
     }
   };
 
+  const handleViewExposure = async (b: Bulletin) => {
+    setExposureBulletin(b);
+    setExposureResult(null);
+    setExposureError(null);
+    setIsLoadingExposure(true);
+    try {
+      setExposureResult(await computeExposure(b.tcb_id));
+    } catch (error) {
+      setExposureError(error instanceof Error ? error.message : "Failed to compute exposure summary.");
+    } finally {
+      setIsLoadingExposure(false);
+    }
+  };
+
   const handleDownloadBulletinSummary = (b: Bulletin) => {
     const content = [
       "PAGASA TROPICAL CYCLONE BULLETIN",
@@ -421,7 +458,7 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
       `Cyclone: ${b.typhoon_name}`,
       `Bulletin No.: ${b.bulletin_count}`,
       `Category: ${b.category ?? "Unknown"}`,
-      `Issued: ${b.issued_at ?? "Unknown"}`,
+      `Issued: ${formatIssuedAt(b.issued_at)}`,
       `Max Sustained Winds: ${b.max_sustained_winds ?? "—"} km/h`,
       `Gustiness: ${b.gustiness ?? "—"} km/h`,
     ].join("\n");
@@ -435,18 +472,65 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
   };
 
   const latestBulletin = bulletins[0];
-  const selectedMaxSignal = maxSignalLevel(selectedSignals);
+
+  // Client-side sort for the bulletins table -- separate from the raw
+  // `bulletins` array (which stays in API order, newest-issued-first, for
+  // `latestBulletin` above) so sorting the table doesn't change what counts
+  // as "latest."
+  const sortedBulletins = useMemo(() => {
+    const indexed = bulletins.map((b, i) => ({ b, i }));
+    indexed.sort((x, y) => {
+      let cmp: number;
+      if (bulletinSortField === "issued_at") {
+        cmp = (x.b.issued_at ? Date.parse(x.b.issued_at) : 0) - (y.b.issued_at ? Date.parse(y.b.issued_at) : 0);
+      } else {
+        const av = x.b[bulletinSortField];
+        const cv = y.b[bulletinSortField];
+        cmp = typeof av === "number" && typeof cv === "number"
+          ? av - cv
+          : String(av ?? "").localeCompare(String(cv ?? ""));
+      }
+      if (cmp === 0) cmp = x.i - y.i; // stable tiebreak
+      return bulletinSortDir === "asc" ? cmp : -cmp;
+    });
+    return indexed.map(({ b }) => b);
+  }, [bulletins, bulletinSortField, bulletinSortDir]);
+
+  const handleBulletinSort = (field: BulletinSortField) => {
+    if (bulletinSortField === field) {
+      setBulletinSortDir(d => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setBulletinSortField(field);
+      setBulletinSortDir(field === "issued_at" ? "desc" : "asc");
+    }
+  };
+
+  const BulletinSortIcon = ({ field }: { field: BulletinSortField }) =>
+    bulletinSortField === field
+      ? bulletinSortDir === "asc" ? <ChevronUp size={11} /> : <ChevronDown size={11} />
+      : <ArrowUpDown size={11} className="opacity-30" />;
+
+  const bulletinSortableCols: { label: string; field: BulletinSortField }[] = [
+    { label: "Bulletin", field: "bulletin_count" },
+    { label: "Typhoon", field: "typhoon_name" },
+    { label: "Issued", field: "issued_at" },
+    { label: "Category", field: "category" },
+    { label: "Max Winds", field: "max_sustained_winds" },
+    { label: "Gust", field: "gustiness" },
+  ];
+
+  const activeTyphoonNames = activeTyphoons.map(t => t.name).join(", ");
 
   const statCards = [
-    { label:"Active Typhoon",       value: latestBulletin?.typhoon_name ?? "—", sub: latestBulletin?.category ?? "No bulletins yet", icon:<Zap size={18} />,        color:"#ef4444", bg:"bg-red-50 dark:bg-red-950/30",     border:"border-red-200 dark:border-red-900" },
+    { label:"Active Typhoon",       value: activeTyphoonNames || "N/A", sub:"From PAGASA status page", icon:<Zap size={14} />,        color:"#ef4444", bg:"bg-red-50 dark:bg-red-950/30",     border:"border-red-200 dark:border-red-900" },
     { label:"TCBs Downloaded",      value: bulletins.length, sub:"from PAGASA parser",  icon:<Download size={18} />,   color:"#1e3a5f", bg:"bg-blue-50 dark:bg-blue-950/30",   border:"border-blue-200 dark:border-blue-900" },
-    { label:"Affected Farms",       value:`${plantedFarms}/${totalFarms}`,  sub:`${totalArea.toFixed(1)} ha planted`,icon:<Activity size={18} />, color:"#166534", bg:"bg-green-50 dark:bg-green-950/30", border:"border-green-200 dark:border-green-900" },
-    { label:"Est. Total Indemnity", value:`₱${(totalIndemnity/1000).toFixed(0)}K`, sub:"Pending finalization", icon:<BarChart2 size={18} />, color:"#ca8a04", bg:"bg-amber-50 dark:bg-amber-950/30", border:"border-amber-200 dark:border-amber-900" },
+    { label:"Affected Farms",       value:`${affectedFarms}/${totalFarms}`,  sub:`${totalArea.toFixed(1)} ha`,icon:<Activity size={18} />, color:"#166534", bg:"bg-green-50 dark:bg-green-950/30", border:"border-green-200 dark:border-green-900" },
+    { label:"Est. Total Indemnity", value:`₱${(totalIndemnity/1000).toFixed(0)}K`, sub:"From real computed assessments", icon:<BarChart2 size={18} />, color:"#ca8a04", bg:"bg-amber-50 dark:bg-amber-950/30", border:"border-amber-200 dark:border-amber-900" },
+    { label:"Active Insurance",     value: insuranceSummary ? `${insuranceSummary.active_count}/${insuranceSummary.total_count}` : "—", sub:"Within coverage window", icon:<ShieldCheck size={18} />, color:"#7c3aed", bg:"bg-purple-50 dark:bg-purple-950/30", border:"border-purple-200 dark:border-purple-900" },
   ];
 
   return (
-    <div className="h-full overflow-auto bg-background p-4 space-y-4">
-      {sarFarmer && <SARQuickViewModal farmer={sarFarmer} onClose={() => setSarFarmer(null)} />}
+    <div className="h-full overflow-hidden bg-background p-4 flex flex-col gap-4">
       {viewingTCB && (
         <TCBViewerModal
           bulletin={viewingTCB}
@@ -455,11 +539,20 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
           onClose={() => setViewingTCB(null)}
         />
       )}
+      {exposureBulletin && (
+        <ExposureSummaryModal
+          bulletin={exposureBulletin}
+          result={exposureResult}
+          isLoading={isLoadingExposure}
+          error={exposureError}
+          onClose={() => setExposureBulletin(null)}
+        />
+      )}
 
       {/* Stat Cards */}
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid grid-cols-5 gap-3 shrink-0">
         {statCards.map((c, i) => (
-          <div key={i} className={`bg-card border rounded-xl p-4 ${c.border}`}>
+          <div key={i} className={`bg-card border rounded-xl p-4 transition-shadow hover:shadow-md ${c.border}`}>
             <div className="flex items-start justify-between">
               <div>
                 <p className="text-[11px] text-muted-foreground uppercase tracking-wide">{c.label}</p>
@@ -474,9 +567,9 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
         ))}
       </div>
 
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-3 gap-4 flex-1 min-h-0">
         {/* TCB Bulletin List */}
-        <div className="col-span-2 bg-card border border-border rounded-xl flex flex-col overflow-hidden">
+        <div className="col-span-2 bg-card border border-border rounded-xl flex flex-col overflow-hidden min-h-0">
           <div className="flex items-center justify-between px-4 py-3 border-b border-border">
             <div className="flex items-center gap-2">
               <FileDown size={15} className="text-[#166534]" />
@@ -496,26 +589,31 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
             <div className="px-4 py-2 text-[11px] text-white bg-red-600">{loadError}</div>
           )}
 
-          <div className="flex-1 overflow-auto">
+          {/* Fills whatever space is left in this card and scrolls internally --
+              the page itself no longer scrolls, only this list does. */}
+          <div className="flex-1 min-h-0 overflow-auto">
             {isLoadingBulletins && bulletins.length === 0 ? (
               <p className="px-4 py-3 text-[11px] text-muted-foreground">Loading bulletins…</p>
             ) : bulletins.length === 0 ? (
               <p className="px-4 py-3 text-[11px] text-muted-foreground">No bulletins parsed yet.</p>
             ) : (
               <table className="w-full text-[11px]">
-                <thead>
+                <thead className="sticky top-0 z-10 bg-card">
                   <tr className="bg-muted/50 text-muted-foreground">
-                    <th className="px-3 py-2 text-left font-semibold">Bulletin</th>
-                    <th className="px-3 py-2 text-left font-semibold">Typhoon</th>
-                    <th className="px-3 py-2 text-left font-semibold">Issued</th>
-                    <th className="px-3 py-2 text-left font-semibold">Category</th>
-                    <th className="px-3 py-2 text-left font-semibold">Max Winds</th>
-                    <th className="px-3 py-2 text-left font-semibold">Gust</th>
+                    {bulletinSortableCols.map(col => (
+                      <th
+                        key={col.field}
+                        className="px-3 py-2 text-left font-semibold cursor-pointer hover:bg-muted/80 select-none"
+                        onClick={() => handleBulletinSort(col.field)}
+                      >
+                        <span className="flex items-center gap-1">{col.label}<BulletinSortIcon field={col.field} /></span>
+                      </th>
+                    ))}
                     <th className="px-3 py-2 text-left font-semibold">Action</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {bulletins.map(b => (
+                  {sortedBulletins.map(b => (
                     <tr
                       key={b.tcb_id}
                       className={`border-t border-border hover:bg-muted/30 cursor-pointer transition-colors ${selectedBulletin?.tcb_id === b.tcb_id ? "bg-[#166534]/10" : ""}`}
@@ -523,7 +621,7 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
                     >
                       <td className="px-3 py-2.5 font-semibold">TCB No. {b.bulletin_count}</td>
                       <td className="px-3 py-2.5">{b.typhoon_name}</td>
-                      <td className="px-3 py-2.5 text-muted-foreground">{b.issued_at ?? "—"}</td>
+                      <td className="px-3 py-2.5 text-muted-foreground">{formatIssuedAt(b.issued_at)}</td>
                       <td className="px-3 py-2.5">{b.category ?? "—"}</td>
                       <td className="px-3 py-2.5">{b.max_sustained_winds ?? "—"} km/h</td>
                       <td className="px-3 py-2.5">{b.gustiness ?? "—"} km/h</td>
@@ -543,6 +641,13 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
                           >
                             <Download size={11} className="text-muted-foreground" />
                           </button>
+                          <button
+                            onClick={e => { e.stopPropagation(); handleViewExposure(b); }}
+                            className="p-1 hover:bg-muted rounded"
+                            title="View Exposure Summary (areas & exposure time)"
+                          >
+                            <MapPinned size={11} className="text-emerald-600" />
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -558,149 +663,102 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
               <div className="flex items-start justify-between px-4 py-2.5">
                 <div>
                   <p className="text-[11px] font-bold text-[#166534]">TCB No. {selectedBulletin.bulletin_count} — {selectedBulletin.typhoon_name}</p>
-                  <p className="text-[10px] text-muted-foreground">{selectedBulletin.issued_at ?? "Unknown"} · {selectedBulletin.category ?? "Unknown category"}</p>
+                  <p className="text-[10px] text-muted-foreground">{formatIssuedAt(selectedBulletin.issued_at)} · {selectedBulletin.category ?? "Unknown category"}</p>
                   <p className="text-[10px] mt-0.5">Max winds: {selectedBulletin.max_sustained_winds ?? "—"} km/h · Gust: {selectedBulletin.gustiness ?? "—"} km/h</p>
                   <p className="text-[10px] text-muted-foreground">
                     Areas: {isLoadingSelectedSignals ? "Loading…" : (uniqueAreas(selectedSignals).join(" • ") || "No signal data recorded")}
                   </p>
                 </div>
-                <button onClick={() => setSelectedBulletin(null)} className="text-muted-foreground text-[10px] hover:text-foreground mt-0.5">✕</button>
+                <button onClick={() => onSelectBulletin(null)} className="text-muted-foreground text-[10px] hover:text-foreground mt-0.5">✕</button>
               </div>
-              {/* Farmer list with SAR quick-view, cross-referenced by the bulletin's highest recorded signal level */}
-              {selectedMaxSignal > 0 && (
-                <div className="border-t border-[#166534]/20 px-4 py-2">
-                  <div className="flex items-center gap-2 mb-1.5">
-                    <Satellite size={11} className="text-[#166534]" />
-                    <p className="text-[10px] font-semibold">Farmers Under Signal No. {selectedMaxSignal} — Click to view SAR Imagery</p>
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {mockFarmers
-                      .filter(f => f.signalNo === selectedMaxSignal && f.planted)
-                      .slice(0, 10)
-                      .map(f => (
-                        <button
-                          key={f.farmId}
-                          onClick={() => setSarFarmer(f)}
-                          className="flex items-center gap-1 px-2 py-1 rounded-lg bg-card border border-border hover:bg-[#166534] hover:text-white hover:border-[#166534] transition-all group text-[10px]"
-                          title={`${f.insuredName} — ${f.municipality}`}
-                        >
-                          <MapPin size={9} className="text-[#166534] group-hover:text-white" />
-                          <span className="font-mono">{f.farmId}</span>
-                          <span className="text-muted-foreground group-hover:text-white/80 text-[9px]">{f.insuredName.split(" ").pop()}</span>
-                          <Satellite size={8} className="text-muted-foreground group-hover:text-white/80 ml-0.5" />
-                        </button>
-                      ))
-                    }
-                  </div>
-                </div>
-              )}
             </div>
           )}
         </div>
 
-        {/* Right Panel */}
+        {/* Right Panel -- System Status moved to Calibration & Settings */}
         <div className="flex flex-col gap-4">
-          {/* System Status */}
-          <div className="bg-card border border-border rounded-xl p-4">
-            <div className="flex items-center gap-2 mb-3">
-              <Wifi size={14} className="text-[#166534]" />
-              <span className="text-xs font-semibold">System Status</span>
-            </div>
-            <div className="space-y-2">
-              {[
-                { label:"Backend API",      ok: !loadError, detail: loadError ? "Unreachable" : "Connected" },
-                { label:"GEE Connection",   ok:true,  detail:"1000 EEC allocated (mock)"  },
-                { label:"Email Alerts",     ok:true,  detail:"SMTP connected (mock)"      },
-                { label:"Database Backup",  ok:false, detail:"Last: 30 Oct 2024 (mock)"   },
-                { label:"Session Monitor",  ok:true,  detail:"5-min timeout active (mock)"},
-              ].map((s, i) => (
-                <div key={i} className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    {s.ok
-                      ? <CheckCircle size={11} className="text-emerald-500 shrink-0" />
-                      : <AlertTriangle size={11} className="text-amber-500 shrink-0" />
-                    }
-                    <span className="text-[11px]">{s.label}</span>
-                  </div>
-                  <span className="text-[10px] text-muted-foreground">{s.detail}</span>
-                </div>
-              ))}
-            </div>
-            <div className="mt-3 pt-2 border-t border-border flex items-center gap-1.5">
-              <Clock size={10} className="text-muted-foreground" />
-              <span className="text-[10px] text-muted-foreground">Last check: {lastCheck ?? "—"}</span>
-            </div>
-          </div>
-
-          {/* Growth Stage Pie (mock — no assessment endpoint match yet) */}
+          {/* Growth Stage Distribution -- from real assessment.crop_stage values */}
           <div className="bg-card border border-border rounded-xl p-4 flex-1">
             <div className="flex items-center gap-2 mb-2">
               <TrendingUp size={14} className="text-[#ca8a04]" />
               <span className="text-xs font-semibold">Growth Stage Distribution</span>
             </div>
-            <ResponsiveContainer width="100%" height={130}>
-              <PieChart>
-                <Pie data={growthPieData} dataKey="value" cx="50%" cy="50%" innerRadius={30} outerRadius={55} paddingAngle={3}>
-                  {growthPieData.map((d, i) => <Cell key={i} fill={d.color} />)}
-                </Pie>
-                <RTooltip
-                  contentStyle={{ backgroundColor: darkMode ? "#111e11" : "#fff", border:"1px solid #ccc", borderRadius:6, fontSize:11 }}
-                  formatter={(v: number) => [`${v} farms`, ""]}
-                />
-              </PieChart>
-            </ResponsiveContainer>
-            <div className="flex flex-wrap gap-x-2 gap-y-1 mt-1">
-              {growthPieData.map(d => (
-                <span key={d.name} className="flex items-center gap-1 text-[10px]">
-                  <span className="w-2 h-2 rounded-sm" style={{ backgroundColor: d.color }} />
-                  {d.name} ({d.value})
-                </span>
-              ))}
-            </div>
+            {growthStageData.length === 0 ? (
+              <p className="text-[11px] text-muted-foreground py-6 text-center">No farms yet.</p>
+            ) : (
+              <>
+                <ResponsiveContainer width="100%" height={130}>
+                  <PieChart>
+                    <Pie data={growthStageData} dataKey="value" cx="50%" cy="50%" innerRadius={30} outerRadius={55} paddingAngle={3}>
+                      {growthStageData.map((d, i) => <Cell key={i} fill={d.color} />)}
+                    </Pie>
+                    <RTooltip
+                      contentStyle={{ backgroundColor: darkMode ? "#111e11" : "#fff", border:"1px solid #ccc", borderRadius:6, fontSize:11 }}
+                      formatter={(v: number) => [`${v} farms`, ""]}
+                    />
+                  </PieChart>
+                </ResponsiveContainer>
+                <div className="flex flex-wrap gap-x-2 gap-y-1 mt-1">
+                  {growthStageData.map(d => (
+                    <span key={d.name} className="flex items-center gap-1 text-[10px]">
+                      <span className="w-2 h-2 rounded-sm" style={{ backgroundColor: d.color }} />
+                      {d.name} ({d.value})
+                    </span>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
         </div>
       </div>
 
-      {/* Bottom Charts Row (mock — no assessment endpoint match yet) */}
-      <div className="grid grid-cols-2 gap-4">
+      {/* Bottom Charts Row -- from real assessment/bulletin data */}
+      <div className="grid grid-cols-2 gap-4 shrink-0">
         <div className="bg-card border border-border rounded-xl p-4">
           <div className="flex items-center gap-2 mb-3">
             <BarChart2 size={14} className="text-[#1e3a5f]" />
             <span className="text-xs font-semibold">Farms by Signal Number</span>
           </div>
-          <ResponsiveContainer width="100%" height={150}>
-            <BarChart data={signalChartData} barSize={28}>
-              <CartesianGrid strokeDasharray="3 3" stroke={darkMode ? "#1c2e1c" : "#e5e7eb"} />
-              <XAxis dataKey="signal" tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
-              <RTooltip
-                contentStyle={{ backgroundColor: darkMode ? "#111e11" : "#fff", border:"1px solid #ccc", borderRadius:6, fontSize:11 }}
-              />
-              <Bar dataKey="farms"  name="Farms"       fill="#166534" radius={[4,4,0,0]} />
-              <Bar dataKey="area"   name="Area (ha)"   fill="#1e3a5f" radius={[4,4,0,0]} />
-              <Legend iconSize={10} iconType="square" wrapperStyle={{ fontSize: 10 }} />
-            </BarChart>
-          </ResponsiveContainer>
+          {signalChartData.length === 0 ? (
+            <p className="text-[11px] text-muted-foreground py-8 text-center">No assessed farms yet.</p>
+          ) : (
+            <ResponsiveContainer width="100%" height={150}>
+              <BarChart data={signalChartData} barSize={28}>
+                <CartesianGrid strokeDasharray="3 3" stroke={darkMode ? "#1c2e1c" : "#e5e7eb"} />
+                <XAxis dataKey="signal" tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
+                <RTooltip
+                  contentStyle={{ backgroundColor: darkMode ? "#111e11" : "#fff", border:"1px solid #ccc", borderRadius:6, fontSize:11 }}
+                />
+                <Bar dataKey="farms"  name="Farms"       fill={SIGNAL_BAR_COLOR} radius={[4,4,0,0]} />
+                <Bar dataKey="area"   name="Area (ha)"   fill="#1e3a5f" radius={[4,4,0,0]} />
+                <Legend iconSize={10} iconType="square" wrapperStyle={{ fontSize: 10 }} />
+              </BarChart>
+            </ResponsiveContainer>
+          )}
         </div>
 
         <div className="bg-card border border-border rounded-xl p-4">
           <div className="flex items-center gap-2 mb-3">
             <Activity size={14} className="text-[#ef4444]" />
-            <span className="text-xs font-semibold">TCB Download Timeline (01 Nov 2024)</span>
+            <span className="text-xs font-semibold">TCB Download Timeline</span>
           </div>
-          <ResponsiveContainer width="100%" height={150}>
-            <LineChart data={timelineData}>
-              <CartesianGrid strokeDasharray="3 3" stroke={darkMode ? "#1c2e1c" : "#e5e7eb"} />
-              <XAxis dataKey="time" tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
-              <RTooltip
-                contentStyle={{ backgroundColor: darkMode ? "#111e11" : "#fff", border:"1px solid #ccc", borderRadius:6, fontSize:11 }}
-              />
-              <Line type="monotone" dataKey="bulletins" name="Bulletins"    stroke="#166534" strokeWidth={2} dot={{ r:3 }} />
-              <Line type="monotone" dataKey="farms"     name="Farms Logged" stroke="#ca8a04" strokeWidth={2} dot={{ r:3 }} strokeDasharray="5 3" />
-              <Legend iconSize={10} wrapperStyle={{ fontSize: 10 }} />
-            </LineChart>
-          </ResponsiveContainer>
+          {bulletinTimelineData.length === 0 ? (
+            <p className="text-[11px] text-muted-foreground py-8 text-center">No bulletins with a known issue date yet.</p>
+          ) : (
+            <ResponsiveContainer width="100%" height={150}>
+              <LineChart data={bulletinTimelineData}>
+                <CartesianGrid strokeDasharray="3 3" stroke={darkMode ? "#1c2e1c" : "#e5e7eb"} />
+                <XAxis dataKey="day" tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
+                <YAxis tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
+                <RTooltip
+                  contentStyle={{ backgroundColor: darkMode ? "#111e11" : "#fff", border:"1px solid #ccc", borderRadius:6, fontSize:11 }}
+                />
+                <Line type="monotone" dataKey="bulletins" name="Cumulative Bulletins" stroke="#166534" strokeWidth={2} dot={{ r:3 }} />
+                <Legend iconSize={10} wrapperStyle={{ fontSize: 10 }} />
+              </LineChart>
+            </ResponsiveContainer>
+          )}
         </div>
       </div>
 

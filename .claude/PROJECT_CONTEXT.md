@@ -9,6 +9,7 @@ During typhoon disasters, the platform automates the extraction of meteorologica
 
 ## Technology Stack
 - **Backend:** FastAPI (Python), PostgreSQL with PostGIS extension, SQLAlchemy ORM, GeoAlchemy2, GeoPandas, Shapely, pyproj, BeautifulSoup4 (PAGASA PDF scraping), pdfplumber.
+- **Spatial Layer Serving:** GeoServer, serving map layers (farm boundaries, wind footprints, typhoon trajectories) between the Web-GIS Application Layer and the Presentation Layer.
 - **Frontend:** React (Vite), Leaflet JS (map rendering), Tailwind CSS.
 - **Deployment:** On-premise local server within PCIC Region X LAN (no public cloud dependency for data privacy).
 
@@ -24,11 +25,11 @@ During typhoon disasters, the platform automates the extraction of meteorologica
    - Manages database backups and restores.
 
 ## Core Features & Logic
-- **Parametric Indemnity Formula:** `I = (AC / 1000) * IF * Area`
+- **Parametric Indemnity Formula:** `I = (AC / 1000) * IF`
   - `I` = Indemnity Payout (PHP)
   - `AC` = Amount of Cover per hectare (configured in Settings, e.g., 25,000 PHP)
   - `IF` = Indemnity Factor based on Yield Loss % (booting, flowering, maturity growth stages crossed with wind signals 2 to 5 and exposure duration).
-  - `Area` = Land size in hectares.
+  - Per PCIC (the source of this formula), farm area is not a separate factor.
 - **PAGASA Bulletins:** Automatically scraped and parsed. Tracks TCWS wind speeds:
   - Signal 2: 62-88 km/h
   - Signal 3: 89-117 km/h

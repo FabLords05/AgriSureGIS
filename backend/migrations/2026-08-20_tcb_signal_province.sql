@@ -1,0 +1,21 @@
+-- Migration: tbl_tcb_signals.province
+-- (Fabio, 2026-08-20 -- part of the nationwide PSGC expansion / removal of
+-- the Mindanao-only exposure-computation restriction, requested for testing
+-- whether exposure calculation works with real nationwide signal data.
+-- exposure_calculator.py previously matched signal area names against
+-- AdminBoundary by municipality name alone, which was safe at Region X +
+-- Caraga scale (8 provinces, no name collisions) but silently wrong
+-- nationwide (e.g. multiple "Santa Cruz" across different provinces). This
+-- column lets bulletin_parser.py record which province a signal's area was
+-- actually matched against, so exposure_calculator.py can key on
+-- (province, municipality) instead.
+--
+-- Run against any already-provisioned DB (local or remote):
+--   psql -U agrisure_admin -d agrisure_db -f backend/migrations/2026-08-20_tcb_signal_province.sql
+--
+-- init_schema.sql has also been updated to create the column directly for
+-- future fresh installs -- this file is for bringing an existing DB up to
+-- date without losing its data. Nullable: existing rows saved before this
+-- migration never had a province recorded and are left as NULL, not backfilled.
+
+ALTER TABLE tbl_tcb_signals ADD COLUMN IF NOT EXISTS province VARCHAR(100);

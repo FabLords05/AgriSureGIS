@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="AgriSureGIS-mock-data" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk>
+    <name>MOCK FARM BOUNDARY - 900002/9100002 - Talakag, Bukidnon</name>
+    <trkseg>
+      <trkpt lat="7.9803" lon="124.7159"/>
+      <trkpt lat="7.9803" lon="124.7170"/>
+      <trkpt lat="7.9812" lon="124.7173"/>
+      <trkpt lat="7.9814" lon="124.7158"/>
+      <trkpt lat="7.9803" lon="124.7159"/>
+    </trkseg>
+  </trk>
+</gpx>

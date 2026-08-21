@@ -1,119 +1,289 @@
-import { useState, useRef } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import {
-  UploadCloud, FileText, Map as MapIcon, ChevronUp, ChevronDown,
-  Filter, ArrowUpDown, Download, AlertTriangle, CheckCircle2, Table2, Satellite
+  ChevronUp, ChevronDown,
+  Filter, User, ArrowUpDown, UploadCloud, CheckCircle2, Table2, ShieldCheck, Loader2
 } from "lucide-react";
 import { GISLeafletMap } from "./GISLeafletMap";
-import { AOISARPanel } from "./AOISARPanel";
-import { mockFarmers, FarmerRecord, GrowthStage } from "./mockData";
-import { uploadCsv } from "@/lib/api";
+import {
+  getAssessments, getMunicipalities, searchFarmers,
+  Farm, Assessment, Bulletin, FarmerSearchResult,
+} from "@/lib/api";
+import { FarmsData } from "@/lib/useFarmsData";
 
-type SortField = keyof FarmerRecord;
+interface FarmRow extends Farm {
+  assessment: Assessment | null;
+}
+
+type SortField = "farm_id" | "farmer_name" | "municipality" | "barangay" | "area_size";
 type SortDir   = "asc" | "desc";
 
-interface UploadedFile { name: string; size: string; type: "csv" | "gpx"; status: "ready" | "processing" | "done" | "error" }
+// ---------------------------------------------------------------------------
+// Farm Records table virtualization -- the shared farms cache can hold the
+// entire ~48,588-row table (see useFarmsData.ts), and rendering all of them
+// as real <tr> elements (once the full dataset lands, or "Active Insurance
+// Only" is toggled off) meant tens of thousands of live DOM nodes + matching
+// React fiber nodes mounted at once -- this is what was driving the browser
+// tab's RAM into the 5-7GB range. Same idea as GISLeafletMap's viewport-bbox
+// culling, applied to table scroll position instead of map bounds: only the
+// rows currently scrolled into view (plus a small overscan buffer) are ever
+// mounted as real <tr>s.
+// ---------------------------------------------------------------------------
+// Fixed row height (px), matching the table body's current px-2.5 py-2 /
+// text-[11px] styling -- used only for the scroll-position math below, never
+// applied via CSS. If the row's visual styling changes, update this to
+// match; a slight mismatch only costs a few px of blank space at scroll
+// boundaries (self-corrects on the next scroll tick), it doesn't break
+// correctness.
+const ROW_HEIGHT = 33;
+// Extra rows rendered above/below the visible range so a fast scroll or key
+// repeat doesn't show a blank flash before the next scroll event lands.
+const OVERSCAN = 10;
 
 interface SpatialAnalysisModuleProps {
   darkMode: boolean;
+  selectedBulletin: Bulletin | null;
+  // Owned by App.tsx (useFarmsData), not locally -- this module is
+  // conditionally mounted, so keeping the hook + these filters one level up
+  // means switching tabs away and back doesn't drop progress or re-fetch
+  // from scratch. See useFarmsData.ts for the fetch mechanics.
+  farmsData: FarmsData;
+  // activeInsuranceOnly/filterMuni also live in App.tsx for the same
+  // reason. filterMuni === "All" means "nothing searched yet" -- the default
+  // view (active-insurance farms across every municipality) is still shown
+  // in that state; only turning Active Insurance Only *off* requires a real
+  // municipality first, since "every farm, active or not, unscoped" is the
+  // one combination that's unbounded at 100k-1M scale (2026-08-18, stage 2
+  // of the on-demand-pagination redesign -- see .claude/FUNCTION_CHANGES.md).
+  activeInsuranceOnly: boolean;
+  onActiveInsuranceOnlyChange: (value: boolean) => void;
+  filterMuni: string;
+  onFilterMuniChange: (value: string) => void;
+  // Farmer search (2026-08-18) -- scopes exactly like filterMuni (either
+  // one alone is enough to allow Active Insurance Only off), and combines
+  // with it rather than replacing it (both filters AND together when both
+  // are set). null = no farmer picked.
+  filterFarmerId: number | null;
+  onFilterFarmerIdChange: (value: number | null) => void;
+  // CSV/GPX upload progress + handlers now live in App.tsx, not here --
+  // this module is conditionally mounted (only while activeModule ===
+  // "spatial"), so an in-flight upload's progress/polling used to freeze
+  // (and its completion toast could be missed entirely) the moment the user
+  // switched to another module tab before it finished. Lifting this one
+  // level up, same reasoning/pattern as farmsData above, means the upload
+  // keeps polling and still notifies (toast + notification bell) no matter
+  // which module is on screen when it completes (2026-08-20, per Fabio).
+  csvUploadProgress: { processed: number; total: number } | null;
+  gpxUploadProgress: { current: number; total: number } | null;
+  onCsvFileSelected: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onGpxFilesSelected: (e: React.ChangeEvent<HTMLInputElement>) => void;
 }
 
-const MUNICIPALITIES = ["All", "Naga City", "Pili", "Libmanan", "Sipocot", "Goa", "Lagonoy"];
-const GROWTH_STAGES: (GrowthStage | "All")[] = ["All", "Seedling", "Vegetative", "Reproductive", "Ripening"];
-
-export function SpatialAnalysisModule({ darkMode }: SpatialAnalysisModuleProps) {
-  const [farmers, setFarmers] = useState<FarmerRecord[]>(mockFarmers);
-  const [selectedFarmId, setSelectedFarmId] = useState<string | null>(null);
-  const [showSARPanel, setShowSARPanel]      = useState(false);
-  const [filterMuni, setFilterMuni] = useState("All");
-  const [filterStage, setFilterStage] = useState<GrowthStage | "All">("All");
-  const [filterPlanted, setFilterPlanted] = useState<"All" | "Yes" | "No">("All");
-  const [sortField, setSortField] = useState<SortField>("rowId");
+export function SpatialAnalysisModule({
+  darkMode, selectedBulletin, farmsData,
+  activeInsuranceOnly, onActiveInsuranceOnlyChange, filterMuni, onFilterMuniChange,
+  filterFarmerId, onFilterFarmerIdChange,
+  csvUploadProgress, gpxUploadProgress, onCsvFileSelected, onGpxFilesSelected,
+}: SpatialAnalysisModuleProps) {
+  const {
+    farms,
+    isLoadingFirstPage,
+    isRefreshing,
+    isFetchingMore,
+    hasMore,
+    loadError,
+    requestMore,
+  } = farmsData;
+  const [assessments, setAssessments] = useState<Assessment[]>([]);
+  const [selectedFarmId, setSelectedFarmId] = useState<number | null>(null);
+  // All real municipality names, for the search box's suggestions --
+  // fetched once from a dedicated endpoint (not derived from `farms`,
+  // which is empty until a municipality is actually picked -- see
+  // getMunicipalities()'s doc comment in api.ts).
+  const [allMunicipalities, setAllMunicipalities] = useState<string[]>([]);
+  const [muniQuery, setMuniQuery] = useState("");
+  const [showMuniSuggestions, setShowMuniSuggestions] = useState(false);
+  // Farmer search box -- unlike municipalities, farmer names can't be
+  // preloaded whole (tbl_farmers_profile scales with farm count), so
+  // suggestions come from a debounced server-side query instead (see the
+  // effect below and searchFarmers() in api.ts).
+  const [farmerQuery, setFarmerQuery] = useState("");
+  const [showFarmerSuggestions, setShowFarmerSuggestions] = useState(false);
+  const [farmerSuggestions, setFarmerSuggestions] = useState<FarmerSearchResult[]>([]);
+  // Bumped on every keystroke -- a slow search response landing after a
+  // newer one has already resolved is discarded rather than overwriting
+  // fresher suggestions with stale ones.
+  const farmerSearchSeqRef = useRef(0);
+  const [sortField, setSortField] = useState<SortField>("farm_id");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
-  const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
-  const [isDragging, setIsDragging] = useState(false);
   const [topPanelH, setTopPanelH] = useState(55);
-  const [showWarning, setShowWarning] = useState<string | null>(null);
-  const [csvUploadStatus, setCsvUploadStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  // csvUploadProgress/gpxUploadProgress (and the failure-details modal they
+  // used to feed) now live in App.tsx -- see SpatialAnalysisModuleProps'
+  // doc comment above.
+  const csvInputRef = useRef<HTMLInputElement>(null);
+  const gpxInputRef = useRef<HTMLInputElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const sentinelRef = useRef<HTMLTableRowElement | null>(null);
+  // Drives the Farm Records table virtualization -- see the ROW_HEIGHT/
+  // OVERSCAN comment above. tableViewportH starts at 0 (unmeasured); the
+  // effect below fills it in as soon as scrollContainerRef exists and keeps
+  // it current across resizes.
+  const [tableScrollTop, setTableScrollTop] = useState(0);
+  const [tableViewportH, setTableViewportH] = useState(0);
 
-  const filteredFarmers = farmers
-    .filter(f => filterMuni === "All" || f.municipality === filterMuni)
-    .filter(f => filterStage === "All" || f.growthStage === filterStage)
-    .filter(f => filterPlanted === "All" || (filterPlanted === "Yes" ? f.planted : !f.planted))
-    .sort((a, b) => {
-      const va = a[sortField]; const vb = b[sortField];
-      const cmp = typeof va === "number" && typeof vb === "number"
-        ? va - vb
-        : String(va).localeCompare(String(vb));
-      return sortDir === "asc" ? cmp : -cmp;
-    });
+  useEffect(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    setTableViewportH(el.clientHeight);
+    const observer = new ResizeObserver(() => setTableViewportH(el.clientHeight));
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    getAssessments().then(res => setAssessments(res.data)).catch(() => setAssessments([]));
+    getMunicipalities().then(res => setAllMunicipalities(res.data)).catch(() => setAllMunicipalities([]));
+  }, []);
+
+  // Infinite scroll: observe a sentinel row at the end of the table body and
+  // request the next page immediately once it scrolls into view, instead of
+  // waiting for useFarmsData's own background-paced loop to get there.
+  // Re-attaches whenever the sentinel's presence in the DOM changes (first
+  // page finishing load, or `hasMore` flipping) since IntersectionObserver
+  // needs a live DOM node.
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    const root = scrollContainerRef.current;
+    if (!hasMore || !sentinel || !root) return;
+
+    const observer = new IntersectionObserver(
+      entries => {
+        if (entries[0]?.isIntersecting) requestMore();
+      },
+      { root, rootMargin: "200px" }
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+    // `requestMore` is a fresh function identity on every App-level re-render
+    // (whenever useFarmsData's state changes, which happens on every page
+    // fetch) -- excluded from deps so the observer isn't torn down/rebuilt
+    // constantly; it always calls through to the same underlying fetch logic
+    // regardless of which render's closure invoked it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasMore, isLoadingFirstPage]);
+
+  // Most recent assessment per farm_id (list_assessments() is ordered by assessment_date desc).
+  const assessmentByFarmId = useMemo(() => {
+    const map = new Map<number, Assessment>();
+    for (const a of assessments) {
+      if (a.farm_id != null && !map.has(a.farm_id)) map.set(a.farm_id, a);
+    }
+    return map;
+  }, [assessments]);
+
+  const farmRows: FarmRow[] = useMemo(
+    () => farms.map(f => ({ ...f, assessment: assessmentByFarmId.get(f.farm_id) ?? null })),
+    [farms, assessmentByFarmId]
+  );
+
+  // Type-ahead suggestions for the municipality search box -- matches on the
+  // typed letters as a prefix (case-insensitive), same idea as the old select
+  // dropdown but searchable instead of scroll-to-find. Sourced from
+  // `allMunicipalities` (always populated, see the mount effect above), not
+  // from `farms` -- `farms` is empty until a municipality is actually picked.
+  const muniSuggestions = useMemo(() => {
+    const q = muniQuery.trim().toLowerCase();
+    if (!q) return allMunicipalities;
+    return allMunicipalities.filter(m => m.toLowerCase().startsWith(q));
+  }, [allMunicipalities, muniQuery]);
+
+  const selectMunicipality = (m: string) => {
+    onFilterMuniChange(m);
+    setMuniQuery(m);
+    setShowMuniSuggestions(false);
+  };
+
+  // Debounced farmer-name search -- waits 300ms after the last keystroke
+  // before actually calling the backend, so a fast typist doesn't fire a
+  // request per character. Cleared immediately (no request at all) once
+  // the box is emptied.
+  useEffect(() => {
+    const q = farmerQuery.trim();
+    if (!q) {
+      setFarmerSuggestions([]);
+      return;
+    }
+    const mySeq = ++farmerSearchSeqRef.current;
+    const timer = setTimeout(() => {
+      searchFarmers(q)
+        .then(res => {
+          if (mySeq === farmerSearchSeqRef.current) setFarmerSuggestions(res.data);
+        })
+        .catch(() => {
+          if (mySeq === farmerSearchSeqRef.current) setFarmerSuggestions([]);
+        });
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [farmerQuery]);
+
+  const selectFarmer = (farmerId: number, name: string) => {
+    onFilterFarmerIdChange(farmerId);
+    setFarmerQuery(name);
+    setShowFarmerSuggestions(false);
+  };
+
+  // Mirrors the "active" definition used by GET /api/insurance/summary:
+  // today's date falls within effectivity_date-expiry_date, inclusive.
+  // The API formats these as "MM/DD/YYYY" (farms.py), so they must be
+  // parsed rather than compared as strings.
+  const parseMDY = (s: string) => {
+    const [month, day, year] = s.split("/").map(Number);
+    return new Date(year, month - 1, day);
+  };
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const isActiveInsurance = (f: Farm) =>
+    f.effectivity_date != null && f.expiry_date != null &&
+    parseMDY(f.effectivity_date) <= today && today <= parseMDY(f.expiry_date);
+
+  // Memoized: this now also feeds the map (see the GISLeafletMap `farms`
+  // prop below), so an unmemoized version would hand it a new array
+  // reference on every unrelated re-render (e.g. typing in the
+  // municipality search box), defeating the map's own memo chain.
+  const filteredFarms = useMemo(
+    () => farmRows
+      .filter(f => filterMuni === "All" || f.municipality === filterMuni)
+      .filter(f => filterFarmerId == null || f.farmer_id === filterFarmerId)
+      .filter(f => !activeInsuranceOnly || isActiveInsurance(f))
+      .sort((a, b) => {
+        const va = a[sortField] ?? "";
+        const vb = b[sortField] ?? "";
+        const cmp = typeof va === "number" && typeof vb === "number"
+          ? va - vb
+          : String(va).localeCompare(String(vb));
+        return sortDir === "asc" ? cmp : -cmp;
+      }),
+    [farmRows, filterMuni, filterFarmerId, activeInsuranceOnly, sortField, sortDir]
+  );
+
+  // Windowed slice of filteredFarms actually mounted as <tr>s -- see the
+  // virtualization comment near ROW_HEIGHT/OVERSCAN above. Before the first
+  // viewport-height measurement lands (tableViewportH still 0), falls back
+  // to a fixed first batch instead of "everything," so the initial paint
+  // never re-creates the DOM-blowup this is fixing.
+  const tableStartIndex = tableViewportH > 0
+    ? Math.max(0, Math.floor(tableScrollTop / ROW_HEIGHT) - OVERSCAN)
+    : 0;
+  const tableVisibleCount = tableViewportH > 0
+    ? Math.ceil(tableViewportH / ROW_HEIGHT) + OVERSCAN * 2
+    : Math.min(filteredFarms.length, 50);
+  const tableEndIndex = Math.min(filteredFarms.length, tableStartIndex + tableVisibleCount);
+  const windowedFarms = filteredFarms.slice(tableStartIndex, tableEndIndex);
+  const topSpacerHeight = tableStartIndex * ROW_HEIGHT;
+  const bottomSpacerHeight = (filteredFarms.length - tableEndIndex) * ROW_HEIGHT;
 
   const handleSort = (field: SortField) => {
     if (sortField === field) setSortDir(d => d === "asc" ? "desc" : "asc");
     else { setSortField(field); setSortDir("asc"); }
-  };
-
-  const handleDrop = (e: React.DragEvent) => {
-    e.preventDefault(); setIsDragging(false);
-    const files = Array.from(e.dataTransfer.files);
-    processFiles(files);
-  };
-
-  const processFiles = (files: File[]) => {
-    files.forEach(file => {
-      const ext = file.name.split(".").pop()?.toLowerCase();
-      if (ext !== "csv" && ext !== "gpx") {
-        setShowWarning(`"${file.name}" is not a supported format. Please upload .csv or .gpx files.`);
-        return;
-      }
-      const newFile: UploadedFile = {
-        name: file.name,
-        size: `${(file.size / 1024).toFixed(0)} KB`,
-        type: ext as "csv" | "gpx",
-        status: "processing",
-      };
-      setUploadedFiles(prev => [...prev, newFile]);
-
-      if (ext === "csv") {
-        uploadCsv(file)
-          .then(result => {
-            setUploadedFiles(prev => prev.map(f => f.name === newFile.name ? { ...f, status: "done" } : f));
-            setCsvUploadStatus({
-              type: "success",
-              message: `${result.message} (${result.rows_inserted} inserted, ${result.rows_skipped} skipped)`,
-            });
-          })
-          .catch(error => {
-            setUploadedFiles(prev => prev.map(f => f.name === newFile.name ? { ...f, status: "error" } : f));
-            setCsvUploadStatus({
-              type: "error",
-              message: error instanceof Error ? error.message : "CSV upload failed.",
-            });
-          });
-      } else {
-        // GPX ingestion has no backend endpoint yet — kept as a visual-only placeholder.
-        setTimeout(() => {
-          setUploadedFiles(prev => prev.map(f => f.name === newFile.name ? { ...f, status: "done" } : f));
-        }, 1500);
-      }
-    });
-  };
-
-  const handleExportPeriodOfExposure = () => {
-    const headers = ["ROW_ID","FARMER_ID","INSURED_NAME","MUNICIPALITY","BARANGAY","FARM_ID","AREA_HA","PLANTED","PLANTING_DATE","GROWTH_STAGE","SIGNAL_NO","PERIOD_OF_EXPOSURE_HRS","WIND_VEL_MIN","WIND_VEL_MAX"];
-    const rows = filteredFarmers.map(f => [
-      f.rowId, f.farmerId, f.insuredName, f.municipality, f.barangay, f.farmId,
-      f.areaHectare, f.planted ? "Yes":"No", f.plantingDate, f.growthStage,
-      f.signalNo, f.periodOfExposure, f.windVelocityMin, f.windVelocityMax,
-    ]);
-    const csv = [headers.join(","), ...rows.map(r => r.join(","))].join("\n");
-    const uri = "data:text/csv;charset=utf-8," + encodeURIComponent(csv);
-    const a = document.createElement("a");
-    a.setAttribute("href", uri);
-    a.setAttribute("download", "period_of_exposure_report.csv");
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
   };
 
   const SortIcon = ({ field }: { field: SortField }) =>
@@ -121,86 +291,30 @@ export function SpatialAnalysisModule({ darkMode }: SpatialAnalysisModuleProps) 
       ? sortDir === "asc" ? <ChevronUp size={11} /> : <ChevronDown size={11} />
       : <ArrowUpDown size={10} className="opacity-30" />;
 
-  const stageColors: Record<string, string> = {
-    Seedling:"bg-green-100 text-green-700", Vegetative:"bg-emerald-100 text-emerald-700",
-    Reproductive:"bg-yellow-100 text-yellow-700", Ripening:"bg-amber-100 text-amber-700",
-  };
-
   const signalColors: Record<number, string> = {
-    1:"text-emerald-600 font-bold", 2:"text-amber-600 font-bold", 3:"text-red-600 font-bold",
+    2:"text-amber-600 font-bold", 3:"text-orange-600 font-bold", 4:"text-red-600 font-bold", 5:"text-red-800 font-bold",
   };
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
-      {/* Warning Modal */}
-      {showWarning && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-card border border-amber-300 rounded-xl shadow-2xl p-5 max-w-sm">
-            <div className="flex items-center gap-2 mb-2">
-              <AlertTriangle size={16} className="text-amber-500" />
-              <span className="text-sm font-semibold">Upload Warning</span>
-            </div>
-            <p className="text-xs text-muted-foreground mb-3">{showWarning}</p>
-            <button
-              onClick={() => setShowWarning(null)}
-              className="w-full py-1.5 rounded-lg bg-[#166534] text-white text-xs font-semibold hover:bg-[#14532d] transition-colors"
-            >
-              OK
-            </button>
-          </div>
-        </div>
-      )}
-
       {/* Top Panel – GIS Map */}
       <div style={{ height: `${topPanelH}%` }} className="flex flex-col overflow-hidden">
-        {/* Map toolbar */}
-        <div className="flex items-center gap-3 px-4 py-2 bg-card border-b border-border shrink-0">
-          <div className="flex items-center gap-2">
-            <MapIcon size={14} className="text-[#166534]" />
-            <span className="text-xs font-semibold">Camarines Sur — Typhoon Pepito Impact Map</span>
-          </div>
-          <div className="flex items-center gap-2 ml-auto">
-            <Filter size={11} className="text-muted-foreground" />
-            <span className="text-[11px] text-muted-foreground">Filter map:</span>
-            <select
-              value={filterMuni}
-              onChange={e => setFilterMuni(e.target.value)}
-              className="text-[11px] border border-border rounded px-2 py-1 bg-background"
-            >
-              {MUNICIPALITIES.map(m => <option key={m}>{m}</option>)}
-            </select>
-            <button
-              onClick={handleExportPeriodOfExposure}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#1e3a5f] text-white text-[11px] font-medium hover:bg-[#172f4d] transition-colors"
-            >
-              <Download size={11} /> Export Period of Exposure
-            </button>
-            <button
-              onClick={() => setShowSARPanel(v => !v)}
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors border ${showSARPanel ? "bg-[#166534] text-white border-[#166534]" : "border-[#166534] text-[#166534] hover:bg-[#166534]/10"}`}
-            >
-              <Satellite size={11} /> SAR / GEE Analysis
-            </button>
-          </div>
-        </div>
-
-        {/* Map canvas + SAR panel overlay */}
+        {/* Map toolbar removed entirely (2026-08-18, per Fabio's request) --
+            it only ever held the title, and the map canvas below now gets
+            that space instead. Search/filter/upload controls already live
+            in the Farm Records toolbar further down. */}
+        {/* Map canvas */}
         <div className="flex-1 overflow-hidden p-2 relative">
           <GISLeafletMap
-            farmers={farmers}
+            farms={filteredFarms}
             selectedFarmId={selectedFarmId}
             onSelectFarm={setSelectedFarmId}
+            selectedBulletin={selectedBulletin}
             darkMode={darkMode}
-            filterMunicipality={filterMuni === "All" ? undefined : filterMuni}
+            focusMunicipality={filterMuni === "All" ? null : filterMuni}
+            focusFarmerId={filterFarmerId}
+            activeOnly={activeInsuranceOnly}
           />
-          {/* SAR AOI Panel — slides in over the map */}
-          {showSARPanel && (
-            <AOISARPanel
-              onClose={() => setShowSARPanel(false)}
-              geeProjectId="pcic-bicol-gee-2024"
-              darkMode={darkMode}
-            />
-          )}
         </div>
       </div>
 
@@ -221,113 +335,169 @@ export function SpatialAnalysisModule({ darkMode }: SpatialAnalysisModuleProps) 
         <div className="w-8 h-0.5 rounded bg-muted-foreground/40" />
       </div>
 
-      {/* Bottom Panel – Data Import + Table */}
+      {/* Bottom Panel – Farm Records Table */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Left: Drag-Drop + Uploaded Files */}
-        <div className="w-64 shrink-0 flex flex-col border-r border-border overflow-hidden">
-          <div className="px-3 py-2 border-b border-border bg-card shrink-0">
-            <div className="flex items-center gap-1.5">
-              <UploadCloud size={13} className="text-[#166534]" />
-              <span className="text-[11px] font-semibold">Data Import</span>
-            </div>
-          </div>
-
-          {/* Drop Zone */}
-          <div
-            className={`m-2 border-2 border-dashed rounded-xl p-3 text-center cursor-pointer transition-all ${isDragging ? "border-[#166534] bg-[#166534]/10" : "border-border hover:border-[#166534]/60 hover:bg-muted/30"}`}
-            onDragOver={e => { e.preventDefault(); setIsDragging(true); }}
-            onDragLeave={() => setIsDragging(false)}
-            onDrop={handleDrop}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            <UploadCloud size={20} className={`mx-auto mb-1.5 ${isDragging ? "text-[#166534]" : "text-muted-foreground"}`} />
-            <p className="text-[10px] font-medium">Drop files here or click to browse</p>
-            <p className="text-[9px] text-muted-foreground mt-0.5">Accepts .CSV farmer records, .GPX farm polygons</p>
-            <input
-              ref={fileInputRef}
-              type="file" accept=".csv,.gpx" multiple hidden
-              onChange={e => { if (e.target.files) processFiles(Array.from(e.target.files)); }}
-            />
-          </div>
-
-          {csvUploadStatus && (
-            <div
-              className="mx-2 mb-2 text-[10px] p-2 rounded-lg"
-              style={{
-                backgroundColor: csvUploadStatus.type === "success" ? "var(--sidebar-accent)" : "var(--destructive)",
-                color: csvUploadStatus.type === "success" ? "var(--sidebar-accent-foreground)" : "white",
-              }}
-            >
-              {csvUploadStatus.message}
-            </div>
-          )}
-
-          {/* Uploaded / imported file indicators */}
-          <div className="px-2 space-y-1.5 flex-1 overflow-auto">
-            {[
-              { name:"bicol_farmers_2024.csv",    size:"48 KB",  type:"csv" as const, status:"done" as const },
-              { name:"camarines_sur_gpx.gpx",     size:"2.1 MB", type:"gpx" as const, status:"done" as const },
-              ...uploadedFiles,
-            ].map((f, i) => (
-              <div key={i} className="flex items-center gap-2 bg-card border border-border rounded-lg px-2.5 py-2">
-                <FileText size={12} className={f.type === "csv" ? "text-blue-500" : "text-amber-500"} />
-                <div className="flex-1 min-w-0">
-                  <p className="text-[10px] font-medium truncate">{f.name}</p>
-                  <p className="text-[9px] text-muted-foreground">{f.size} · {f.type.toUpperCase()}</p>
-                </div>
-                {f.status === "done" && <CheckCircle2 size={12} className="text-emerald-500 shrink-0" />}
-                {f.status === "error" && <AlertTriangle size={12} className="text-red-500 shrink-0" />}
-                {f.status === "processing" && (
-                  <div className="w-3 h-3 rounded-full border-2 border-[#166534] border-t-transparent animate-spin shrink-0" />
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Right: Farmer Records Table */}
         <div className="flex-1 flex flex-col overflow-hidden">
-          <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-card shrink-0 flex-wrap gap-y-1">
+          <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-card shrink-0 flex-wrap gap-y-1.5">
             <div className="flex items-center gap-1.5">
               <Table2 size={13} className="text-[#166534]" />
-              <span className="text-[11px] font-semibold">Farmer Records</span>
-              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">{filteredFarmers.length} records</span>
+              <span className="text-[11px] font-semibold">Farm Records</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-muted text-muted-foreground">
+                {isLoadingFirstPage ? "Loading…" : isRefreshing ? "Refreshing…" : `${filteredFarms.length} records`}
+              </span>
+              {loadError && <span className="text-[10px] text-red-500">{loadError}</span>}
             </div>
-            <div className="flex items-center gap-1.5 ml-auto flex-wrap gap-y-1">
-              <select
-                value={filterStage}
-                onChange={e => setFilterStage(e.target.value as GrowthStage | "All")}
-                className="text-[10px] border border-border rounded px-1.5 py-0.5 bg-background"
-              >
-                {GROWTH_STAGES.map(s => <option key={s}>{s}</option>)}
-              </select>
-              <select
-                value={filterPlanted}
-                onChange={e => setFilterPlanted(e.target.value as "All" | "Yes" | "No")}
-                className="text-[10px] border border-border rounded px-1.5 py-0.5 bg-background"
-              >
-                {["All","Yes","No"].map(v => <option key={v}>Planted: {v}</option>)}
-              </select>
+            <button
+              onClick={() => onActiveInsuranceOnlyChange(!activeInsuranceOnly)}
+              disabled={filterMuni === "All" && filterFarmerId == null}
+              title={filterMuni === "All" && filterFarmerId == null ? "Search a municipality or farmer to view inactive/all-status farms" : undefined}
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors border disabled:opacity-50 disabled:cursor-not-allowed ${activeInsuranceOnly ? "bg-[#166534] text-white border-[#166534]" : "border-[#166534] text-[#166534] hover:bg-[#166534]/10"}`}
+            >
+              <ShieldCheck size={11} /> Active Insurance Only
+            </button>
+
+            {/* Municipality search -- moved down from the map toolbar
+                (2026-08-18) so both filters and the upload actions live
+                together with the table they affect, freeing the map's own
+                toolbar down to just its title. */}
+            <div className="flex items-center gap-1.5">
+              <Filter size={11} className="text-muted-foreground shrink-0" />
+              <div className="relative">
+                <input
+                  type="text"
+                  value={muniQuery}
+                  placeholder={filterMuni === "All" ? "Search municipality…" : filterMuni}
+                  onChange={e => {
+                    const value = e.target.value;
+                    setMuniQuery(value);
+                    setShowMuniSuggestions(true);
+                    if (value.trim() === "") onFilterMuniChange("All");
+                  }}
+                  onFocus={() => setShowMuniSuggestions(true)}
+                  onBlur={() => setShowMuniSuggestions(false)}
+                  className="text-[11px] border border-border rounded px-2 py-1 bg-background w-36"
+                />
+                {showMuniSuggestions && muniSuggestions.length > 0 && (
+                  <div className="absolute top-full left-0 mt-1 w-40 max-h-48 overflow-auto bg-card border border-border rounded-lg shadow-lg z-20">
+                    {muniSuggestions.map(m => (
+                      <button
+                        key={m}
+                        onMouseDown={() => selectMunicipality(m)}
+                        className={`w-full text-left px-2 py-1.5 text-[11px] hover:bg-muted transition-colors ${m === filterMuni ? "bg-[#166534]/10 font-semibold text-[#166534]" : ""}`}
+                      >
+                        {m}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Farmer search (2026-08-18, new) -- server-side/debounced,
+                see the effect near selectFarmer above. */}
+            <div className="flex items-center gap-1.5">
+              <User size={11} className="text-muted-foreground shrink-0" />
+              <div className="relative">
+                <input
+                  type="text"
+                  value={farmerQuery}
+                  placeholder="Search farmer…"
+                  onChange={e => {
+                    const value = e.target.value;
+                    setFarmerQuery(value);
+                    setShowFarmerSuggestions(true);
+                    if (value.trim() === "") onFilterFarmerIdChange(null);
+                  }}
+                  onFocus={() => setShowFarmerSuggestions(true)}
+                  onBlur={() => setShowFarmerSuggestions(false)}
+                  className="text-[11px] border border-border rounded px-2 py-1 bg-background w-36"
+                />
+                {showFarmerSuggestions && farmerSuggestions.length > 0 && (
+                  <div className="absolute top-full left-0 mt-1 w-48 max-h-48 overflow-auto bg-card border border-border rounded-lg shadow-lg z-20">
+                    {farmerSuggestions.map(f => (
+                      <button
+                        key={f.farmer_id}
+                        onMouseDown={() => selectFarmer(f.farmer_id, f.name)}
+                        className={`w-full text-left px-2 py-1.5 text-[11px] hover:bg-muted transition-colors ${f.farmer_id === filterFarmerId ? "bg-[#166534]/10 font-semibold text-[#166534]" : ""}`}
+                      >
+                        {f.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Upload actions -- moved down from the map toolbar (2026-08-18),
+                same reasoning as the municipality search above. */}
+            <button
+              onClick={() => csvInputRef.current?.click()}
+              disabled={csvUploadProgress !== null}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#1e3a5f] text-white text-[11px] font-medium hover:bg-[#172f4d] disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+            >
+              {csvUploadProgress ? (
+                <>
+                  <Loader2 size={11} className="animate-spin" />
+                  Uploading… {csvUploadProgress.total > 0 ? `${Math.round((csvUploadProgress.processed / csvUploadProgress.total) * 100)}%` : ""}
+                </>
+              ) : (
+                <><UploadCloud size={11} /> Upload CSV</>
+              )}
+            </button>
+            <input
+              ref={csvInputRef}
+              type="file"
+              accept=".csv"
+              hidden
+              onChange={onCsvFileSelected}
+            />
+            <button
+              onClick={() => gpxInputRef.current?.click()}
+              disabled={gpxUploadProgress !== null}
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#1e3a5f] text-white text-[11px] font-medium hover:bg-[#172f4d] disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
+            >
+              {gpxUploadProgress ? (
+                <>
+                  <Loader2 size={11} className="animate-spin" />
+                  Uploading {gpxUploadProgress.current}/{gpxUploadProgress.total}…
+                </>
+              ) : (
+                <><UploadCloud size={11} /> Upload GPX</>
+              )}
+            </button>
+            <input
+              ref={gpxInputRef}
+              type="file"
+              accept=".gpx"
+              multiple
+              hidden
+              onChange={onGpxFilesSelected}
+            />
+
+            <div className="ml-auto text-[9px] text-muted-foreground">
+              Click a row to zoom the map to that farm
             </div>
           </div>
 
-          <div className="flex-1 overflow-auto">
+          <div
+            className="flex-1 overflow-auto"
+            ref={scrollContainerRef}
+            onScroll={e => setTableScrollTop(e.currentTarget.scrollTop)}
+          >
+            {isLoadingFirstPage ? (
+              <div className="flex items-center justify-center h-full text-[11px] text-muted-foreground">
+                Loading farm records…
+              </div>
+            ) : (
             <table className="w-full text-[11px]">
               <thead className="sticky top-0 z-10">
                 <tr className="bg-[#166534] text-white">
                   {[
-                    { label:"#",           field:"rowId"          as SortField },
-                    { label:"Farmer ID",   field:"farmerId"       as SortField },
-                    { label:"Insured Name",field:"insuredName"    as SortField },
-                    { label:"Municipality",field:"municipality"   as SortField },
-                    { label:"Barangay",    field:"barangay"       as SortField },
-                    { label:"Farm ID",     field:"farmId"         as SortField },
-                    { label:"Area (ha)",   field:"areaHectare"    as SortField },
-                    { label:"Planted",     field:"planted"        as SortField },
-                    { label:"Plant Date",  field:"plantingDate"   as SortField },
-                    { label:"Stage",       field:"growthStage"    as SortField },
-                    { label:"Signal",      field:"signalNo"       as SortField },
-                    { label:"Exp (h)",     field:"periodOfExposure" as SortField },
+                    { label:"Farm ID",     field:"farm_id"     as SortField },
+                    { label:"Farmer",      field:"farmer_name" as SortField },
+                    { label:"Municipality",field:"municipality" as SortField },
+                    { label:"Barangay",    field:"barangay"    as SortField },
+                    { label:"Area (ha)",   field:"area_size"   as SortField },
                   ].map(col => (
                     <th
                       key={col.field}
@@ -339,38 +509,72 @@ export function SpatialAnalysisModule({ darkMode }: SpatialAnalysisModuleProps) 
                       </span>
                     </th>
                   ))}
+                  <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">GPX Boundary</th>
+                  <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Effective Date</th>
+                  <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Expiry Date</th>
+                  <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Crop Stage</th>
+                  <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Signal</th>
+                  <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Exp (h)</th>
+                  <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Est. Payment</th>
                 </tr>
               </thead>
               <tbody>
-                {filteredFarmers.map(f => (
+                {/* Top spacer -- stands in for the rows scrolled past above
+                    the window, so the scrollbar's size/position stays
+                    correct for the full filteredFarms count even though only
+                    windowedFarms below are real <tr>s. See the
+                    virtualization comment near ROW_HEIGHT/OVERSCAN above. */}
+                {topSpacerHeight > 0 && (
+                  <tr aria-hidden style={{ height: topSpacerHeight }}>
+                    <td colSpan={12} />
+                  </tr>
+                )}
+                {windowedFarms.map(f => (
                   <tr
-                    key={f.farmId}
-                    onClick={() => setSelectedFarmId(f.farmId === selectedFarmId ? null : f.farmId)}
-                    className={`border-t border-border cursor-pointer transition-colors hover:bg-muted/50 ${f.farmId === selectedFarmId ? "bg-[#166534]/10 border-l-2 border-l-[#166534]" : ""}`}
+                    key={f.farm_id}
+                    onClick={() => setSelectedFarmId(f.farm_id === selectedFarmId ? null : f.farm_id)}
+                    className={`border-t border-border cursor-pointer transition-colors hover:bg-muted/50 ${f.farm_id === selectedFarmId ? "bg-[#166534]/10 border-l-2 border-l-[#166534]" : ""}`}
                   >
-                    <td className="px-2.5 py-2 text-muted-foreground">{f.rowId}</td>
-                    <td className="px-2.5 py-2 font-mono">{f.farmerId.slice(-5)}</td>
-                    <td className="px-2.5 py-2 font-medium whitespace-nowrap">{f.insuredName}</td>
-                    <td className="px-2.5 py-2">{f.municipality}</td>
-                    <td className="px-2.5 py-2 text-muted-foreground">{f.barangay}</td>
-                    <td className="px-2.5 py-2 font-mono text-[#166534]">{f.farmId}</td>
-                    <td className="px-2.5 py-2 text-right">{f.areaHectare.toFixed(2)}</td>
+                    <td className="px-2.5 py-2 font-mono text-[#166534]">#{f.farm_id}</td>
+                    <td className="px-2.5 py-2 font-medium whitespace-nowrap">{f.farmer_name ?? "—"}</td>
+                    <td className="px-2.5 py-2">{f.municipality ?? "—"}</td>
+                    <td className="px-2.5 py-2 text-muted-foreground">{f.barangay ?? "—"}</td>
+                    <td className="px-2.5 py-2 text-right">{f.area_size != null ? f.area_size.toFixed(2) : "—"}</td>
                     <td className="px-2.5 py-2">
-                      {f.planted
+                      {f.has_geometry
                         ? <span className="text-emerald-600 flex items-center gap-0.5"><CheckCircle2 size={10} />Yes</span>
                         : <span className="text-muted-foreground">No</span>
                       }
                     </td>
-                    <td className="px-2.5 py-2 whitespace-nowrap text-muted-foreground">{f.plantingDate}</td>
-                    <td className="px-2.5 py-2">
-                      <span className={`px-1.5 py-0.5 rounded text-[10px] ${stageColors[f.growthStage]}`}>{f.growthStage}</span>
+                    <td className="px-2.5 py-2 text-muted-foreground whitespace-nowrap">{f.effectivity_date ?? "—"}</td>
+                    <td className="px-2.5 py-2 text-muted-foreground whitespace-nowrap">{f.expiry_date ?? "—"}</td>
+                    <td className="px-2.5 py-2">{f.assessment?.crop_stage ?? "Not yet assessed"}</td>
+                    <td className={`px-2.5 py-2 ${f.assessment?.wind_velocity ? signalColors[f.assessment.wind_velocity] ?? "" : "text-muted-foreground"}`}>
+                      {f.assessment?.wind_velocity ? `No. ${f.assessment.wind_velocity}` : "—"}
                     </td>
-                    <td className={`px-2.5 py-2 ${signalColors[f.signalNo]}`}>No. {f.signalNo}</td>
-                    <td className="px-2.5 py-2 text-right">{f.periodOfExposure > 0 ? f.periodOfExposure : "—"}</td>
+                    <td className="px-2.5 py-2 text-right">{f.assessment?.period_of_exposure ?? "—"}</td>
+                    <td className="px-2.5 py-2 text-right font-medium">
+                      {f.assessment ? `₱${f.assessment.final_indemnity_payment.toLocaleString()}` : "—"}
+                    </td>
                   </tr>
                 ))}
+                {/* Bottom spacer -- same purpose as the top one, for rows not
+                    yet scrolled to below the window. */}
+                {bottomSpacerHeight > 0 && (
+                  <tr aria-hidden style={{ height: bottomSpacerHeight }}>
+                    <td colSpan={12} />
+                  </tr>
+                )}
+                {hasMore && (
+                  <tr ref={sentinelRef} className="h-9">
+                    <td colSpan={12} className="text-center text-[10px] text-muted-foreground">
+                      {isFetchingMore ? "Loading more…" : ""}
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
+            )}
           </div>
         </div>
       </div>

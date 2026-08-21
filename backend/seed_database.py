@@ -21,19 +21,34 @@ def run_setup():
 
     # --- 1. SEED BOUNDARIES ---
     print("Ingesting Admin Boundaries...")
+    # Nationwide PSGC codes (expanded 2026-08-20 from the original Region X + Caraga
+    # subset, for testing whether typhoon-signal exposure calculation works when fed
+    # real data outside the insured area -- see .claude/FUNCTION_CHANGES.md). Sourced
+    # from the official PSA PSGC Publication via backend/scripts/convert_psgc_publication.py.
+    # Covers every barangay in the country, not just the provinces pabs_results.csv
+    # currently has farms in -- a row for any (province, municipality, barangay) combo
+    # actually present in pabs_results.csv is guaranteed to resolve.
+    psgc_lookup = pd.read_csv("app/data/psgc_nationwide_boundaries.csv")
+    psgc_lookup = psgc_lookup.set_index(['province', 'municipality', 'barangay'])['psgc_code']
+
     boundaries = df[['Province', 'Municipality', 'Barangay']].drop_duplicates()
-    for idx, (_, row) in enumerate(boundaries.iterrows()):
+    for _, row in boundaries.iterrows():
         # Check if boundary already exists
         cur.execute("""
-            SELECT boundary_id FROM tbl_admin_boundaries 
+            SELECT boundary_id FROM tbl_admin_boundaries
             WHERE province = %s AND municipality = %s AND barangay = %s
         """, (row['Province'], row['Municipality'], row['Barangay']))
         res = cur.fetchone()
         if not res:
-            # Generate a mock unique PSGC code for the boundaries found in the CSV
-            psgc_code = f"PH10{idx:06d}"
+            key = (row['Province'], row['Municipality'], row['Barangay'])
+            if key not in psgc_lookup.index:
+                raise ValueError(
+                    f"No PSGC code on file for {key}. Add it to "
+                    "app/data/psgc_nationwide_boundaries.csv before seeding."
+                )
+            psgc_code = str(psgc_lookup.loc[key])
             cur.execute("""
-                INSERT INTO tbl_admin_boundaries (psgc_code, province, municipality, barangay) 
+                INSERT INTO tbl_admin_boundaries (psgc_code, province, municipality, barangay)
                 VALUES (%s, %s, %s, %s)
             """, (psgc_code, row['Province'], row['Municipality'], row['Barangay']))
     conn.commit()
@@ -77,7 +92,7 @@ def run_setup():
         insured_cover = str(row['InsuredAmountofCover']).replace(',', '') if row['InsuredAmountofCover'] else '0'
         cur.execute("""
             INSERT INTO tbl_insurance_records (farmer_id, farm_id, policy_no, program_type, effectivity_date, expiry_date, amount_cover)
-            VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (policy_no) DO NOTHING RETURNING insurance_records_id
+            VALUES (%s, %s, %s, %s, %s, %s, %s) ON CONFLICT (policy_no, farm_id) DO NOTHING RETURNING insurance_records_id
         """, (farmer_id, farm_id, row['Policy No.'], row['Program Type'], row['Effectivity Date'], row['Expiry Date'], insured_cover))
         
         ins_result = cur.fetchone()
