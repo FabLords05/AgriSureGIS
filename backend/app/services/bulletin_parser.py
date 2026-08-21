@@ -1,4 +1,5 @@
 import re
+import logging
 import os
 import httpx
 from bs4 import BeautifulSoup
@@ -17,6 +18,8 @@ PAGASA_INDEX_URL = "https://pubfiles.pagasa.dost.gov.ph/tamss/weather/bulletin/"
 # PAGASA states every bulletin's "Issued at" timestamp in Philippine Standard
 # Time, not UTC -- a fixed UTC+8 offset (the Philippines observes no DST).
 PHT = timezone(timedelta(hours=8))
+
+logger = logging.getLogger(__name__)
 
 
 class PagasaScrapeError(Exception):
@@ -300,7 +303,8 @@ class BulletinParserService:
                     "is_final": parsed_data.get("is_final", False),
                 })
             except Exception as e:
-                print(f"Error processing PDF link {link}: {e}")
+                db.rollback()
+                logger.exception("Error processing PDF link %s", link)
 
         return bulletins_created
 

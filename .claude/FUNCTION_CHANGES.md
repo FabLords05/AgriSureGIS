@@ -4,6 +4,43 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-08-21] - Fix Cascading InFailedSqlTransaction in PAGASA Scraper
+
+Remote backend's scheduled PAGASA scraper was completely broken: every 15-min
+poll failed on every bulletin PDF with `psycopg2.errors.InFailedSqlTransaction`.
+Root cause: the `province` column on `tbl_tcb_signals` (added 2026-08-20) was
+never applied on the remote DB, so the first `TcbSignal` INSERT failed and
+poisoned the shared DB session — every subsequent PDF in the same loop hit
+"current transaction is aborted, commands ignored until end of transaction
+block." Second symptom: all typhoon bulletins (LUIS, KIYAPO, etc.) existed in
+the DB but with zero `TcbSignal` rows, causing "No areas listed" in the
+Assessment module's Areas Affected modal.
+
+### File: `backend/app/services/bulletin_parser.py`
+* **`scrape_and_save_all()`**: added `db.rollback()` in the per-link
+  `except Exception` handler (line 304). Without this, one failed PDF's
+  aborted transaction cascades to every remaining PDF in the same scrape
+  cycle — PostgreSQL refuses all queries on a session with an uncommitted
+  failed transaction until `ROLLBACK` is issued. Safe because: any
+  uncommitted work from the failed PDF is correctly discarded, and any
+  previously committed work (successful earlier iterations) is unaffected.
+* Replaced bare `print(f"Error processing PDF link {link}: {e}")` with
+  `logger.exception(...)` — captures the full traceback (which `print`
+  loses) and routes through the same logging infrastructure as the rest of
+  the backend.
+* Added `import logging` and module-level `logger = logging.getLogger(__name__)`.
+
+### Remote DB fix (applied by Fabio, same session):
+* Full `init_schema.sql` reset + `seed_all.py` reseed on the remote box
+  (`192.168.1.41`), which recreates `tbl_tcb_signals` with the `province`
+  column already defined. The migration file
+  (`backend/migrations/2026-08-20_tcb_signal_province.sql`) was the
+  lighter-weight alternative, but a full reset was chosen since every
+  typhoon's `TcbSignal` rows were already broken (bulletins existed without
+  signals, and re-parsing skips existing bulletins).
+
+---
+
 ## [2026-07-17] - Sprint 1 Completion
 
 ### 1. File: `backend/app/models/models.py`
