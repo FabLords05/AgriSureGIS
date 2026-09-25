@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import shutil
 import tempfile
 import time
 
@@ -59,10 +58,14 @@ async def trigger_pagasa_scrape(db: Session = Depends(get_db)):
     """
     Triggers web scraping of the PAGASA portal to download and parse any active bulletins.
 
-    - Enforces a 15-minute cooldown between triggers to avoid flooding the PAGASA server.
-    - Skips bulletins already present in the database (deduplication).
+    - Enforces a 15-minute cooldown, stamped at the START of processing to prevent
+      concurrent requests from racing through the check simultaneously.
+    - Deduplication is handled by save_bulletin_to_db (DB-level idempotency on
+      typhoon_id + bulletin_count); only newly inserted bulletins count toward
+      parsed_count.
     - Adds a 1-second polite delay between sequential PDF downloads.
     - Guarantees temp file cleanup via try/finally even when parsing fails.
+    - Calls db.rollback() on persistence failures to keep the session usable.
     """
     global _last_scraped_at
 
@@ -74,6 +77,11 @@ async def trigger_pagasa_scrape(db: Session = Depends(get_db)):
             detail=f"Scrape cooldown active. Try again in {remaining} seconds.",
         )
 
+    # Stamp the cooldown immediately — before any awaits — so that concurrent
+    # requests hitting this endpoint at the same time are rejected rather than
+    # allowed to race, collide on filenames, or duplicate DB inserts.
+    _last_scraped_at = time.monotonic()
+
     links = await BulletinParserService.fetch_active_bulletin_links()
     if not links:
         raise HTTPException(
@@ -81,51 +89,63 @@ async def trigger_pagasa_scrape(db: Session = Depends(get_db)):
             detail="No active bulletin PDFs found on PAGASA portal.",
         )
 
-    # Deduplication: build a set of already-saved bulletin titles
-    existing_titles = {
-        row.title
-        for row in db.query(TropicalCycloneBulletin).with_entities(
-            TropicalCycloneBulletin.title
-        )
-    }
-
     parsed_count = 0
+    skipped_count = 0
+    failed_count = 0
     bulletins_created = []
 
     for link in links:
-        filename_stem = link.split("/")[-1].replace(".pdf", "")
-        if any(filename_stem in title for title in existing_titles):
-            logger.info("Skipping already-parsed bulletin: %s", link)
-            continue
-
         pdf_path = None
         try:
             pdf_path = await BulletinParserService.download_bulletin_pdf(link, TEMP_DIR)
             parsed_data = BulletinParserService.parse_bulletin_text(pdf_path)
-            bulletin = BulletinParserService.save_bulletin_to_db(parsed_data, db)
-            bulletins_created.append(
-                {
-                    "tcb_id": bulletin.tcb_id,
-                    "title": bulletin.title,
-                    "bulletin_count": bulletin.bulletin_count,
-                }
-            )
-            parsed_count += 1
-        except Exception as e:
-            logger.error("Error processing PDF link %s: %s", link, e, exc_info=True)
+            bulletin, is_new = BulletinParserService.save_bulletin_to_db(parsed_data, db)
+
+            if is_new:
+                bulletins_created.append(
+                    {
+                        "tcb_id": bulletin.tcb_id,
+                        "title": bulletin.title,
+                        "bulletin_count": bulletin.bulletin_count,
+                    }
+                )
+                parsed_count += 1
+            else:
+                logger.info(
+                    "Bulletin already exists in DB, skipping: %s", link
+                )
+                skipped_count += 1
+
+        except Exception:
+            # Roll back to clear any flushed-but-uncommitted state so the
+            # session remains usable for subsequent loop iterations.
+            db.rollback()
+            logger.exception("Error processing PDF link %s", link)
+            failed_count += 1
         finally:
-            # Always clean up the temp file regardless of success or failure
+            # Always clean up the temp file regardless of success or failure.
+            # download_bulletin_pdf already removes its file on its own errors,
+            # but this guard covers parse/db failures after a successful download.
             if pdf_path and os.path.exists(pdf_path):
                 os.remove(pdf_path)
 
         # Polite delay between sequential PDF downloads
         await asyncio.sleep(1.0)
 
-    _last_scraped_at = time.monotonic()
+    # Surface a clear status so callers can distinguish full success,
+    # partial success, and total failure without inspecting parsed_count.
+    if parsed_count == 0 and failed_count > 0:
+        status = "error"
+    elif failed_count > 0 or skipped_count > 0:
+        status = "partial"
+    else:
+        status = "success"
 
     return {
-        "status": "success",
+        "status": status,
         "parsed_count": parsed_count,
+        "skipped_count": skipped_count,
+        "failed_count": failed_count,
         "bulletins": bulletins_created,
     }
 
@@ -136,13 +156,24 @@ async def upload_bulletin_pdf(
 ):
     """
     Allows manual upload of a PAGASA bulletin PDF if the scraping portal is offline.
-    Enforces a 10 MB file size limit and guarantees temp file cleanup.
+
+    - Rejects filenames that do not end in .pdf (case-insensitive).
+    - Sanitises the filename with os.path.basename() and validates the resolved
+      path stays inside TEMP_DIR to prevent path traversal attacks.
+    - Reads at most MAX_UPLOAD_BYTES + 1 bytes before the size check so an
+      oversized upload never fully buffers into RAM.
+    - Uses mkstemp() for a unique temp path.
+    - Guarantees temp file cleanup via finally.
     """
-    if not file.filename.endswith(".pdf"):
+    # Sanitise filename — reject None/empty and normalise to basename only
+    raw_name = file.filename or ""
+    safe_name = os.path.basename(raw_name)
+    if not safe_name.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
 
-    # Read and validate size before touching the filesystem
-    contents = await file.read()
+    # Read at most (limit + 1) bytes so we can distinguish "exactly at limit"
+    # from "over limit" without pulling an unbounded payload into memory.
+    contents = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(contents) > MAX_UPLOAD_BYTES:
         raise HTTPException(
             status_code=413,
@@ -153,14 +184,22 @@ async def upload_bulletin_pdf(
         )
 
     os.makedirs(TEMP_DIR, exist_ok=True)
-    temp_path = os.path.join(TEMP_DIR, file.filename)
+
+    # mkstemp gives a guaranteed-unique path and prevents path traversal
+    fd, temp_path = tempfile.mkstemp(dir=TEMP_DIR, suffix=".pdf")
+    os.close(fd)
+
+    # Verify the resolved path is still inside TEMP_DIR (defense in depth)
+    if not os.path.realpath(temp_path).startswith(os.path.realpath(TEMP_DIR)):
+        os.remove(temp_path)
+        raise HTTPException(status_code=400, detail="Invalid file path.")
 
     try:
         with open(temp_path, "wb") as f:
             f.write(contents)
 
         parsed_data = BulletinParserService.parse_bulletin_text(temp_path)
-        bulletin = BulletinParserService.save_bulletin_to_db(parsed_data, db)
+        bulletin, _ = BulletinParserService.save_bulletin_to_db(parsed_data, db)
 
         return {
             "status": "success",
@@ -172,9 +211,10 @@ async def upload_bulletin_pdf(
             },
         }
     except Exception as e:
+        db.rollback()
         raise HTTPException(status_code=500, detail=f"Failed to parse PDF: {str(e)}")
     finally:
-        # Always clean up the temp file whether parsing succeeded or failed
+        # Always clean up whether parsing succeeded or failed
         if os.path.exists(temp_path):
             os.remove(temp_path)
 

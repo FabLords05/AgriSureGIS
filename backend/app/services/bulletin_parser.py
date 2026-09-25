@@ -1,6 +1,9 @@
 import re
 import os
 import logging
+import tempfile
+from urllib.parse import urljoin, urlsplit
+
 import httpx
 from bs4 import BeautifulSoup
 import pdfplumber
@@ -42,6 +45,14 @@ CATEGORY_KEYWORDS = {
     "tropical depression": "Tropical Depression",
 }
 
+# Regex that marks the start of post-signal sections in a PAGASA bulletin.
+# The final signal block ends here to prevent forecast text bleeding into signal areas.
+_POST_SIGNAL_SECTION = re.compile(
+    r"\n[ \t]*(?:RAINFALL|FORECAST\s+POSITIONS?|SYNOPSIS|HEAVY\s+RAINFALL"
+    r"|AT\s+THE\s+MOMENT|NOTE\s*:|PUBLIC\s+STORM\s+WARNING\s+SIGNALS?\s+ARE\s+CURRENTLY)",
+    re.IGNORECASE,
+)
+
 
 def get_island_group(province: str) -> int:
     """Return the island group code for a given province name.
@@ -63,8 +74,10 @@ class BulletinParserService:
     @staticmethod
     async def fetch_active_bulletin_links() -> list:
         """
-        Scrapes the PAGASA bulletin portal to find PDF links to active tropical cyclone bulletins.
-        Returns an empty list on any network or parsing failure.
+        Scrapes the PAGASA bulletin portal to find PDF links to active tropical
+        cyclone bulletins.  Uses urljoin() to correctly resolve root-relative,
+        path-relative, and absolute hrefs.  Returns an empty list on any network
+        or parsing failure.
         """
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
@@ -76,16 +89,16 @@ class BulletinParserService:
                     return []
 
                 soup = BeautifulSoup(response.text, "html.parser")
-                base_url = PAGASA_INDEX_URL.rsplit("/", 1)[0]
                 pdf_links = []
 
                 for link in soup.find_all("a", href=True):
-                    href = link["href"]
-                    if href.endswith(".pdf") and "bulletin" in href.lower():
-                        # Resolve relative links to absolute URLs
-                        if not href.startswith("http"):
-                            href = f"{base_url}/{href}"
-                        pdf_links.append(href)
+                    href = link["href"].strip()
+                    # Inspect only the path component so .PDF / query params work
+                    parsed = urlsplit(href)
+                    path_lower = parsed.path.lower()
+                    if path_lower.endswith(".pdf") and "bulletin" in path_lower:
+                        abs_href = urljoin(PAGASA_INDEX_URL, href)
+                        pdf_links.append(abs_href)
 
                 return pdf_links
 
@@ -101,19 +114,26 @@ class BulletinParserService:
     @staticmethod
     async def download_bulletin_pdf(pdf_url: str, output_dir: str) -> str:
         """
-        Downloads the PDF from the PAGASA URL and saves it locally using chunked
-        streaming to avoid loading the entire file into memory at once.
+        Downloads the PDF from the PAGASA URL and saves it to a uniquely-named
+        temp file using chunked streaming to avoid loading the full file into RAM.
+
+        Uses mkstemp() so concurrent downloads of different bulletins never
+        share the same filename.  Cleans up the partial file on any failure so
+        callers never receive a path that does not exist.
 
         Raises:
             ValueError: if the URL does not point to a .pdf file.
             RuntimeError: on HTTP errors or network timeouts.
         """
-        filename = pdf_url.split("/")[-1]
-        if not filename.endswith(".pdf"):
+        path_lower = urlsplit(pdf_url).path.lower()
+        if not path_lower.endswith(".pdf"):
             raise ValueError(f"URL does not point to a PDF: {pdf_url}")
 
         os.makedirs(output_dir, exist_ok=True)
-        filepath = os.path.join(output_dir, filename)
+
+        # mkstemp gives a guaranteed-unique path; avoids concurrent filename collision
+        fd, filepath = tempfile.mkstemp(dir=output_dir, suffix=".pdf")
+        os.close(fd)
 
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -124,44 +144,70 @@ class BulletinParserService:
                             f.write(chunk)
             return filepath
         except httpx.TimeoutException as exc:
+            _safe_remove(filepath)
             raise RuntimeError(
                 f"Timed out downloading PDF from {pdf_url}"
             ) from exc
         except httpx.HTTPStatusError as exc:
+            _safe_remove(filepath)
             raise RuntimeError(
                 f"HTTP {exc.response.status_code} error downloading PDF from {pdf_url}"
             ) from exc
+        except Exception:
+            _safe_remove(filepath)
+            raise
 
     @staticmethod
     def parse_bulletin_text(pdf_path: str) -> dict:
         """
         Extracts raw text from the PDF and parses metadata and wind signal areas.
+
+        Raises:
+            ValueError: if the PDF yields no text or is missing the bulletin
+                        number and typhoon name (minimum required identity fields).
         """
         with pdfplumber.open(pdf_path) as pdf:
             text = ""
             for page in pdf.pages:
                 text += page.extract_text() or ""
 
+        # Guard: reject blank or unreadable PDFs before any persistence
+        if not text.strip():
+            raise ValueError(
+                f"PDF extracted no text — file may be scanned or corrupt: {pdf_path}"
+            )
+
         # 1. Parse Bulletin Number
         bulletin_no_match = re.search(
             r"Tropical\s+Cyclone\s+Bulletin\s+No\.\s+(\d+)", text, re.IGNORECASE
         )
-        bulletin_no = int(bulletin_no_match.group(1)) if bulletin_no_match else 1
+        bulletin_no = int(bulletin_no_match.group(1)) if bulletin_no_match else None
 
         # 2. Parse Typhoon Name — prefer the quoted form to avoid over-capture,
         #    fall back to the first all-caps word immediately after the storm type.
         name_match = re.search(
-            r'(?:TYPHOON|TROPICAL STORM|SEVERE TROPICAL STORM|TROPICAL DEPRESSION)\s+"([A-Z\-]+)"',
+            r'(?:TYPHOON|TROPICAL STORM|SEVERE TROPICAL STORM|TROPICAL DEPRESSION)'
+            r'\s+"([A-Z\-]+)"',
             text,
             re.IGNORECASE,
         )
         if not name_match:
             name_match = re.search(
-                r"(?:TYPHOON|TROPICAL STORM|SEVERE TROPICAL STORM|TROPICAL DEPRESSION)\s+([A-Z][A-Z\-]+)",
+                r"(?:TYPHOON|TROPICAL STORM|SEVERE TROPICAL STORM|TROPICAL DEPRESSION)"
+                r"\s+([A-Z][A-Z\-]+)",
                 text,
                 re.IGNORECASE,
             )
-        typhoon_name = name_match.group(1).strip() if name_match else "UNKNOWN"
+
+        # Guard: both identity fields must be present to be worth persisting
+        if bulletin_no_match is None or name_match is None:
+            raise ValueError(
+                "PDF is missing required bulletin identity fields "
+                f"(bulletin_no={'found' if bulletin_no_match else 'missing'}, "
+                f"name={'found' if name_match else 'missing'}): {pdf_path}"
+            )
+
+        typhoon_name = name_match.group(1).strip()
 
         # 3. Parse Max Winds and Gusts
         winds_match = re.search(
@@ -207,6 +253,9 @@ class BulletinParserService:
         )
 
         # 6. Extract Signal Text Blocks (Signal No. 1 to 5)
+        #    The final block is bounded by the next major section header (e.g.
+        #    RAINFALL, FORECAST POSITIONS) to prevent forecast track text from
+        #    bleeding into signal-area matching.
         signals_data = {}
         signal_markers = []
         for level in range(1, 6):
@@ -216,11 +265,15 @@ class BulletinParserService:
 
         signal_markers.sort(key=lambda x: x[1])
 
+        # Determine the hard boundary for the last signal block
+        post_signal_match = _POST_SIGNAL_SECTION.search(text)
+        signals_end = post_signal_match.start() if post_signal_match else len(text)
+
         for i, (level, start_idx) in enumerate(signal_markers):
             end_idx = (
                 signal_markers[i + 1][1]
                 if i + 1 < len(signal_markers)
-                else len(text)
+                else signals_end
             )
             signals_data[level] = text[start_idx:end_idx]
 
@@ -239,10 +292,14 @@ class BulletinParserService:
     @classmethod
     def save_bulletin_to_db(
         cls, parsed_data: dict, db: Session
-    ) -> TropicalCycloneBulletin:
+    ) -> tuple:
         """
         Saves parsed bulletin data to the PostGIS database within a single
-        transaction (one db.commit() at the end) to prevent partial state on failure.
+        transaction (one db.commit() at the end) to prevent partial state.
+
+        Returns:
+            (bulletin, is_new): TropicalCycloneBulletin and a bool that is
+            True if the record was newly inserted, False if it already existed.
         """
         year = datetime.now().year
 
@@ -276,59 +333,73 @@ class BulletinParserService:
             .first()
         )
 
-        if not bulletin:
-            # Build geometry only when coordinates are available
-            if (
-                parsed_data["latitude"] is not None
-                and parsed_data["longitude"] is not None
-            ):
-                center_geom = WKTElement(
-                    f"POINT({parsed_data['longitude']} {parsed_data['latitude']})",
-                    srid=4326,
-                )
-            else:
-                center_geom = None
+        if bulletin:
+            return bulletin, False  # Already exists — no write needed
 
-            bulletin = TropicalCycloneBulletin(
-                typhoon_id=typhoon.typhoon_id,
-                title=f"Bulletin No. {parsed_data['bulletin_count']} for {typhoon.name}",
-                bulletin_count=parsed_data["bulletin_count"],
-                category=parsed_data["category"],
-                max_sustained_winds=parsed_data["max_sustained_winds"],
-                gustiness=parsed_data["gustiness"],
-                issued_at=datetime.now(timezone.utc),
-                expires_at=datetime.now(timezone.utc),
-                center_geom=center_geom,
+        # Build geometry only when coordinates are available
+        if (
+            parsed_data["latitude"] is not None
+            and parsed_data["longitude"] is not None
+        ):
+            center_geom = WKTElement(
+                f"POINT({parsed_data['longitude']} {parsed_data['latitude']})",
+                srid=4326,
             )
-            db.add(bulletin)
-            db.flush()  # Assigns tcb_id without committing
-            db.refresh(bulletin)
+        else:
+            center_geom = None
 
-            # 3. Match signal areas against admin boundaries
-            boundaries = db.query(AdminBoundary).all()
-            seen_areas: set = set()
+        bulletin = TropicalCycloneBulletin(
+            typhoon_id=typhoon.typhoon_id,
+            title=f"Bulletin No. {parsed_data['bulletin_count']} for {typhoon.name}",
+            bulletin_count=parsed_data["bulletin_count"],
+            category=parsed_data["category"],
+            max_sustained_winds=parsed_data["max_sustained_winds"],
+            gustiness=parsed_data["gustiness"],
+            issued_at=datetime.now(timezone.utc),  # Placeholder — PAGASA date parsing optional
+            expires_at=datetime.now(timezone.utc),  # Placeholder
+            center_geom=center_geom,
+        )
+        db.add(bulletin)
+        db.flush()  # Assigns tcb_id without committing
+        db.refresh(bulletin)
 
-            for level, signal_text in parsed_data["signals"].items():
-                # Pre-lowercase once per block to avoid repeated .lower() calls
-                signal_text_lower = signal_text.lower()
-                for b in boundaries:
-                    if (
-                        b.province.lower() in signal_text_lower
-                        and b.municipality.lower() in signal_text_lower
-                    ):
-                        area_key = (level, b.municipality)
-                        if area_key not in seen_areas:
-                            seen_areas.add(area_key)
-                            db.add(
-                                TcbSignal(
-                                    tcb_id=bulletin.tcb_id,
-                                    signal_level=level,
-                                    island_group=get_island_group(b.province),
-                                    area_name=b.municipality,
-                                )
+        # 3. Match signal areas against admin boundaries
+        boundaries = db.query(AdminBoundary).all()
+        seen_areas: set = set()
+
+        for level, signal_text in parsed_data["signals"].items():
+            # Pre-lowercase once per block to avoid repeated .lower() calls
+            signal_text_lower = signal_text.lower()
+            for b in boundaries:
+                if (
+                    b.province.lower() in signal_text_lower
+                    and b.municipality.lower() in signal_text_lower
+                ):
+                    area_key = (level, b.province, b.municipality)
+                    if area_key not in seen_areas:
+                        seen_areas.add(area_key)
+                        db.add(
+                            TcbSignal(
+                                tcb_id=bulletin.tcb_id,
+                                signal_level=level,
+                                island_group=get_island_group(b.province),
+                                area_name=b.municipality,
                             )
+                        )
 
-            # Single commit for the entire typhoon → bulletin → signals chain
-            db.commit()
+        # Single commit for the entire typhoon → bulletin → signals chain
+        db.commit()
+        return bulletin, True
 
-        return bulletin
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+def _safe_remove(path: str) -> None:
+    """Silently remove a file, logging a warning if it cannot be deleted."""
+    try:
+        if path and os.path.exists(path):
+            os.remove(path)
+    except OSError as e:
+        logger.warning("Could not remove temp file %s: %s", path, e)
