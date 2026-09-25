@@ -1,5 +1,13 @@
 # Context: PAGASA Bulletin Scraper & Parser — Code Review
 
+## Current status — 2026-09-26
+
+**PARTIALLY FIXED — FOLLOW-UP REQUIRED**, reviewed at `eafc2c6` on `fabio/backend/bulletin-scraper-review`.
+
+Use the [current handoff and open checklist](../../../docs/bulletin-refactor-status.md) to resume work. The 16 existing bulletin tests pass, but confirmed defects remain. Commit messages claiming all findings are addressed do not represent the latest review result.
+
+The original review and testing checklist below are historical context, not the current completion checklist. In particular, the old expectation that upstream failures return an empty list is superseded by follow-up F07 in the current handoff.
+
 ## Branch
 `fabio/backend/bulletin-scraper-review` (branched from `develop`)
 

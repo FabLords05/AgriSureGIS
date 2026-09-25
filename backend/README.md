@@ -2,6 +2,8 @@
 
 AgriSureGIS is a WebGIS-based parametric insurance assessment platform. This repository contains the backend API service that ingests and normalizes farm and insurance CSV data, stores spatial and relational records in PostgreSQL/PostGIS, and exposes FastAPI endpoints for map-based UIs and assessment workflows.
 
+**PAGASA API refactor: PARTIALLY FIXED — FOLLOW-UP REQUIRED.** See the [current review handoff and open checklist](../docs/bulletin-refactor-status.md) before resuming work. Passing bulletin tests do not yet establish completion.
+
 Key backend responsibilities:
 
 - Accept and normalize bulk CSV uploads (farms, policies, assessments)
