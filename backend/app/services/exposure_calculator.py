@@ -1,4 +1,4 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from app.models.models import (
     AdminBoundary,
@@ -40,9 +40,13 @@ class ExposureCalculatorService:
         # exposure to the wrong province's boundary. Relies on
         # TcbSignal.province, populated by bulletin_parser.py's matching --
         # see backend/migrations/2026-08-20_tcb_signal_province.sql.
+        # load_only: with every PSGC barangay loaded (~42k rows), pulling
+        # each row's boundary_geom just to build this name lookup is wasted.
         boundaries_by_province_municipality = {
             (b.province.lower(), b.municipality.lower()): b
-            for b in db.query(AdminBoundary).all()
+            for b in db.query(AdminBoundary)
+            .options(load_only(AdminBoundary.boundary_id, AdminBoundary.province, AdminBoundary.municipality))
+            .all()
         }
 
         # boundary_id -> {"boundary": AdminBoundary, "start": dt, "end": dt, "max_signal_level": int}

@@ -193,7 +193,10 @@ CREATE TABLE tbl_tropical_cyclone_bulletins (
     gustiness INT,
     issued_at TIMESTAMPTZ NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
-    center_geom GEOMETRY(Point, 4326)
+    center_geom GEOMETRY(Point, 4326),
+    -- Raw PAGASA TCWS as parsed, unvalidated (see migrations/2026-09-30_tcb_raw_tcws.sql)
+    max_signal_level INT,
+    tcws_areas JSONB
 );
 
 CREATE TABLE tbl_tcb_signals (

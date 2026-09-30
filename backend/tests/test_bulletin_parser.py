@@ -4,7 +4,7 @@ import unittest
 import httpx
 from datetime import datetime, timezone
 from unittest.mock import patch, AsyncMock, MagicMock
-from app.services.bulletin_parser import PHT, BulletinParserService, PagasaScrapeError
+from app.services.bulletin_parser import PHT, BulletinParserService, PagasaScrapeError, match_tcws_cell
 from app.models.models import Typhoon, TropicalCycloneBulletin, TcbSignal, AdminBoundary
 
 REAL_SAMPLE_PDF = os.path.join(os.path.dirname(__file__), "..", "..", "docs", "TCB#11_kiyapo.pdf")
@@ -42,6 +42,23 @@ class BulletinParserTests(unittest.TestCase):
         self.assertEqual(result["latitude"], 16.2)
         self.assertEqual(result["longitude"], 123.5)
         self.assertEqual(result["signals"], {})  # no TCWS table on this mock page
+        self.assertFalse(result["no_signal_hoisted"])  # and no explicit "no signal" statement either
+
+    def test_parse_bulletin_text_detects_no_wind_signal_hoisted(self):
+        # Wording from the real TCB#11_pilandok.pdf (storm 1,105 km east of
+        # Extreme Northern Luzon, 2026-09-01).
+        text = (
+            "TROPICAL CYCLONE BULLETIN NR. 11\n"
+            "Tropical Storm PILANDOK (KROVANH)\n"
+            "TROPICAL CYCLONE WIND SIGNALS (TCWS) IN EFFECT\n"
+            "No Wind Signal is currently hoisted\n"
+        )
+        with patch("pdfplumber.open") as mock_pdf_open:
+            mock_pdf_open.return_value.__enter__.return_value = _mock_pdf(text)
+            result = BulletinParserService.parse_bulletin_text("dummy_path.pdf")
+
+        self.assertTrue(result["no_signal_hoisted"])
+        self.assertEqual(result["signals"], {})
 
     def test_parse_bulletin_text_name_does_not_swallow_trailing_issued_at(self):
         # Regression test: when the name isn't quoted in the source PDF, the old
@@ -286,30 +303,38 @@ class BulletinParserTests(unittest.TestCase):
 
 
 class BulletinParserSaveToDbTests(unittest.TestCase):
-    def _build_mock_db(self, boundaries, existing_typhoon=None):
+    def _build_mock_db(self, boundaries, existing_typhoon=None, existing_bulletin=None, existing_signal=None):
         """Dispatches db.query(Model) to a per-model mock so typhoon/bulletin/boundary
         lookups don't collide on the same MagicMock return chain. `existing_typhoon`
         controls what the "same typhoon within the last 30 days" join query
         (db.query(Typhoon).join(...).filter(...).order_by(...).first()) returns —
-        None means "no match, create a new Typhoon row"."""
+        None means "no match, create a new Typhoon row". `boundaries` are
+        (province, municipality) tuples, as returned by
+        db.query(AdminBoundary.province, AdminBoundary.municipality).distinct().all()."""
         mock_db = MagicMock()
 
         typhoon_query = MagicMock()
         typhoon_query.join.return_value.filter.return_value.order_by.return_value.first.return_value = existing_typhoon
 
         bulletin_query = MagicMock()
-        bulletin_query.filter.return_value.first.return_value = None
+        bulletin_query.filter.return_value.first.return_value = existing_bulletin
 
         admin_query = MagicMock()
-        admin_query.all.return_value = boundaries
+        admin_query.distinct.return_value.all.return_value = boundaries
 
-        def query_side_effect(model):
+        signal_query = MagicMock()
+        signal_query.filter.return_value.first.return_value = existing_signal
+
+        def query_side_effect(*entities):
+            model = entities[0]
             if model is Typhoon:
                 return typhoon_query
             if model is TropicalCycloneBulletin:
                 return bulletin_query
-            if model is AdminBoundary:
+            if model is AdminBoundary.province:
                 return admin_query
+            if model is TcbSignal:
+                return signal_query
             raise AssertionError(f"Unexpected model queried in test: {model}")
 
         mock_db.query.side_effect = query_side_effect
@@ -326,11 +351,7 @@ class BulletinParserSaveToDbTests(unittest.TestCase):
     def test_save_bulletin_to_db_creates_bulletin_and_signals(self):
         # Regression test for the missing `sqlalchemy.func` import, which made this
         # method raise NameError on every call before the fix.
-        boundary = MagicMock()
-        boundary.province = "Misamis Oriental"
-        boundary.municipality = "Claveria"
-
-        mock_db = self._build_mock_db(boundaries=[boundary])
+        mock_db = self._build_mock_db(boundaries=[("Misamis Oriental", "Claveria")])
         created_objects = []
         mock_db.add.side_effect = created_objects.append
 
@@ -365,11 +386,7 @@ class BulletinParserSaveToDbTests(unittest.TestCase):
         # As of the nationwide PSGC expansion (2026-08-20), Luzon/Visayas go
         # through the same precise province+municipality AdminBoundary match
         # Mindanao always used -- no more free-text fallback.
-        boundary = MagicMock()
-        boundary.province = "Cagayan"
-        boundary.municipality = "Santa Ana"
-
-        mock_db = self._build_mock_db(boundaries=[boundary])
+        mock_db = self._build_mock_db(boundaries=[("Cagayan", "Santa Ana")])
         created_objects = []
         mock_db.add.side_effect = created_objects.append
 
@@ -398,9 +415,9 @@ class BulletinParserSaveToDbTests(unittest.TestCase):
         self.assertEqual(signal_rows[0].province, "Cagayan")
 
     def test_save_bulletin_to_db_drops_unmatched_area_with_no_fallback(self):
-        # A cell that only names a province/region, with no municipality
-        # AdminBoundary can match, now yields zero rows for that group --
-        # confirms the free-text "always show something" fallback is gone.
+        # A cell whose provinces aren't in AdminBoundary at all yields zero
+        # tbl_tcb_signals rows -- no free-text fallback there (the raw text is
+        # kept on the bulletin's tcws_areas column instead, for display).
         mock_db = self._build_mock_db(boundaries=[])
         created_objects = []
         mock_db.add.side_effect = created_objects.append
@@ -512,6 +529,161 @@ class BulletinParserSaveToDbTests(unittest.TestCase):
         BulletinParserService.save_bulletin_to_db(parsed_data, mock_db)
 
         self.assertTrue(existing_typhoon.is_active)
+
+    def _luzon_parsed_data(self):
+        return {
+            "typhoon_name": "KIYAPO",
+            "bulletin_count": 11,
+            "category": "Tropical Storm",
+            "max_sustained_winds": 75,
+            "gustiness": 90,
+            "latitude": 18.8,
+            "longitude": 122.0,
+            "issued_at": None,
+            "signals": {
+                2: {0: "Batanes, the northern portion of Cagayan (Santa Ana, Gonzaga)"},
+                1: {0: "Isabela"},
+            },
+            "raw_text": "",
+        }
+
+    def test_save_bulletin_to_db_stores_raw_tcws_even_when_no_boundary_matches(self):
+        # 2026-09-30: the TCB viewer showed "No Signal Data" because the signal
+        # number came only from boundary-matched tbl_tcb_signals rows. The raw
+        # TCWS is now kept on the bulletin itself, unvalidated.
+        mock_db = self._build_mock_db(boundaries=[])
+        created_objects = []
+        mock_db.add.side_effect = created_objects.append
+
+        result = BulletinParserService.save_bulletin_to_db(self._luzon_parsed_data(), mock_db)
+
+        self.assertEqual(result.max_signal_level, 2)
+        self.assertEqual(result.tcws_areas, {
+            "2": {"0": "Batanes, the northern portion of Cagayan (Santa Ana, Gonzaga)"},
+            "1": {"0": "Isabela"},
+        })
+        self.assertEqual([o for o in created_objects if isinstance(o, TcbSignal)], [])
+
+    def test_save_bulletin_to_db_leaves_raw_tcws_null_when_bulletin_has_no_signals(self):
+        mock_db = self._build_mock_db(boundaries=[])
+        parsed_data = {**self._luzon_parsed_data(), "signals": {}}
+
+        result = BulletinParserService.save_bulletin_to_db(parsed_data, mock_db)
+
+        self.assertIsNone(result.max_signal_level)
+        self.assertIsNone(result.tcws_areas)
+
+    def test_save_bulletin_to_db_stores_level_zero_when_pagasa_says_no_signal_hoisted(self):
+        mock_db = self._build_mock_db(boundaries=[])
+        parsed_data = {**self._luzon_parsed_data(), "signals": {}, "no_signal_hoisted": True}
+
+        result = BulletinParserService.save_bulletin_to_db(parsed_data, mock_db)
+
+        self.assertEqual(result.max_signal_level, 0)
+        self.assertIsNone(result.tcws_areas)
+
+    def test_save_bulletin_to_db_expands_whole_province_to_all_its_municipalities(self):
+        mock_db = self._build_mock_db(boundaries=[
+            ("Batanes", "Basco"), ("Batanes", "Itbayat"),
+            ("Cagayan", "Santa Ana"), ("Cagayan", "Gonzaga"), ("Cagayan", "Aparri"),
+        ])
+        created_objects = []
+        mock_db.add.side_effect = created_objects.append
+
+        BulletinParserService.save_bulletin_to_db(self._luzon_parsed_data(), mock_db)
+
+        rows = {(o.signal_level, o.province, o.area_name) for o in created_objects if isinstance(o, TcbSignal)}
+        self.assertEqual(rows, {
+            (2, "Batanes", "Basco"), (2, "Batanes", "Itbayat"),  # whole province named
+            (2, "Cagayan", "Santa Ana"), (2, "Cagayan", "Gonzaga"),  # only the listed towns -- not Aparri
+        })
+
+    def test_backfills_existing_bulletin_saved_before_raw_tcws_columns(self):
+        existing_bulletin = TropicalCycloneBulletin(title="Bulletin No. 11 for KIYAPO", bulletin_count=11)
+        existing_bulletin.tcb_id = 12
+        mock_db = self._build_mock_db(
+            boundaries=[("Batanes", "Basco")], existing_bulletin=existing_bulletin, existing_signal=None,
+        )
+        created_objects = []
+        mock_db.add.side_effect = created_objects.append
+
+        result = BulletinParserService.save_bulletin_to_db(self._luzon_parsed_data(), mock_db)
+
+        self.assertIs(result, existing_bulletin)
+        self.assertEqual(result.max_signal_level, 2)
+        self.assertIn("2", result.tcws_areas)
+        signal_rows = [o for o in created_objects if isinstance(o, TcbSignal)]
+        self.assertEqual([(s.tcb_id, s.province, s.area_name) for s in signal_rows], [(12, "Batanes", "Basco")])
+
+    def test_backfill_does_not_reseed_bulletin_that_already_has_signal_rows(self):
+        existing_bulletin = TropicalCycloneBulletin(title="Bulletin No. 11 for KIYAPO", bulletin_count=11)
+        existing_bulletin.tcb_id = 12
+        mock_db = self._build_mock_db(
+            boundaries=[("Batanes", "Basco")], existing_bulletin=existing_bulletin, existing_signal=MagicMock(),
+        )
+        created_objects = []
+        mock_db.add.side_effect = created_objects.append
+
+        BulletinParserService.save_bulletin_to_db(self._luzon_parsed_data(), mock_db)
+
+        self.assertEqual(existing_bulletin.max_signal_level, 2)
+        self.assertEqual([o for o in created_objects if isinstance(o, TcbSignal)], [])
+
+    def test_backfill_runs_only_once_per_bulletin(self):
+        existing_bulletin = TropicalCycloneBulletin(title="Bulletin No. 11 for KIYAPO", bulletin_count=11)
+        existing_bulletin.tcb_id = 12
+        existing_bulletin.max_signal_level = 2
+        existing_bulletin.tcws_areas = {"2": {"0": "Batanes"}}
+        existing_typhoon = Typhoon(name="KIYAPO", year=2026, is_active=True)
+        existing_typhoon.typhoon_id = 4
+        mock_db = self._build_mock_db(
+            boundaries=[("Batanes", "Basco")], existing_typhoon=existing_typhoon, existing_bulletin=existing_bulletin,
+        )
+        created_objects = []
+        mock_db.add.side_effect = created_objects.append
+
+        BulletinParserService.save_bulletin_to_db(self._luzon_parsed_data(), mock_db)
+
+        self.assertEqual(created_objects, [])
+        mock_db.commit.assert_not_called()
+
+
+class MatchTcwsCellTests(unittest.TestCase):
+    BOUNDARIES = {
+        "Batanes": {"Basco", "Itbayat"},
+        "Cagayan": {"Santa Ana", "Gonzaga", "Aparri"},
+        "Misamis Oriental": {"Claveria", "City of Gingoog"},
+        "City of Cagayan De Oro": {"City of Cagayan De Oro"},  # HUC convention: province == city
+        "Samar": {"Catbalogan"},
+        "Northern Samar": {"Catarman"},
+        "Laguna": {"Santa Cruz"},
+        "Marinduque": {"Santa Cruz"},
+    }
+
+    def test_province_name_inside_parenthetical_is_not_a_province_mention(self):
+        result = match_tcws_cell("The northern portion of Misamis Oriental (Claveria, Cagayan de Oro City)", self.BOUNDARIES)
+        self.assertNotIn("Cagayan", {p for p, _ in result})
+        self.assertIn(("City of Cagayan De Oro", "City of Cagayan De Oro"), result)
+        self.assertIn(("Misamis Oriental", "Claveria"), result)
+
+    def test_city_of_prefix_matches_pagasa_city_suffix_spelling(self):
+        result = match_tcws_cell("Misamis Oriental (Gingoog City)", self.BOUNDARIES)
+        self.assertEqual(result, [("Misamis Oriental", "City of Gingoog")])
+
+    def test_longer_province_name_is_not_also_matched_as_its_substring(self):
+        self.assertEqual(match_tcws_cell("Northern Samar", self.BOUNDARIES), [("Northern Samar", "Catarman")])
+
+    def test_same_named_towns_in_different_provinces_are_both_kept(self):
+        result = match_tcws_cell("the southern portion of Laguna (Santa Cruz), Marinduque", self.BOUNDARIES)
+        self.assertEqual(result, [("Laguna", "Santa Cruz"), ("Marinduque", "Santa Cruz")])
+
+    def test_whole_province_does_not_borrow_next_unloaded_provinces_list(self):
+        # Regression: with Cagayan not a loaded boundary, "Batanes" used to
+        # take "(Santa Ana, Gonzaga)" as its own list and match nothing.
+        result = match_tcws_cell(
+            "Batanes, the northern portion of Cagayan (Santa Ana, Gonzaga)", {"Batanes": {"Basco", "Itbayat"}},
+        )
+        self.assertEqual(result, [("Batanes", "Basco"), ("Batanes", "Itbayat")])
 
 
 class ScrapeAndSaveAllTests(unittest.IsolatedAsyncioTestCase):

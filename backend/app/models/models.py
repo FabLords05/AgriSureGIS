@@ -1,4 +1,5 @@
 from sqlalchemy import Column, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Boolean, UniqueConstraint, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from geoalchemy2 import Geometry
 
@@ -229,6 +230,14 @@ class TropicalCycloneBulletin(Base):
     issued_at = Column(DateTime(timezone=True), nullable=False)
     expires_at = Column(DateTime(timezone=True), nullable=False)
     center_geom = Column(Geometry(geometry_type="POINT", srid=4326))
+    # PAGASA's own TCWS table as parsed, stored as-is with no AdminBoundary
+    # validation (see backend/migrations/2026-09-30_tcb_raw_tcws.sql) -- so
+    # the TCB viewer can show the real signal number and area text even for
+    # areas that don't resolve to a boundary. tcws_areas shape:
+    # {"<signal_level>": {"<island_group>": cell_text}}. Both NULL for
+    # bulletins saved before this column existed, or with no TCWS table.
+    max_signal_level = Column(Integer, nullable=True)
+    tcws_areas = Column(JSONB, nullable=True)
 
     typhoon = relationship("Typhoon")
 

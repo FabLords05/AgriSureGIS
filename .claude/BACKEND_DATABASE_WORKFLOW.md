@@ -143,8 +143,14 @@ Execution rule):
    psql -U agrisure_admin -d agrisure_db -h localhost -f init_schema.sql
    ```
 2. Reload whichever data you want back, in any combination:
+   - `python seed_admin_boundaries.py` — every barangay in
+     `app/data/psgc_nationwide_boundaries.csv` into `tbl_admin_boundaries`
+     (needed so PAGASA TCWS areas anywhere in the country resolve to a
+     boundary). Regenerate that CSV first from PSA's PSGC Publication with
+     `python scripts/convert_psgc_publication.py --inspect <xlsx>`, then
+     `python scripts/convert_psgc_publication.py <xlsx>`.
    - `python seed_database.py` — legacy `pabs_results.csv` farmers/insurance,
-     plus the PSGC Region X admin boundaries.
+     plus the PSGC admin boundaries those farms need.
    - `python backfill_admin_boundary_geom.py` — backfills `boundary_geom` on
      `tbl_admin_boundaries`, needed for the GeoServer/WFS boundary layer in
      Spatial Analysis (see `.claude/GEOSERVER_SETUP.md`).

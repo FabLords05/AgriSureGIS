@@ -5329,3 +5329,134 @@ crash -- just missing bulletins and a noisy log.
 * Merged into `develop` locally per Cristian's explicit direction (skip-PR).
 * A PAGASA outage (not just slowness) still fails the link; the next
   scheduled poll retries it.
+
+
+## [2026-09-30] - TCB Viewer Shows Real TCWS Signal + Full Nationwide PSGC Boundaries
+
+The TCB viewer (e.g. TCB 147, PILANDOK #11) showed "No Signal Data" and an
+empty "Areas Under Signal Warning" -- and so did every other real bulletin:
+the 2026-09-30 DB backup had zero `tbl_tcb_signals` rows for any real TCB
+(only the two mock bulletins had any), even KIYAPO #11 whose PDF clearly has
+Signal No. 2 over Batanes. Root causes:
+1. The viewer derived the signal number only from `tbl_tcb_signals` rows.
+2. `save_bulletin_to_db()` only wrote a row when an `AdminBoundary`
+   province AND municipality both appeared in the TCWS cell. The
+   "nationwide" `psgc_nationwide_boundaries.csv` was never actually
+   regenerated (still 2,257 rows / 8 Mindanao provinces), and
+   `tbl_admin_boundaries` only ever got barangays that had farms -- so every
+   Luzon/Visayas area was dropped. Whole-province mentions ("Batanes") never
+   matched either, since no municipality name appears.
+3. Signals were only seeded on a bulletin's first insert -- never backfilled.
+(PILANDOK #11 itself, centered at 22.2°N 132.4°E, may genuinely have had no
+TCWS -- if so it will still read "No Signal Data" after reprocessing.)
+
+Fabio's decisions: keep PAGASA's raw TCWS on the bulletin for display
+(unvalidated), backfill on the next scrape/upload, and load every PSGC
+barangay so Luzon/Visayas areas also resolve for exposure.
+
+### 1. File: `backend/app/models/models.py`, `backend/init_schema.sql`, `backend/migrations/2026-09-30_tcb_raw_tcws.sql` (new)
+* `TropicalCycloneBulletin`: new nullable **`max_signal_level`** (INT) and
+  **`tcws_areas`** (JSONB, `{"<level>": {"<island_group>": text}}`).
+  **ERD deviation** -- two new columns on `tbl_tropical_cyclone_bulletins`.
+
+### 2. File: `backend/app/services/bulletin_parser.py`
+* **`save_bulletin_to_db()`**: sets `max_signal_level` / `tcws_areas` on
+  insert. For an existing bulletin with `tcws_areas IS NULL` and parsed
+  signals: fills both in, and seeds `tbl_tcb_signals` if it has no rows yet
+  -- one-time backfill (guarded on the NULL), not on every poll.
+* New **`_seed_tcb_signals()`** (extracted matching loop): loads only
+  `DISTINCT province, municipality` instead of every AdminBoundary row.
+* New module-level **`match_tcws_cell()`** replacing plain substring
+  matching: whole-name regex (no "Cagayan" in "Cagayan de Oro", "Samar" in
+  "Northern Samar"); province + `( ... )` list -> only listed towns;
+  province with no list -> all its municipalities (a province's list is
+  only looked for up to the next province mention or top-level comma, so
+  "Batanes" never borrows a following unloaded province's list); province names inside a
+  parenthetical ignored; "City of X" also matches "X City" / "X"; HUCs
+  (province == municipality) matched anywhere. Dedup now includes province,
+  so same-named towns in different provinces are both kept.
+* New helpers `_raw_tcws_columns()`, `_name_re()` (cached),
+  `_municipality_aliases()`, `_mentions()`. Added `functools` import.
+
+* **`parse_bulletin_text()`**: new `no_signal_hoisted` flag -- PAGASA's
+  "No Wind Signal is currently hoisted" sentence (confirmed on
+  `TCB#11_pilandok.pdf`: PILANDOK #11 genuinely had no TCWS, 1,105 km east
+  of Extreme Northern Luzon). Stored as `max_signal_level = 0` (NULL still
+  means "no signal information found"); the backfill guard is now
+  `max_signal_level IS NULL` so these bulletins are backfilled too.
+* Viewer: `max_signal_level === 0` -> header "No Wind Signal Is Raised" and
+  areas box "No Wind Signal is Currently Listed." instead of
+  "No Signal Data".
+
+### 3. File: `backend/app/services/exposure_calculator.py`
+* **`compute_for_typhoon()`**: boundary lookup uses `load_only(boundary_id,
+  province, municipality)` -- no geometry for ~42k rows. Logic unchanged.
+
+### 4. File: `backend/app/api/bulletins.py`
+* **`list_bulletins()`**: returns `max_signal_level` and `tcws_areas`.
+
+### 5. File: `frontend/src/lib/api.ts`, `frontend/src/app/components/MonitoringModule.tsx`
+* `Bulletin` type: `max_signal_level`, `tcws_areas`.
+* **`TCBViewerModal`**: header signal = max(signal rows, `max_signal_level`).
+  Areas box keeps the matched-municipality list; when there are none, falls
+  back to PAGASA's raw text per level, labeled Luzon/Visayas/Mindanao (new
+  `rawTcwsByLevel()` helper). `handleDownloadTCB()` uses the same fallback.
+  No layout change.
+
+### 6. File: `backend/scripts/convert_psgc_publication.py`
+* Reads the PSA file as text (`dtype=str`) and restores a lost leading zero
+  (Regions 01-09) via `_normalize_code()`.
+* HUC/NCR fix: a city whose code's province segment differs from the
+  current province's is its own province. The old `current_province is
+  None` check only caught the first NCR city (later ones inherited its name)
+  and let HUCs inherit the preceding province.
+* Sub-municipalities (Manila's districts) no longer replace the parent city.
+* `_find_code_column()`: prefers a header containing "psgc" -- the 2Q-2026
+  publication's code column is "10-digit PSGC" (no "code" in it), next to a
+  "Correspondence Code" that must not be picked.
+* Conversion body split into testable **`convert_rows()`**.
+* `backend/requirements.txt`: added `openpyxl==3.1.5` -- `pd.read_excel()` on
+  the PSA `.xlsx` needs it and it wasn't installed.
+* New **`preserve_existing_names()`**: codes already in the current CSV keep
+  their existing spelling (e.g. Butuan under "Agusan del Norte"), codes
+  missing from the PSA file are kept, every difference is printed, and the
+  old CSV is backed up to `.csv.bak`.
+
+### 7. File: `backend/seed_admin_boundaries.py` (new), `backend/seed_all.py`
+* Bulk-loads every CSV barangay into `tbl_admin_boundaries`
+  (`ON CONFLICT (psgc_code) DO NOTHING`, batches of 5,000). Added as
+  `seed_all.py` step 1. `boundary_geom` stays NULL outside Region X.
+  Connects via `backend/.env`'s `DATABASE_URL` (falls back to the hardcoded
+  local-dev `DB_CONFIG` the other seed scripts use) -- the hardcoded
+  password didn't match this machine's DB.
+* `psgc_nationwide_boundaries.csv` regenerated from
+  `docs/PSGC-2Q-2026-Publication-Datafile.xlsx`: 42,010 barangays, 1,642
+  (province, municipality) pairs; 193 existing Region X/Caraga rows kept
+  their current spelling (Butuan under Agusan del Norte, `Santo`/`(Pob.)`
+  variants); no existing code missing.
+
+### 8. File: `backend/tests/test_bulletin_parser.py`, `backend/tests/test_exposure_calculator.py`, `backend/tests/test_convert_psgc_publication.py` (new)
+* Save-to-DB mock now serves the distinct (province, municipality) query
+  and a `TcbSignal` query. New tests: raw TCWS stored with no boundary
+  match / NULL with no signals, whole-province expansion, backfill once
+  with no re-seed, plus `MatchTcwsCellTests` and converter tests.
+
+### Status / Next Steps
+* `python -m pytest tests/test_bulletin_parser.py tests/test_exposure_calculator.py
+  tests/test_convert_psgc_publication.py` passed, 58/58 (2026-09-30).
+* Applied on this PC's DB (2026-09-30): migration run; CSV regenerated from
+  `docs/PSGC-2Q-2026-Publication-Datafile.xlsx` (committed as the source);
+  `seed_admin_boundaries.py` inserted 41,966 rows (44 already existed).
+* TCB reset (2026-09-30, pg_dump backup taken first): deleted all 28 real
+  typhoons (MARISOL mock kept -- its bulletins were already gone; the
+  table also held duplicate typhoon rows from an earlier TCB-only delete),
+  then re-downloaded every TCB from PAGASA. PILANDOK #11 now shows "No Wind
+  Signal Is Raised".
+* Other DBs (e.g. Fabio's): run the migration, then `seed_admin_boundaries.py`;
+  existing bulletins backfill on the next scrape.
+* Open: the Exposure Summary for PILANDOK is empty -- not yet investigated
+  (likely no PILANDOK bulletin had a TCWS).
+* Side effect: `GET /farms/municipalities` (Farm Records suggestions) reads
+  `tbl_admin_boundaries`, so it will list every municipality nationwide.
+* Known gap: "Metro Manila" isn't a PSGC province name -- only the raw text
+  shows it. No nationwide polygons (map still Region X only).
