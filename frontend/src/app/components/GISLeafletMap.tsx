@@ -1,204 +1,567 @@
-import { useMemo } from "react";
-import { MapContainer, TileLayer, Polygon, Polyline, Circle, Popup } from "react-leaflet";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { MapContainer, TileLayer, WMSTileLayer, GeoJSON, Marker, Popup, useMap, useMapEvents } from "react-leaflet";
+import type { Layer } from "leaflet";
+import type { Feature, FeatureCollection } from "geojson";
+import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { FarmerRecord } from "./mockData";
+import { Farm, Assessment, Bulletin, TcbSignal, GeoJsonMultiPolygon, getBulletinSignals, getFarmsGeometry } from "@/lib/api";
 
-interface GISLeafletMapProps {
-  farmers: FarmerRecord[];
-  selectedFarmId: string | null;
-  onSelectFarm: (id: string | null) => void;
-  darkMode: boolean;
-  filterMunicipality?: string;
+interface FarmRow extends Farm {
+  assessment: Assessment | null;
 }
 
-// Real, approximate town-center coordinates in Camarines Sur, Bicol Region.
+interface GISLeafletMapProps {
+  farms: FarmRow[];
+  selectedFarmId: number | null;
+  onSelectFarm: (id: number | null) => void;
+  selectedBulletin: Bulletin | null;
+  darkMode: boolean;
+  focusMunicipality?: string | null;
+  // Farmer search (2026-08-18) -- scopes/flies exactly like
+  // focusMunicipality, and combines with it (both, either, or neither).
+  // null = no farmer picked.
+  focusFarmerId?: number | null;
+  // Passed through to GET /farms/geometry alongside focusMunicipality --
+  // matches whatever active-insurance scope SpatialAnalysisModule's Farm
+  // Records table is currently using, so the map's polygon layer is scoped
+  // the same way (2026-08-18, stage 2 of the on-demand-pagination redesign
+  // -- see .claude/FUNCTION_CHANGES.md).
+  activeOnly: boolean;
+}
+
+// Real, approximate town-center coordinates for the two municipalities actually
+// seeded today (per backend/pabs_results.csv: Bukidnon/Talakag and Misamis
+// Oriental/Claveria) — used only to place farms that don't yet have a real
+// GPX-surveyed boundary.
 const MUNICIPALITY_CENTERS: Record<string, [number, number]> = {
-  "Naga City": [13.6218, 123.1948],
-  "Pili":      [13.5711, 123.2841],
-  "Libmanan":  [13.7133, 123.0725],
-  "Sipocot":   [13.7719, 122.9758],
-  "Goa":       [13.7024, 123.4986],
-  "Lagonoy":   [13.7361, 123.5225],
+  "Talakag":  [8.2158, 124.6547],
+  "Claveria": [9.1667, 124.9833],
 };
-
-// Simulated typhoon track crossing Camarines Sur from the Pacific (east) side
-// toward the Bicol River valley (west) — Goa/Lagonoy (Signal 3) to Naga/Sipocot (Signal 1-2).
-const TYPHOON_TRACK: [number, number][] = [
-  [13.86, 123.66],
-  [13.78, 123.56],
-  [13.71, 123.42],
-  [13.66, 123.27],
-  [13.62, 123.12],
-  [13.58, 122.96],
-];
-
-const TYPHOON_EYE: [number, number] = TYPHOON_TRACK[2];
-
-const SIGNAL_WIND_RINGS: { center: [number, number]; radiusMeters: number; signal: 1 | 2 | 3 }[] = [
-  { center: [13.71, 123.42], radiusMeters: 32000, signal: 3 },
-  { center: [13.66, 123.27], radiusMeters: 42000, signal: 2 },
-  { center: [13.62, 123.12], radiusMeters: 50000, signal: 1 },
-];
-
-const GROWTH_COLORS: Record<string, string> = {
-  Seedling:     "#86efac",
-  Vegetative:   "#22c55e",
-  Reproductive: "#eab308",
-  Ripening:     "#f59e0b",
-};
+const DEFAULT_CENTER: [number, number] = [8.38, 124.84]; // Region X, between Talakag and Claveria
 
 const SIGNAL_DOT_COLORS: Record<number, string> = {
-  1: "#22c55e",
   2: "#f59e0b",
-  3: "#ef4444",
+  3: "#f97316",
+  4: "#ef4444",
+  5: "#991b1b",
 };
 
-const SIGNAL_RING_COLORS: Record<number, string> = {
-  1: "#ef4444",
-  2: "#f97316",
-  3: "#eab308",
-};
+// Custom marker via DivIcon (inline SVG) — avoids the well-known Vite/Webpack
+// "missing default Leaflet marker icon" asset-resolution issue entirely.
+const typhoonIcon = L.divIcon({
+  html: `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="#ff5200" stroke="white" stroke-width="1.5"><circle cx="12" cy="12" r="9"/></svg>`,
+  className: "",
+  iconSize: [28, 28],
+  iconAnchor: [14, 14],
+});
 
-// Spreads farms belonging to the same municipality into a small grid around
-// its real town center so polygons don't overlap on the map.
-function farmCenter(farm: FarmerRecord, indexInMunicipality: number): [number, number] {
-  const base = MUNICIPALITY_CENTERS[farm.municipality] ?? MUNICIPALITY_CENTERS["Naga City"];
+// Region X (Northern Mindanao) municipality outlines, for spatial context only —
+// PSGC codes sourced from the PSA/NAMRIA-derived 2023 dataset. Not used in any
+// exposure calculation (ExposureCalculatorService still matches on province/
+// municipality/barangay text). Preferred source is GeoServer WFS (live from
+// tbl_admin_boundaries.boundary_geom, see .claude/GEOSERVER_SETUP.md); falls back
+// to this bundled static file if GeoServer is unset/unreachable.
+const REGION_X_BOUNDARIES_URL = "/data/region10-boundaries.geojson";
+
+// Requests go through the Vite dev server's /geoserver-proxy path (see vite.config.ts),
+// which forwards to VITE_GEOSERVER_URL server-side — this keeps every GeoServer
+// request same-origin from the browser's perspective, so it works without needing
+// CORS configured on GeoServer at all.
+const GEOSERVER_URL = import.meta.env.VITE_GEOSERVER_URL as string | undefined;
+const GEOSERVER_WORKSPACE = "agrisuregis";
+const GEOSERVER_PROXY_BASE = "/geoserver-proxy";
+const REGION_X_BOUNDARIES_WFS_URL = GEOSERVER_URL
+  ? `${GEOSERVER_PROXY_BASE}/${GEOSERVER_WORKSPACE}/ows?service=WFS&version=2.0.0&request=GetFeature&typeName=${GEOSERVER_WORKSPACE}:tbl_admin_boundaries&outputFormat=application/json`
+  : null;
+const FARMS_WMS_LAYER = `${GEOSERVER_WORKSPACE}:tbl_farms`;
+const FARMS_WMS_URL = GEOSERVER_URL ? `${GEOSERVER_PROXY_BASE}/${GEOSERVER_WORKSPACE}/wms` : null;
+
+function styleBoundary() {
+  return { color: "#166534", weight: 1, opacity: 0.5, fillOpacity: 0, dashArray: "4, 4" };
+}
+
+function labelBoundary(feature: Feature, layer: Layer) {
+  const { province, municipality } = feature.properties ?? {};
+  if (municipality) {
+    layer.bindTooltip(`${municipality}, ${province}`, { sticky: true });
+  }
+}
+
+// Flies the map to whichever farm is selected -- its real GPX polygon bounds
+// if surveyed, otherwise its approximate marker position. Runs inside
+// MapContainer since useMap() only works there.
+//
+// The selected farm's geometry may not be in `geomCache` yet -- geometry is
+// now fetched by map viewport (see the geomCache effects below), and a farm
+// selected from a table row can be anywhere, not just what's currently
+// panned into view. When that happens, this resolves it directly via
+// GET /farms/geometry?farm_id=... (see backend/app/api/farms.py) instead of
+// waiting for a pan/zoom to bring it into the bbox fetch, and reports the
+// result back via onGeometryFetched so it also becomes render-eligible
+// immediately rather than only after this flight lands.
+// `onGeometryFetched` takes a batch (not just one entry) -- shared with
+// FlyToFarmer below, which can resolve several farms' geometry at once.
+type GeomEntry = { farmId: number; geom: GeoJsonMultiPolygon };
+
+function FlyToSelectedFarm({
+  farm, approxPos, geomCache, onGeometryFetched,
+}: {
+  farm: FarmRow | null;
+  approxPos: [number, number] | null;
+  geomCache: Map<number, GeoJsonMultiPolygon>;
+  onGeometryFetched: (entries: GeomEntry[]) => void;
+}) {
+  const map = useMap();
+  useEffect(() => {
+    if (!farm) return;
+    const cached = geomCache.get(farm.farm_id);
+    if (cached) {
+      const bounds = L.geoJSON(cached as any).getBounds();
+      if (bounds.isValid()) map.flyToBounds(bounds, { maxZoom: 16, padding: [40, 40] });
+      return;
+    }
+    if (farm.has_geometry) {
+      getFarmsGeometry({ farm_id: farm.farm_id })
+        .then(res => {
+          const entry = res.data[0];
+          if (!entry) return;
+          onGeometryFetched([{ farmId: entry.farm_id, geom: entry.location_geom }]);
+          const bounds = L.geoJSON(entry.location_geom as any).getBounds();
+          if (bounds.isValid()) map.flyToBounds(bounds, { maxZoom: 16, padding: [40, 40] });
+        })
+        .catch(() => { /* leave the map where it is on failure */ });
+      return;
+    }
+    if (approxPos) map.flyTo(approxPos, 14);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [farm?.farm_id]);
+  return null;
+}
+
+// Flies the map to a searched/selected municipality's real boundary outline
+// (from the same regionXBoundaries GeoJSON used for the dashed context layer),
+// same idea as FlyToSelectedFarm but at municipality scale instead of farm scale.
+function FlyToMunicipality({ municipality, boundaries }: { municipality: string | null; boundaries: FeatureCollection | null }) {
+  const map = useMap();
+  useEffect(() => {
+    if (!municipality || !boundaries) return;
+    const matches = boundaries.features.filter(
+      f => (f.properties?.municipality ?? "").toLowerCase() === municipality.toLowerCase()
+    );
+    if (matches.length === 0) return;
+    const bounds = L.geoJSON({ type: "FeatureCollection", features: matches } as FeatureCollection).getBounds();
+    if (!bounds.isValid()) return;
+    // fitBounds' natural zoom (whatever fits the whole municipality shape) can be
+    // quite far out for a large/sprawling municipality -- floor it at 12 so the
+    // view never pulls back further than that, even if the shape doesn't fully fit.
+    const fitZoom = map.getBoundsZoom(bounds, false, [20, 20]);
+    map.flyTo(bounds.getCenter(), Math.max(fitZoom, 12));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [municipality, boundaries]);
+  return null;
+}
+
+// Flies the map to a searched farmer's farm(s) (2026-08-18, farmer search),
+// same idea as FlyToMunicipality/FlyToSelectedFarm but there's no static
+// boundary outline for a farmer -- instead this resolves that farmer's
+// geometry directly (GET /farms/geometry?farmer_id=..., ignoring the map's
+// current viewport/active_only/municipality -- see
+// backend/app/api/farms.py's get_farms_geometry docstring) and flies to the
+// combined bounds over all of it, so it works regardless of whether any of
+// their farms are already on screen. Falls back to the first matching
+// farm's approximate position if the farmer has no surveyed farms at all.
+function FlyToFarmer({
+  farmerId, farms, approxPlacements, onGeometryFetched,
+}: {
+  farmerId: number | null;
+  farms: FarmRow[];
+  approxPlacements: Map<number, [number, number]>;
+  onGeometryFetched: (entries: GeomEntry[]) => void;
+}) {
+  const map = useMap();
+  useEffect(() => {
+    if (farmerId == null) return;
+    getFarmsGeometry({ farmer_id: farmerId })
+      .then(res => {
+        if (res.data.length > 0) {
+          onGeometryFetched(res.data.map(d => ({ farmId: d.farm_id, geom: d.location_geom })));
+          const collection = {
+            type: "FeatureCollection",
+            features: res.data.map(d => ({ type: "Feature", properties: {}, geometry: d.location_geom })),
+          } as FeatureCollection;
+          const bounds = L.geoJSON(collection).getBounds();
+          if (bounds.isValid()) map.flyToBounds(bounds, { maxZoom: 16, padding: [40, 40] });
+          return;
+        }
+        // No surveyed farms for this farmer -- fall back to the approximate
+        // marker position of one of their farms, if any is currently loaded
+        // into the (already farmer-scoped, via SpatialAnalysisModule's
+        // filteredFarms) `farms` prop.
+        const theirFarm = farms.find(f => f.farmer_id === farmerId);
+        const approx = theirFarm ? approxPlacements.get(theirFarm.farm_id) : null;
+        if (approx) map.flyTo(approx, 14);
+      })
+      .catch(() => { /* leave the map where it is on failure */ });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [farmerId]);
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Viewport-scoped geometry (2026-08-18, stage 2 of the on-demand-pagination
+// redesign -- see .claude/FUNCTION_CHANGES.md). Polygon geometry is fetched
+// directly from GET /farms/geometry, scoped to the map's current bbox +
+// activeOnly/focusMunicipality (see the geomCache effects below), instead of
+// culling client-side over geometry that used to sit on every farm already
+// loaded into the shared `farms` array. `farms` no longer carries geometry
+// at all (see api.ts's Farm interface) -- only `has_geometry`/attributes.
+//
+// computeGeoJsonBBox/bboxIntersects are still needed here, just applied to
+// the fetched geometry cache instead of the whole farm set: recomputed only
+// on moveend/zoomend, Leaflet's own discrete end-of-gesture events, not on
+// every continuous move/zoom tick during a drag -- no extra debounce needed.
+// ---------------------------------------------------------------------------
+interface SimpleBounds { south: number; west: number; north: number; east: number; }
+
+function toSimpleBounds(b: L.LatLngBounds): SimpleBounds {
+  return { south: b.getSouth(), west: b.getWest(), north: b.getNorth(), east: b.getEast() };
+}
+
+// [minLng, minLat, maxLng, maxLat] -- plain numbers, not a Leaflet object, so
+// caching one per farm (up to ~48,588) doesn't mean allocating that many
+// Leaflet LatLngBounds instances.
+type BBox = [number, number, number, number];
+
+function computeGeoJsonBBox(geom: GeoJsonMultiPolygon): BBox {
+  let minLng = Infinity, minLat = Infinity, maxLng = -Infinity, maxLat = -Infinity;
+  for (const polygon of geom.coordinates) {
+    for (const ring of polygon) {
+      for (const [lng, lat] of ring) {
+        if (lng < minLng) minLng = lng;
+        if (lng > maxLng) maxLng = lng;
+        if (lat < minLat) minLat = lat;
+        if (lat > maxLat) maxLat = lat;
+      }
+    }
+  }
+  return [minLng, minLat, maxLng, maxLat];
+}
+
+function bboxIntersects(bbox: BBox, bounds: SimpleBounds): boolean {
+  const [minLng, minLat, maxLng, maxLat] = bbox;
+  return maxLng >= bounds.west && minLng <= bounds.east && maxLat >= bounds.south && minLat <= bounds.north;
+}
+
+// Reports the map's current bounds on mount (the real, pixel-derived initial
+// viewport for MapContainer's center/zoom props -- not a guessed one, since
+// by the time this child mounts inside MapContainer the underlying Leaflet
+// map instance already exists) and again on every moveend/zoomend.
+function MapBoundsWatcher({ onBoundsChange }: { onBoundsChange: (b: L.LatLngBounds) => void }) {
+  const map = useMap();
+  useEffect(() => {
+    onBoundsChange(map.getBounds());
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [map]);
+  useMapEvents({
+    moveend: () => onBoundsChange(map.getBounds()),
+    zoomend: () => onBoundsChange(map.getBounds()),
+  });
+  return null;
+}
+
+// Spreads farms without real geometry into a small grid around their
+// municipality's real town center, so they don't overlap on the map.
+function approximateFarmPosition(municipality: string | null, indexInMunicipality: number): [number, number] {
+  const base = (municipality && MUNICIPALITY_CENTERS[municipality]) ?? DEFAULT_CENTER;
   const col = indexInMunicipality % 3;
   const row = Math.floor(indexInMunicipality / 3);
   const step = 0.018;
   return [base[0] + row * step, base[1] + (col - 1) * step];
 }
 
-function farmPolygon(center: [number, number], areaHectare: number): [number, number][] {
-  const half = Math.min(0.006, 0.003 + areaHectare * 0.0008);
-  const [lat, lng] = center;
-  return [
-    [lat - half, lng - half],
-    [lat - half, lng + half],
-    [lat + half, lng + half],
-    [lat + half, lng - half],
-  ];
-}
+export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBulletin, darkMode, focusMunicipality, focusFarmerId, activeOnly }: GISLeafletMapProps) {
+  const [affectedAreas, setAffectedAreas] = useState<TcbSignal[]>([]);
+  const [regionXBoundaries, setRegionXBoundaries] = useState<FeatureCollection | null>(null);
+  const [showFarmsWmsOverlay, setShowFarmsWmsOverlay] = useState(false);
 
-export function GISLeafletMap({ farmers, selectedFarmId, onSelectFarm, darkMode, filterMunicipality }: GISLeafletMapProps) {
-  const visibleFarmers = filterMunicipality
-    ? farmers.filter(f => f.municipality === filterMunicipality)
-    : farmers;
+  useEffect(() => {
+    if (!selectedBulletin) {
+      setAffectedAreas([]);
+      return;
+    }
+    getBulletinSignals(selectedBulletin.tcb_id)
+      .then(setAffectedAreas)
+      .catch(() => setAffectedAreas([]));
+  }, [selectedBulletin]);
+
+  useEffect(() => {
+    const loadStaticFallback = () =>
+      fetch(REGION_X_BOUNDARIES_URL)
+        .then(res => res.json())
+        .then(setRegionXBoundaries)
+        .catch(() => setRegionXBoundaries(null));
+
+    if (!REGION_X_BOUNDARIES_WFS_URL) {
+      loadStaticFallback();
+      return;
+    }
+    fetch(REGION_X_BOUNDARIES_WFS_URL)
+      .then(res => {
+        if (!res.ok) throw new Error(`GeoServer WFS request failed: ${res.status}`);
+        return res.json();
+      })
+      .then(setRegionXBoundaries)
+      .catch(loadStaticFallback);
+  }, []);
+
+  const unsurveyedFarms = useMemo(() => farms.filter(f => !f.has_geometry), [farms]);
 
   const municipalityCounters: Record<string, number> = {};
-  const farmPlacements = useMemo(() => {
-    const placements = new Map<string, { center: [number, number]; polygon: [number, number][] }>();
-    for (const f of visibleFarmers) {
-      const idx = municipalityCounters[f.municipality] ?? 0;
-      municipalityCounters[f.municipality] = idx + 1;
-      const center = farmCenter(f, idx);
-      placements.set(f.farmId, { center, polygon: farmPolygon(center, f.areaHectare) });
+  const approxPlacements = useMemo(() => {
+    const placements = new Map<number, [number, number]>();
+    for (const f of unsurveyedFarms) {
+      const key = f.municipality ?? "__unknown__";
+      const idx = municipalityCounters[key] ?? 0;
+      municipalityCounters[key] = idx + 1;
+      placements.set(f.farm_id, approximateFarmPosition(f.municipality, idx));
     }
     return placements;
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [visibleFarmers]);
+  }, [unsurveyedFarms]);
 
-  const selectedFarm = selectedFarmId ? farmers.find(f => f.farmId === selectedFarmId) : null;
+  // The map's current visible bounds -- null until MapBoundsWatcher's mount
+  // effect reports the real initial viewport (see its comment). While null,
+  // the render list below resolves to [] rather than "everything," since
+  // showing nothing for the single commit before that effect fires is
+  // imperceptible, whereas a brief "everything" render would reintroduce
+  // exactly the perf problem this fix removes.
+  const [mapBounds, setMapBounds] = useState<SimpleBounds | null>(null);
+  const handleBoundsChange = useCallback((b: L.LatLngBounds) => setMapBounds(toSimpleBounds(b)), []);
+
+  // Polygon geometry cache -- keyed by farm_id, populated by GET
+  // /farms/geometry (see the effects below), not by anything already
+  // sitting on the `farms` prop. Reset (not merged) whenever
+  // activeOnly/focusMunicipality change, since a stale/mismatched polygon
+  // under the new filters is worse than one extra round trip; merged
+  // in-place as new bbox pages/single-farm lookups land otherwise.
+  const [geomCache, setGeomCache] = useState<Map<number, GeoJsonMultiPolygon>>(new Map());
+
+  const mergeGeomEntries = useCallback((entries: GeomEntry[]) => {
+    setGeomCache(prev => {
+      const next = new Map(prev);
+      for (const { farmId, geom } of entries) next.set(farmId, geom);
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    setGeomCache(new Map());
+  }, [activeOnly, focusMunicipality, focusFarmerId]);
+
+  const bboxString = mapBounds
+    ? `${mapBounds.west},${mapBounds.south},${mapBounds.east},${mapBounds.north}`
+    : null;
+
+  useEffect(() => {
+    if (!bboxString) return;
+    // Same gating useFarmsData.ts applies to the table: "every farm, active
+    // or not, no municipality/farmer scope" is the one combination that's
+    // unbounded at 100k-1M scale -- skip the fetch rather than pull every
+    // surveyed farm's polygon nationwide. Every other combination,
+    // including the default activeOnly=true/focusMunicipality=null/
+    // focusFarmerId=null, fetches normally (bounded by the viewport bbox
+    // either way).
+    if (!activeOnly && !focusMunicipality && !focusFarmerId) return;
+    getFarmsGeometry({
+      bbox: bboxString,
+      active_only: activeOnly,
+      municipality: focusMunicipality ?? undefined,
+      farmer_id: focusFarmerId ?? undefined,
+    })
+      .then(res => mergeGeomEntries(res.data.map(d => ({ farmId: d.farm_id, geom: d.location_geom }))))
+      .catch(() => { /* leave the cache as-is on failure -- next moveend/zoomend retries */ });
+  }, [bboxString, activeOnly, focusMunicipality, focusFarmerId, mergeGeomEntries]);
+
+  // Rendered-layer set -- viewport-culled subset of geomCache, used ONLY by
+  // the polygon render loop below. Deliberately NOT used for `selectedFarm`,
+  // `approxPlacements`, FlyToSelectedFarm, or the legend -- those must keep
+  // working regardless of what's currently panned into view (e.g. clicking a
+  // table row for a farm outside the current viewport still needs to
+  // resolve and fly to it; flyTo's own moveend at the end of that animation
+  // is what brings the farm into this list once the camera actually lands).
+  const visibleGeomEntries = useMemo(() => {
+    if (!mapBounds) return [];
+    const entries: { farmId: number; geom: GeoJsonMultiPolygon }[] = [];
+    for (const [farmId, geom] of geomCache) {
+      if (bboxIntersects(computeGeoJsonBBox(geom), mapBounds)) entries.push({ farmId, geom });
+    }
+    return entries;
+  }, [geomCache, mapBounds]);
+
+  const selectedFarm = selectedFarmId != null ? farms.find(f => f.farm_id === selectedFarmId) : null;
+  const uniqueAffectedAreas = Array.from(new Set(affectedAreas.map(s => s.area_name)));
+
+  // The map's attribution links (Leaflet's own "Leaflet" credit + the OSM copyright
+  // link below) default to same-tab navigation. Since this SPA has no URL routing,
+  // clicking them navigates the whole app away — hitting Back afterward reloads the
+  // app from scratch and drops the user back on the login screen instead of where
+  // they were. Force every attribution link to open in a new tab instead.
+  const mapWrapperRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const wrapper = mapWrapperRef.current;
+    if (!wrapper) return;
+    const patchLinks = () => {
+      wrapper.querySelectorAll(".leaflet-control-attribution a").forEach(a => {
+        a.setAttribute("target", "_blank");
+        a.setAttribute("rel", "noopener noreferrer");
+      });
+    };
+    patchLinks();
+    const observer = new MutationObserver(patchLinks);
+    observer.observe(wrapper, { childList: true, subtree: true });
+    return () => observer.disconnect();
+  }, []);
 
   return (
-    <div className="relative w-full h-full overflow-hidden rounded-lg border border-border bg-card">
+    <div ref={mapWrapperRef} className="relative w-full h-full overflow-hidden rounded-lg border border-border bg-card">
       <MapContainer
-        center={[13.68, 123.2]}
-        zoom={10}
+        center={DEFAULT_CENTER}
+        zoom={9}
         style={{ height: "100%", width: "100%" }}
       >
+        <FlyToSelectedFarm
+          farm={selectedFarm}
+          approxPos={selectedFarm ? approxPlacements.get(selectedFarm.farm_id) ?? null : null}
+          geomCache={geomCache}
+          onGeometryFetched={mergeGeomEntries}
+        />
+        <FlyToMunicipality municipality={focusMunicipality ?? null} boundaries={regionXBoundaries} />
+        <FlyToFarmer
+          farmerId={focusFarmerId ?? null}
+          farms={farms}
+          approxPlacements={approxPlacements}
+          onGeometryFetched={mergeGeomEntries}
+        />
+        <MapBoundsWatcher onBoundsChange={handleBoundsChange} />
+
+        {/* Esri World Imagery -- free, no API key/billing required. High-resolution
+            (often sub-meter in populated/agricultural areas), curated best-available
+            mosaic so it reads as cloud-free in practice. Replaced the earlier
+            Google Maps/googlemutant satellite layer (needed a billing-enabled GCP
+            key that was never provisioned) and the OpenStreetMap street tiles it
+            fell back to. */}
         <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          attribution='Tiles &copy; <a href="https://www.esri.com/" target="_blank" rel="noopener noreferrer">Esri</a> — Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community'
+          url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
         />
 
-        <Polyline
-          positions={TYPHOON_TRACK}
-          pathOptions={{ color: "#ff5200", weight: 3, opacity: 0.85, dashArray: "10, 8" }}
-        />
-
-        {SIGNAL_WIND_RINGS.map(ring => (
-          <Circle
-            key={ring.signal}
-            center={ring.center}
-            radius={ring.radiusMeters}
-            pathOptions={{
-              color: SIGNAL_RING_COLORS[ring.signal],
-              weight: 1.5,
-              opacity: 0.5,
-              fillColor: SIGNAL_RING_COLORS[ring.signal],
-              fillOpacity: 0.08,
-              dashArray: "5, 4",
-            }}
+        {/* Optional GeoServer WMS reference overlay for farm boundaries — additive only,
+            the interactive farm layer below (click/popup, from FastAPI) is unaffected. */}
+        {showFarmsWmsOverlay && FARMS_WMS_URL && (
+          <WMSTileLayer
+            url={FARMS_WMS_URL}
+            layers={FARMS_WMS_LAYER}
+            format="image/png"
+            transparent
+            opacity={0.6}
           />
-        ))}
+        )}
 
-        <Circle
-          center={TYPHOON_EYE}
-          radius={4000}
-          pathOptions={{ color: "#ff5200", weight: 2.5, fillColor: "#ff5200", fillOpacity: 0.3 }}
-        />
+        {regionXBoundaries && (
+          <GeoJSON data={regionXBoundaries} style={styleBoundary} onEachFeature={labelBoundary} />
+        )}
 
-        {visibleFarmers.map(farm => {
-          const placement = farmPlacements.get(farm.farmId);
-          if (!placement) return null;
-          const isSelected = farm.farmId === selectedFarmId;
-          const color = farm.planted ? (GROWTH_COLORS[farm.growthStage] ?? "#86efac") : "#9ca3af";
+        {/* Real typhoon marker + affected-area list (no track/radius geometry exists in the DB) */}
+        {selectedBulletin?.center_lat != null && selectedBulletin?.center_lng != null && (
+          <Marker position={[selectedBulletin.center_lat, selectedBulletin.center_lng]} icon={typhoonIcon}>
+            <Popup>
+              <div className="text-xs space-y-0.5">
+                <p className="font-semibold">{selectedBulletin.typhoon_name}</p>
+                <p className="text-muted-foreground">{selectedBulletin.category ?? "Unknown category"}</p>
+                <p>Max winds: <strong>{selectedBulletin.max_sustained_winds ?? "—"} km/h</strong></p>
+                <p className="mt-1 font-medium">Affected areas:</p>
+                <ul className="list-disc pl-4">
+                  {uniqueAffectedAreas.length > 0
+                    ? uniqueAffectedAreas.map(area => <li key={area}>{area}</li>)
+                    : <li className="text-muted-foreground">No signal data recorded</li>
+                  }
+                </ul>
+              </div>
+            </Popup>
+          </Marker>
+        )}
 
+        {/* Real GPX-surveyed farm boundaries. No click-popup here -- the Selected
+            Farm Info Panel overlay already shows this same (and more) detail,
+            so clicking just selects/highlights instead of also popping up a
+            duplicate info box.
+
+            Geometry (viewport-fetched) and attributes (loaded into the Farm
+            Records table) now arrive independently, so a polygon can render
+            for a farm_id the table hasn't loaded attributes for yet.
+            Rendered the same either way -- clicking still selects it, and
+            the Selected Farm Info Panel below already renders gracefully
+            with missing attrs ("Unknown farmer", "—" placeholders) -- real
+            geometry the backend already returned is never skipped just
+            because attributes haven't caught up. */}
+        {visibleGeomEntries.map(({ farmId, geom }) => {
+          const isSelected = farmId === selectedFarmId;
           return (
-            <Polygon
-              key={farm.farmId}
-              positions={placement.polygon}
-              pathOptions={{
-                color: isSelected ? "#ffffff" : color,
-                fillColor: color,
-                fillOpacity: farm.planted ? 0.55 : 0.25,
+            <GeoJSON
+              key={farmId}
+              data={geom as any}
+              style={{
+                color: isSelected ? "#ffffff" : "#1e3a5f",
+                fillColor: isSelected ? "#f59e0b" : "#1e3a5f",
+                fillOpacity: isSelected ? 0.65 : 0.4,
                 weight: isSelected ? 3 : 1.5,
-                dashArray: farm.planted ? undefined : "3, 3",
               }}
               eventHandlers={{
-                click: () => onSelectFarm(farm.farmId === selectedFarmId ? null : farm.farmId),
+                click: () => onSelectFarm(farmId === selectedFarmId ? null : farmId),
               }}
-            >
-              <Popup>
-                <div className="text-xs space-y-0.5">
-                  <p className="font-semibold">{farm.insuredName}</p>
-                  <p className="text-muted-foreground">{farm.farmId} · {farm.barangay}, {farm.municipality}</p>
-                  <p>Area: <strong>{farm.areaHectare} ha</strong></p>
-                  <p>Stage: <strong>{farm.growthStage}</strong></p>
-                  <p>Signal: <strong style={{ color: SIGNAL_DOT_COLORS[farm.signalNo] }}>No. {farm.signalNo}</strong></p>
-                  {farm.planted && <p>Est. Payment: <strong>₱{farm.indemnityPayment.toLocaleString()}</strong></p>}
-                </div>
-              </Popup>
-            </Polygon>
+            />
           );
         })}
+
+        {/* Farms without a GPX boundary yet are intentionally not rendered here
+            (removed 2026-08-11 -- with almost the entire farm table lacking real
+            geometry, MUNICIPALITY_CENTERS' shared fallback points meant thousands
+            of farms collapsed into a few solid-looking blobs, not real locations).
+            approxPlacements (below) is kept -- selecting one of these farms from
+            the table still flies the map to its approximate town-center position,
+            just without drawing a marker there. */}
       </MapContainer>
+
+      {/* GeoServer WMS overlay toggle — only shown when VITE_GEOSERVER_URL is configured */}
+      {GEOSERVER_URL && (
+        <label className="absolute top-3 right-3 flex items-center gap-1.5 bg-card/90 border border-border rounded-lg px-3 py-2 shadow-md z-[1000] text-[10px] cursor-pointer select-none">
+          <input
+            type="checkbox"
+            checked={showFarmsWmsOverlay}
+            onChange={e => setShowFarmsWmsOverlay(e.target.checked)}
+          />
+          GeoServer farm overlay
+        </label>
+      )}
 
       {/* Legend */}
       <div className="absolute bottom-3 left-3 bg-card/90 border border-border rounded-lg px-3 py-2 shadow-md z-[1000]">
-        <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5">Growth Stage</p>
-        {Object.entries(GROWTH_COLORS).map(([stage, color]) => (
-          <div key={stage} className="flex items-center gap-1.5 mb-0.5">
-            <span className="w-3 h-3 rounded-sm inline-block" style={{ backgroundColor: color }} />
-            <span className="text-[10px]">{stage}</span>
-          </div>
-        ))}
-        <div className="flex items-center gap-1.5 mt-1">
-          <span className="w-3 h-3 rounded-sm inline-block bg-gray-400/60" />
-          <span className="text-[10px]">Not Planted</span>
+        <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5">Farm Boundary</p>
+        <div className="flex items-center gap-1.5">
+          <span className="w-3 h-3 rounded-sm inline-block" style={{ backgroundColor: "#1e3a5f" }} />
+          <span className="text-[10px]">Surveyed (GPX)</span>
         </div>
       </div>
 
-      <div className="absolute bottom-3 left-36 bg-card/90 border border-border rounded-lg px-3 py-2 shadow-md z-[1000]">
-        <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5">Signal No.</p>
-        {([1, 2, 3] as const).map(s => (
-          <div key={s} className="flex items-center gap-1.5 mb-0.5">
-            <span className="w-2.5 h-2.5 rounded-full inline-block" style={{ backgroundColor: SIGNAL_DOT_COLORS[s] }} />
-            <span className="text-[10px]">Signal {s}</span>
+      {selectedBulletin && (
+        <div className="absolute bottom-3 left-52 bg-card/90 border border-border rounded-lg px-3 py-2 shadow-md z-[1000] max-w-[180px]">
+          <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5">Signal</p>
+          <div className="flex items-center gap-1.5">
+            <span className="w-3 h-3 rounded-full inline-block" style={{ backgroundColor: "#ff5200" }} />
+            <span className="text-[10px]">{selectedBulletin.typhoon_name} center</span>
           </div>
-        ))}
-      </div>
+        </div>
+      )}
 
       {/* Selected Farm Info Panel */}
       {selectedFarm && (
@@ -207,21 +570,26 @@ export function GISLeafletMap({ farmers, selectedFarmId, onSelectFarm, darkMode,
             <span className="text-[11px] font-bold text-[#166534] uppercase tracking-wide">Farm Details</span>
             <button onClick={() => onSelectFarm(null)} className="text-muted-foreground hover:text-foreground text-[10px]">✕</button>
           </div>
-          <p className="text-[12px] font-semibold">{selectedFarm.insuredName}</p>
-          <p className="text-[10px] text-muted-foreground mb-2">{selectedFarm.farmerId}</p>
+          <p className="text-[12px] font-semibold">{selectedFarm.farmer_name ?? "Unknown farmer"}</p>
+          <p className="text-[10px] text-muted-foreground mb-2">Farm #{selectedFarm.farm_id}</p>
           <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px]">
-            <span className="text-muted-foreground">Farm ID:</span><span className="font-medium">{selectedFarm.farmId}</span>
-            <span className="text-muted-foreground">Municipality:</span><span className="font-medium">{selectedFarm.municipality}</span>
-            <span className="text-muted-foreground">Barangay:</span><span className="font-medium">{selectedFarm.barangay}</span>
-            <span className="text-muted-foreground">Area:</span><span className="font-medium">{selectedFarm.areaHectare} ha</span>
-            <span className="text-muted-foreground">Growth Stage:</span>
-            <span className="font-medium" style={{ color: GROWTH_COLORS[selectedFarm.growthStage] }}>{selectedFarm.growthStage}</span>
-            <span className="text-muted-foreground">Planted:</span><span className="font-medium">{selectedFarm.planted ? "Yes" : "No"}</span>
-            <span className="text-muted-foreground">Signal No.:</span>
-            <span className="font-bold" style={{ color: SIGNAL_DOT_COLORS[selectedFarm.signalNo] }}>Signal {selectedFarm.signalNo}</span>
-            <span className="text-muted-foreground">Exposure:</span><span className="font-medium">{selectedFarm.periodOfExposure}h</span>
-            <span className="text-muted-foreground">Ind. Factor:</span><span className="font-medium text-amber-600">{selectedFarm.indemnityFactor}%</span>
-            <span className="text-muted-foreground">Payment:</span><span className="font-bold text-[#166534]">₱{selectedFarm.indemnityPayment.toLocaleString()}</span>
+            <span className="text-muted-foreground">Municipality:</span><span className="font-medium">{selectedFarm.municipality ?? "—"}</span>
+            <span className="text-muted-foreground">Barangay:</span><span className="font-medium">{selectedFarm.barangay ?? "—"}</span>
+            <span className="text-muted-foreground">Area:</span><span className="font-medium">{selectedFarm.area_size ?? "—"} ha</span>
+            <span className="text-muted-foreground">GPX Boundary:</span>
+            <span className="font-medium">{selectedFarm.has_geometry ? "Surveyed" : "Not yet uploaded"}</span>
+            {selectedFarm.assessment && (
+              <>
+                <span className="text-muted-foreground">Crop Stage:</span><span className="font-medium">{selectedFarm.assessment.crop_stage ?? "—"}</span>
+                <span className="text-muted-foreground">Signal No.:</span>
+                <span className="font-bold" style={{ color: selectedFarm.assessment.wind_velocity ? SIGNAL_DOT_COLORS[selectedFarm.assessment.wind_velocity] : undefined }}>
+                  {selectedFarm.assessment.wind_velocity ? `Signal ${selectedFarm.assessment.wind_velocity}` : "—"}
+                </span>
+                <span className="text-muted-foreground">Exposure:</span><span className="font-medium">{selectedFarm.assessment.period_of_exposure ?? "—"}h</span>
+                <span className="text-muted-foreground">Payment:</span>
+                <span className="font-bold text-[#166534]">₱{selectedFarm.assessment.final_indemnity_payment.toLocaleString()}</span>
+              </>
+            )}
           </div>
         </div>
       )}

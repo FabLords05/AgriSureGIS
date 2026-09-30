@@ -67,6 +67,6 @@ coverage.xml
 *.db
 LinuxCommands/
 
-## Workspace isolation
-image-bg/
-ui-prototype/
+## pg_dump output -- data snapshots, not source, and can carry real
+## farmer/insurance data (e.g. the local-to-remote-server migration dump).
+*.dump
