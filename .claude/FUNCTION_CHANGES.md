@@ -5261,3 +5261,71 @@ Full plan: `/home/fabio/.claude/plans/why-it-does-not-prancy-pony.md`.
   `.claude/GITHUB_WORKFLOW.md`'s protected-branch policy (not committed
   directly to `develop`).
 
+
+## [2026-09-30] - Stop Non-Bulletin PDFs Creating "UNKNOWN" TCBs + LPA Bulletin Always Final
+
+A "TCB No. 1 / UNKNOWN" row appeared in the bulletin table, issued at the
+scrape time itself (Sep 30, 12:29 PM). Checked the live TAMSS index
+(`pubfiles.pagasa.dost.gov.ph/tamss/weather/bulletin/`): every storm that
+weakened into a Low Pressure Area (LUIS 13F, MAYMAY 17F, JOSIE 3F,
+NENENG 9F) is titled `Low Pressure Area (formerly "NAME")`, which the
+parser already resolves to the real name -- not the source. The source is
+that the index also hosts PDFs that are not Tropical Cyclone Bulletins:
+`IWS#2_pilandok.pdf` (Tropical Cyclone Warning for Shipping) and
+`TCB#unknown.pdf` (Tropical Cyclone Advisory for BAVI, outside PAR).
+`fetch_active_bulletin_links()` took every `.pdf`, so the shipping warning
+parsed with no bulletin number (default 1), no title ("UNKNOWN"), and no
+matching "Issued at" (defaulted to now).
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* New module-level **`TCB_LINK_NAME_RE`** (`TCB#\d+[A-Za-z]?_[A-Za-z\-]+\.pdf`).
+* **`fetch_active_bulletin_links()`**: only keeps links whose URL-decoded
+  filename fully matches `TCB_LINK_NAME_RE` (drops `IWS#...` and
+  `TCB#unknown.pdf`). Added `urllib.parse.unquote` import.
+* **`parse_bulletin_text()`**: a `Low Pressure Area (formerly "NAME")`
+  bulletin now always sets `is_final=True`, even without the "F" suffix --
+  a storm that weakened into an LPA gets no further TCBs, so it is always
+  that storm's last bulletin (and triggers the final-bulletin assessment
+  calculation in `scrape_and_save_all()`).
+
+### 2. File: `backend/tests/test_bulletin_parser.py`
+* Added `test_parse_bulletin_text_low_pressure_area_is_final_even_without_f_suffix`.
+* Added `FetchActiveBulletinLinksTests.test_keeps_only_tcb_links_and_drops_non_bulletin_pdfs`
+  (modeled on the live index's IWS/TCB#unknown entries).
+
+### Status / Next Steps
+* `python -m pytest tests/test_bulletin_parser.py` passed (2026-09-30,
+  run together with the timeout fix below).
+* The existing "UNKNOWN" typhoon + its TCB No. 1 row already in the DB is
+  not removed by this change -- needs a manual DB cleanup by Fabio.
+
+
+## [2026-09-30] - PAGASA PDF Download Timeouts: Longer Read Window + One Retry
+
+The backend log (Cristian's Tailscale-hosted instance) filled with full
+`httpx.ReadTimeout` / `ConnectTimeout` tracebacks from
+`download_bulletin_pdf()` -- `pubfiles.pagasa.dost.gov.ph` often takes more
+than the old flat 15s to send a bulletin PDF (e.g. `TCB#11_inday.pdf`,
+`TCB#12_pilandok.pdf`, `TCB#13_kiyapo.pdf`), so those bulletins were never
+saved. The scrape loop already skipped the failed link and continued, so no
+crash -- just missing bulletins and a noisy log.
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* New module-level **`PDF_DOWNLOAD_TIMEOUT`** (`httpx.Timeout(60.0, connect=15.0)`)
+  and **`PDF_DOWNLOAD_RETRY_DELAY_SECONDS`** (2.0). Added `asyncio` import.
+* **`download_bulletin_pdf()`**: uses `PDF_DOWNLOAD_TIMEOUT`; on
+  `httpx.TimeoutException`, waits and retries once. A second timeout propagates.
+* **`scrape_and_save_all()`**: new `except httpx.TimeoutException` branch
+  (before the generic one) -- rolls back and logs a single-line warning with
+  the decoded filename, no traceback. Parse/DB errors keep the full traceback.
+
+### 2. File: `backend/tests/test_bulletin_parser.py`
+* New `DownloadBulletinPdfTests`: retry-then-success, retry-then-raise, and
+  the one-line timeout warning in `scrape_and_save_all()`. Added `httpx`,
+  `tempfile` imports.
+
+### Status / Next Steps
+* `python -m pytest tests/test_bulletin_parser.py` passed (2026-09-30).
+* Merged into `develop` locally per Cristian's explicit direction (skip-PR).
+* A PAGASA outage (not just slowness) still fails the link; the next
+  scheduled poll retries it.

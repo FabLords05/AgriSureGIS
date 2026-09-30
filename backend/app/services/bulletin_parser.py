@@ -1,7 +1,9 @@
 import re
+import asyncio
 import logging
 import os
 import httpx
+from urllib.parse import unquote
 from bs4 import BeautifulSoup
 import pdfplumber
 from sqlalchemy import func
@@ -14,6 +16,23 @@ from app.services.assessment_service import AssessmentService
 
 # Base URL for PAGASA tropical cyclone bulletins (mock or real index page)
 PAGASA_INDEX_URL = "https://pubfiles.pagasa.dost.gov.ph/tamss/weather/bulletin/"
+
+# Real Tropical Cyclone Bulletin filenames on the PAGASA index (e.g.
+# "TCB#11_kiyapo.pdf", "TCB#21F_francisco.pdf"). The same index also hosts
+# PDFs that are NOT bulletins -- confirmed on the live index 2026-09-30:
+# "IWS#2_pilandok.pdf" (a Tropical Cyclone Warning for Shipping) and
+# "TCB#unknown.pdf" (a Tropical Cyclone Advisory for a storm still outside
+# PAR). Neither has a "Tropical Cyclone Bulletin NR." header or a named title,
+# so parsing them fell through to bulletin_count=1 / "UNKNOWN" / issued_at=now
+# and saved a fake "UNKNOWN" typhoon row.
+TCB_LINK_NAME_RE = re.compile(r"TCB#\d+[A-Za-z]?_[A-Za-z\-]+\.pdf$", re.IGNORECASE)
+
+# pubfiles.pagasa.dost.gov.ph is often slow to send bulletin PDFs -- the old
+# flat 15s timeout failed most downloads with httpx.ReadTimeout (seen live
+# 2026-09-30), so those bulletins were never saved. Longer read window, plus
+# one retry in download_bulletin_pdf().
+PDF_DOWNLOAD_TIMEOUT = httpx.Timeout(60.0, connect=15.0)
+PDF_DOWNLOAD_RETRY_DELAY_SECONDS = 2.0
 
 # PAGASA states every bulletin's "Issued at" timestamp in Philippine Standard
 # Time, not UTC -- a fixed UTC+8 offset (the Philippines observes no DST).
@@ -58,7 +77,10 @@ class BulletinParserService:
         pdf_links = []
         for link in soup.find_all("a", href=True):
             href = link["href"]
-            if href.endswith(".pdf"):
+            # Only real TCBs -- see TCB_LINK_NAME_RE above. hrefs are
+            # URL-encoded on the live index ("TCB%2311_kiyapo.pdf").
+            filename = unquote(href.rsplit("/", 1)[-1])
+            if TCB_LINK_NAME_RE.fullmatch(filename):
                 # Resolve relative links to absolute URLs if necessary
                 if not href.startswith("http"):
                     base_url = PAGASA_INDEX_URL.rsplit("/", 1)[0]
@@ -74,9 +96,15 @@ class BulletinParserService:
         os.makedirs(output_dir, exist_ok=True)
         filename = pdf_url.split("/")[-1]
         filepath = os.path.join(output_dir, filename)
-        
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.get(pdf_url)
+
+        async with httpx.AsyncClient(timeout=PDF_DOWNLOAD_TIMEOUT) as client:
+            try:
+                response = await client.get(pdf_url)
+            except httpx.TimeoutException:
+                # One retry after a short pause -- see PDF_DOWNLOAD_TIMEOUT.
+                # A second timeout propagates to scrape_and_save_all().
+                await asyncio.sleep(PDF_DOWNLOAD_RETRY_DELAY_SECONDS)
+                response = await client.get(pdf_url)
             if response.status_code == 200:
                 with open(filepath, "wb") as f:
                     f.write(response.content)
@@ -152,6 +180,12 @@ class BulletinParserService:
             category = "Low Pressure Area"
             typhoon_name = lpa_match.group(1).strip()
             international_name = None
+            # A storm that has weakened into an LPA gets no further TCBs, so
+            # this is always its last bulletin -- mark it final even if the
+            # "F" suffix is missing. Every LPA bulletin on the live index so
+            # far (LUIS 13F, MAYMAY 17F, JOSIE 3F, NENENG 9F) also carries
+            # the "F", so this only matters if PAGASA ever omits it.
+            is_final = True
         else:
             category = "UNKNOWN"
             typhoon_name = "UNKNOWN"
@@ -302,6 +336,11 @@ class BulletinParserService:
                     "bulletin_count": bulletin.bulletin_count,
                     "is_final": parsed_data.get("is_final", False),
                 })
+            except httpx.TimeoutException:
+                # PAGASA being slow is expected, not a bug -- one line instead
+                # of a full traceback. Retried on the next scheduled poll.
+                db.rollback()
+                logger.warning("PAGASA PDF download timed out (after retry): %s", unquote(link.rsplit("/", 1)[-1]))
             except Exception as e:
                 db.rollback()
                 logger.exception("Error processing PDF link %s", link)

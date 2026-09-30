@@ -1,5 +1,7 @@
 import os
+import tempfile
 import unittest
+import httpx
 from datetime import datetime, timezone
 from unittest.mock import patch, AsyncMock, MagicMock
 from app.services.bulletin_parser import PHT, BulletinParserService, PagasaScrapeError
@@ -135,6 +137,22 @@ class BulletinParserTests(unittest.TestCase):
 
         self.assertEqual(result["typhoon_name"], "LUIS")
         self.assertEqual(result["category"], "Low Pressure Area")
+
+    def test_parse_bulletin_text_low_pressure_area_is_final_even_without_f_suffix(self):
+        # A storm that weakened into an LPA gets no further TCBs, so its LPA
+        # bulletin must be marked final even if PAGASA omits the "F" suffix.
+        text = (
+            "Tropical Cyclone Bulletin NR. 13\n"
+            "Low Pressure Area (formerly “LUIS”)\n"
+            "Issued at 11:00 PM, 03 August 2026\n"
+        )
+        with patch("pdfplumber.open") as mock_pdf_open:
+            mock_pdf_open.return_value.__enter__.return_value = _mock_pdf(text)
+            result = BulletinParserService.parse_bulletin_text("dummy_path.pdf")
+
+        self.assertEqual(result["typhoon_name"], "LUIS")
+        self.assertEqual(result["bulletin_count"], 13)
+        self.assertTrue(result["is_final"])
 
     def test_parse_bulletin_text_unrecognized_title_still_falls_back_to_unknown(self):
         # Neither a recognized category nor the LPA-formerly pattern -- the
@@ -629,6 +647,72 @@ class FetchActiveBulletinLinksTests(unittest.IsolatedAsyncioTestCase):
             result = await BulletinParserService.fetch_active_bulletin_links()
 
         self.assertEqual(result, [])
+
+    async def test_keeps_only_tcb_links_and_drops_non_bulletin_pdfs(self):
+        # Mirrors the live PAGASA index (2026-09-30): alongside real TCBs it
+        # hosts a Tropical Cyclone Warning for Shipping ("IWS#2_pilandok.pdf")
+        # and a Tropical Cyclone Advisory ("TCB#unknown.pdf"). Parsing either
+        # as a bulletin saved a fake "UNKNOWN" TCB No. 1 -- they must be skipped.
+        html = (
+            '<a href="IWS%232_pilandok.pdf">IWS#2_pilandok.pdf</a>'
+            '<a href="TCB%23unknown.pdf">TCB#unknown.pdf</a>'
+            '<a href="TCB%2311_kiyapo.pdf">TCB#11_kiyapo.pdf</a>'
+            '<a href="TCB%2321F_francisco.pdf">TCB#21F_francisco.pdf</a>'
+        )
+        mock_client = _fake_httpx_client(response=MagicMock(status_code=200, text=html))
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            result = await BulletinParserService.fetch_active_bulletin_links()
+
+        self.assertEqual([link.rsplit("/", 1)[-1] for link in result],
+                         ["TCB%2311_kiyapo.pdf", "TCB%2321F_francisco.pdf"])
+
+
+class DownloadBulletinPdfTests(unittest.IsolatedAsyncioTestCase):
+    """PAGASA's file server is slow (live httpx.ReadTimeouts on 2026-09-30) --
+    a timed-out download is retried once before giving up."""
+
+    async def test_retries_once_after_timeout_then_saves_pdf(self):
+        mock_client = _fake_httpx_client(get_side_effect=[
+            httpx.ReadTimeout("slow"),
+            MagicMock(status_code=200, content=b"%PDF-1.4"),
+        ])
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("httpx.AsyncClient", return_value=mock_client), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            path = await BulletinParserService.download_bulletin_pdf("https://pagasa.example/TCB%2311_inday.pdf", tmp)
+            with open(path, "rb") as f:
+                self.assertEqual(f.read(), b"%PDF-1.4")
+
+        self.assertEqual(mock_client.get.call_count, 2)
+
+    async def test_raises_timeout_when_retry_also_times_out(self):
+        mock_client = _fake_httpx_client(get_side_effect=[httpx.ReadTimeout("slow"), httpx.ConnectTimeout("down")])
+        with tempfile.TemporaryDirectory() as tmp, \
+             patch("httpx.AsyncClient", return_value=mock_client), \
+             patch("asyncio.sleep", new_callable=AsyncMock):
+            with self.assertRaises(httpx.TimeoutException):
+                await BulletinParserService.download_bulletin_pdf("https://pagasa.example/TCB%2311_inday.pdf", tmp)
+
+        self.assertEqual(mock_client.get.call_count, 2)
+
+    async def test_scrape_logs_one_line_warning_on_timeout_and_continues(self):
+        with patch.object(BulletinParserService, "fetch_active_bulletin_links", new_callable=AsyncMock) as mock_fetch, \
+             patch.object(BulletinParserService, "download_bulletin_pdf", new_callable=AsyncMock) as mock_download, \
+             patch.object(BulletinParserService, "parse_bulletin_text") as mock_parse, \
+             patch.object(BulletinParserService, "save_bulletin_to_db") as mock_save, \
+             patch("os.path.exists", return_value=False):
+            mock_fetch.return_value = ["https://pagasa.example/TCB%2311_inday.pdf", "https://pagasa.example/good.pdf"]
+            mock_download.side_effect = [httpx.ReadTimeout("slow"), "temp_bulletins/good.pdf"]
+            mock_parse.return_value = {"raw_text": ""}
+            mock_save.return_value = MagicMock(tcb_id=100, title="Bulletin No. 5 for LEON", bulletin_count=5)
+
+            with self.assertLogs("app.services.bulletin_parser", level="WARNING") as logs:
+                result = await BulletinParserService.scrape_and_save_all(MagicMock())
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(len(logs.records), 1)
+        self.assertIn("TCB#11_inday.pdf", logs.output[0])
+        self.assertIsNone(logs.records[0].exc_info)  # no traceback
 
 
 if __name__ == "__main__":
