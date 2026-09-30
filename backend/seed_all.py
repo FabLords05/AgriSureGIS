@@ -17,12 +17,13 @@ Run that first, by hand:
 
 Order matters -- each later step depends on data the one(s) before it
 create:
-  1. seed_database                -- real PABS CSV farmers/insurance + PSGC admin boundaries
-  2. seed_system_users             -- login accounts (nothing logs in without this)
-  3. backfill_admin_boundary_geom  -- municipality polygons for GeoServer/map
-  4. mock_data.seed_mock_typhoon   -- mock typhoon + bulletins, for exposure/assessment testing
-  5. seed_active_insurance         -- synthetic active-insurance boost (1,000 records)
-  6. seed_100k_farms               -- synthetic 100k-farm scale-test seed
+  1. seed_admin_boundaries        -- every PSGC barangay nationwide (TCWS signal matching)
+  2. seed_database                -- real PABS CSV farmers/insurance + PSGC admin boundaries
+  3. seed_system_users             -- login accounts (nothing logs in without this)
+  4. backfill_admin_boundary_geom  -- municipality polygons for GeoServer/map
+  5. mock_data.seed_mock_typhoon   -- mock typhoon + bulletins, for exposure/assessment testing
+  6. seed_active_insurance         -- synthetic active-insurance boost (1,000 records)
+  7. seed_100k_farms               -- synthetic 100k-farm scale-test seed
 
 Each step is independently wrapped: a failure partway through prints which
 step failed and stops immediately (every later step assumes the ones before
@@ -32,6 +33,7 @@ fail anyway for the same underlying reason.
 import sys
 
 STEPS = [
+    ("seed_admin_boundaries", "run"),
     ("seed_database", "run_setup"),
     ("seed_system_users", "run"),
     ("backfill_admin_boundary_geom", "run_backfill"),

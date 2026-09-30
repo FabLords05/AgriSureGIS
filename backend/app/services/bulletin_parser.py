@@ -1,5 +1,6 @@
 import re
 import asyncio
+import functools
 import logging
 import os
 import httpx
@@ -280,6 +281,14 @@ class BulletinParserService:
                     level_signals = signals_data.setdefault(current_level, {})
                     level_signals[group] = (level_signals.get(group, "") + "\n" + cell_text).strip()
 
+        # 6. PAGASA's explicit "no signal" statement -- a bulletin for a storm
+        # far from land has no TCWS table rows, only this sentence (confirmed
+        # on TCB#11_pilandok.pdf, 2026-09-30). Lets the viewer say "No Wind
+        # Signal Is Raised" instead of the ambiguous "No Signal Data".
+        no_signal_hoisted = not signals_data and bool(
+            re.search(r"No\s+Wind\s+Signal\s+is\s+currently\s+hoisted", text, re.IGNORECASE)
+        )
+
         return {
             "typhoon_name": typhoon_name,
             "international_name": international_name,
@@ -292,6 +301,7 @@ class BulletinParserService:
             "longitude": lon,
             "issued_at": issued_at,
             "signals": signals_data,
+            "no_signal_hoisted": no_signal_hoisted,
             "raw_text": text
         }
 
@@ -402,6 +412,9 @@ class BulletinParserService:
             TropicalCycloneBulletin.bulletin_count == parsed_data["bulletin_count"]
         ).first()
 
+        signals = parsed_data.get("signals") or {}
+        max_signal_level, tcws_areas = _raw_tcws_columns(signals, parsed_data.get("no_signal_hoisted", False))
+
         if not bulletin:
             # Create geometry Point
             center_geom = WKTElement(f"POINT({parsed_data['longitude']} {parsed_data['latitude']})", srid=4326)
@@ -415,43 +428,168 @@ class BulletinParserService:
                 gustiness=parsed_data["gustiness"],
                 issued_at=parsed_data.get("issued_at") or datetime.now(timezone.utc),
                 expires_at=datetime.now(timezone.utc),  # Expiry date placeholder — PAGASA bulletins don't reliably state their own expiry
-                center_geom=center_geom
+                center_geom=center_geom,
+                max_signal_level=max_signal_level,
+                tcws_areas=tcws_areas,
             )
             db.add(bulletin)
             db.commit()
             db.refresh(bulletin)
 
             # 2. Parse and seed tcb_signals
-            # Load boundaries to check for affected provinces & municipalities.
-            # As of the nationwide PSGC expansion (2026-08-20), AdminBoundary
-            # covers the whole country, not just Region X + Caraga -- so this
-            # precise province+municipality match, previously reserved for
-            # Mindanao (island_group=2) only, now runs for every island group.
-            # A bulletin cell that only names a province/region without a
-            # specific municipality yields no matched rows for that group,
-            # same as an unmatched area always has -- no free-text fallback.
-            boundaries = db.query(AdminBoundary).all()
-
-            for level, island_texts in parsed_data["signals"].items():
-                for group, cell_text in island_texts.items():
-                    if not cell_text:
-                        continue
-                    seen_areas = set()
-                    for b in boundaries:
-                        prov_match = b.province.lower() in cell_text.lower()
-                        mun_match = b.municipality.lower() in cell_text.lower()
-
-                        if prov_match and mun_match:
-                            area_key = (level, group, b.municipality)
-                            if area_key not in seen_areas:
-                                seen_areas.add(area_key)
-                                db.add(TcbSignal(
-                                    tcb_id=bulletin.tcb_id,
-                                    signal_level=level,
-                                    island_group=group,
-                                    area_name=b.municipality,
-                                    province=b.province,
-                                ))
+            cls._seed_tcb_signals(bulletin, signals, db)
             db.commit()
-            
+        elif bulletin.max_signal_level is None and max_signal_level is not None:
+            # One-time backfill for a bulletin saved before the raw TCWS
+            # columns existed (2026-09-30) -- signals used to be seeded only on
+            # first insert, so re-scraping/re-uploading its PDF never filled
+            # them in. Guarded on max_signal_level IS NULL so this runs once
+            # per bulletin, not on every scheduled poll that sees it again.
+            bulletin.max_signal_level = max_signal_level
+            bulletin.tcws_areas = tcws_areas
+            already_seeded = db.query(TcbSignal).filter(TcbSignal.tcb_id == bulletin.tcb_id).first()
+            if already_seeded is None:
+                cls._seed_tcb_signals(bulletin, signals, db)
+            db.commit()
+
         return bulletin
+
+    @staticmethod
+    def _seed_tcb_signals(bulletin: TropicalCycloneBulletin, signals: dict, db: Session) -> None:
+        """
+        Adds a TcbSignal row for every AdminBoundary (province, municipality)
+        a TCWS cell resolves to (see match_tcws_cell). Caller commits.
+
+        Loads distinct (province, municipality) pairs only -- not
+        db.query(AdminBoundary).all(), which at nationwide scale is ~42k
+        barangay rows (with geometry) per bulletin just to derive ~1.6k pairs.
+        """
+        if not signals:
+            return
+        pairs = db.query(AdminBoundary.province, AdminBoundary.municipality).distinct().all()
+        municipalities_by_province: dict[str, set[str]] = {}
+        for province, municipality in pairs:
+            municipalities_by_province.setdefault(province, set()).add(municipality)
+
+        for level, island_texts in signals.items():
+            for group, cell_text in island_texts.items():
+                if not cell_text:
+                    continue
+                # match_tcws_cell already dedupes on (province, municipality)
+                # -- province included, so same-named towns in different
+                # provinces (e.g. multiple "Santa Cruz") are both kept.
+                for province, municipality in match_tcws_cell(cell_text, municipalities_by_province):
+                    db.add(TcbSignal(
+                        tcb_id=bulletin.tcb_id,
+                        signal_level=level,
+                        island_group=group,
+                        area_name=municipality,
+                        province=province,
+                    ))
+
+
+def _raw_tcws_columns(signals: dict, no_signal_hoisted: bool = False) -> tuple[int | None, dict | None]:
+    """parse_bulletin_text()'s {level: {island_group: text}} -> the bulletin's
+    max_signal_level / tcws_areas columns (JSON object keys must be strings).
+    max_signal_level 0 = PAGASA stated no wind signal is hoisted; None = no
+    signal information found at all."""
+    if not signals:
+        return (0 if no_signal_hoisted else None), None
+    tcws_areas = {
+        str(level): {str(group): text for group, text in island_texts.items()}
+        for level, island_texts in signals.items()
+    }
+    return max(signals), tcws_areas
+
+
+_PAREN_RE = re.compile(r"\(([^()]*)\)")
+
+
+@functools.lru_cache(maxsize=8192)
+def _name_re(name: str) -> re.Pattern:
+    # Whole-name match, not substring -- nationwide, plain `in` checks give
+    # false hits ("Cagayan" in "Cagayan de Oro", "Samar" in "Northern Samar",
+    # "Bay" in "Bayombong").
+    return re.compile(r"(?<!\w)" + re.escape(name) + r"(?!\w)", re.IGNORECASE)
+
+
+def _municipality_aliases(municipality: str) -> list[str]:
+    # PSGC spells cities "City of Gingoog"; PAGASA writes "Gingoog City" or
+    # just "Gingoog".
+    aliases = [municipality]
+    city_match = re.match(r"City of (.+)$", municipality, re.IGNORECASE)
+    if city_match:
+        base = city_match.group(1)
+        aliases += [f"{base} City", base]
+    return aliases
+
+
+def _mentions(text: str, name: str) -> bool:
+    return any(_name_re(alias).search(text) for alias in _municipality_aliases(name))
+
+
+def match_tcws_cell(cell_text: str, municipalities_by_province: dict[str, set[str]]) -> list[tuple[str, str]]:
+    """
+    Resolves one TCWS table cell to AdminBoundary (province, municipality)
+    pairs. PAGASA's cell phrasing is a comma-separated list of provinces,
+    where a partially-affected province is followed by a parenthetical list
+    of its municipalities, e.g.:
+
+        "Batanes, the northern portion of Cagayan (Santa Ana, Gonzaga)"
+
+    - Province followed by a "( ... )" list -> only the listed municipalities.
+    - Province named with no list ("Batanes") -> ALL of its municipalities
+      (the whole province is under the signal). Previously this matched
+      nothing, since no municipality name appeared in the text.
+    - Province names appearing *inside* a parenthetical are ignored as
+      province mentions (e.g. "Misamis Oriental (Cagayan de Oro City)" must
+      not also count as the province "Cagayan").
+    - Independent/highly urbanized cities are stored with province ==
+      municipality (see scripts/convert_psgc_publication.py). They are
+      matched by name anywhere in the cell, including inside a parenthetical,
+      since PAGASA lists them under their geographic province.
+    """
+    paren_spans = [(m.start(), m.end()) for m in _PAREN_RE.finditer(cell_text)]
+
+    def in_paren(pos: int) -> bool:
+        return any(start <= pos < end for start, end in paren_spans)
+
+    # Longest names first, so "Northern Samar" claims its span before "Samar".
+    claimed: list[tuple[int, int, str]] = []
+    for province in sorted(municipalities_by_province, key=len, reverse=True):
+        for m in _name_re(province).finditer(cell_text):
+            if in_paren(m.start()):
+                continue
+            if any(m.start() < end and start < m.end() for start, end, _ in claimed):
+                continue
+            claimed.append((m.start(), m.end(), province))
+    claimed.sort()
+
+    results: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add(province: str, municipality: str) -> None:
+        if (province, municipality) not in seen:
+            seen.add((province, municipality))
+            results.append((province, municipality))
+
+    for i, (_, end, province) in enumerate(claimed):
+        # A province's own "( ... )" list sits between its name and the next
+        # province mention or top-level comma/semicolon -- stopping only at
+        # the next province would let "Batanes" borrow "Cagayan (Santa Ana)"'s
+        # list whenever Cagayan itself isn't a loaded boundary.
+        segment_end = claimed[i + 1][0] if i + 1 < len(claimed) else len(cell_text)
+        for pos in range(end, segment_end):
+            if cell_text[pos] in ",;" and not in_paren(pos):
+                segment_end = pos
+                break
+        listed = ", ".join(_PAREN_RE.findall(cell_text[end:segment_end]))
+        for municipality in sorted(municipalities_by_province[province]):
+            if not listed or _mentions(listed, municipality):
+                add(province, municipality)
+
+    for province, municipalities in municipalities_by_province.items():
+        if municipalities == {province} and _mentions(cell_text, province):
+            add(province, province)
+
+    return results

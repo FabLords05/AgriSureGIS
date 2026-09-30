@@ -15,6 +15,11 @@ export interface Bulletin {
   issued_at: string | null;
   center_lat: number | null;
   center_lng: number | null;
+  // PAGASA's TCWS table as parsed, unvalidated against AdminBoundary:
+  // { "<signal_level>": { "<island_group 0=Luzon|1=Visayas|2=Mindanao>": area text } }.
+  // Null for bulletins with no TCWS table, or saved before this was stored.
+  max_signal_level: number | null;
+  tcws_areas: Record<string, Record<string, string>> | null;
 }
 
 export interface GeoJsonMultiPolygon {

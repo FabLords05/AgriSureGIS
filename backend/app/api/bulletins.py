@@ -97,6 +97,8 @@ def list_bulletins(db: Session = Depends(get_db)):
             "issued_at": b.issued_at,
             "center_lat": center_point.y if center_point else None,
             "center_lng": center_point.x if center_point else None,
+            "max_signal_level": b.max_signal_level,
+            "tcws_areas": b.tcws_areas,
         })
     return results
 

@@ -31,6 +31,11 @@ municipality="Davao City") -- keeps the (province, municipality, barangay)
 key non-null and self-consistent with how upload.py's matching logic already
 treats every other row, without inventing a new sentinel value the rest of
 the codebase would need to special-case.
+
+Existing rows are never renamed (2026-09-30): if the output CSV already
+exists, every psgc_code already in it keeps its current spelling (see
+preserve_existing_names), and the old file is backed up to
+psgc_nationwide_boundaries.csv.bak before being overwritten.
 """
 
 import argparse
@@ -47,8 +52,19 @@ _OUTPUT_PATH = Path(__file__).resolve().parent.parent / "app" / "data" / "psgc_n
 # conversion runs, not assumed complete here.
 _REGION_LEVELS = {"reg", "region"}
 _PROVINCE_LEVELS = {"prov", "province", "distinct"}  # "Distinct" appears in some releases for HUCs' own pseudo-province row
-_CITY_MUN_LEVELS = {"city", "mun", "municipality", "submun", "sub-municipality"}
+_CITY_MUN_LEVELS = {"city", "mun", "municipality"}
+# Sub-municipalities (the City of Manila's districts -- Tondo, Sampaloc, ...)
+# sit between a city and its barangays. Their barangays are attributed to the
+# parent city, not the district, so PAGASA/PABS "City of Manila" resolves.
+_SUBMUN_LEVELS = {"submun", "sub-municipality"}
 _BARANGAY_LEVELS = {"bgy", "barangay"}
+
+# PSGC codes are 10 digits (RR PPP MM BBB since the 2023 PSA revision; the
+# older 9-digit format was RR PP MM BBB). The leading RR+PPP / RR+PP is the
+# province segment -- a city whose code doesn't share its preceding
+# province's segment is an independent/highly urbanized city with no parent
+# province (e.g. Cagayan de Oro, or every NCR city).
+_PROVINCE_PREFIX_LEN = {10: 5, 9: 4}
 
 
 def inspect(path: Path) -> None:
@@ -75,8 +91,16 @@ def _find_level_column(df: pd.DataFrame) -> str | None:
 
 
 def _find_code_column(df: pd.DataFrame) -> str | None:
+    # The 2Q-2026 publication's code column is "10-digit PSGC" -- no "code" in
+    # it -- next to a "Correspondence Code" (the old 9-digit code) that must
+    # not be picked instead.
     for col in df.columns:
-        if "code" in str(col).lower() and "corr" not in str(col).lower():
+        lc = str(col).lower()
+        if "psgc" in lc and "corr" not in lc:
+            return col
+    for col in df.columns:
+        lc = str(col).lower()
+        if "code" in lc and "corr" not in lc:
             return col
     return None
 
@@ -95,6 +119,8 @@ def _classify_level(raw_level: str) -> str | None:
         return "barangay"
     if lc in _CITY_MUN_LEVELS:
         return "city_mun"
+    if lc in _SUBMUN_LEVELS:
+        return "submun"
     if lc in _PROVINCE_LEVELS:
         return "province"
     if lc in _REGION_LEVELS:
@@ -102,8 +128,20 @@ def _classify_level(raw_level: str) -> str | None:
     return None
 
 
+def _normalize_code(raw_code) -> str:
+    # Read as text (dtype=str below), but guard against a code column Excel
+    # stored as a number: Regions 01-09 would otherwise lose their leading
+    # zero ("0102801001" -> "102801001") and never match a real PSGC code.
+    code = str(raw_code).strip()
+    if code.endswith(".0"):
+        code = code[:-2]
+    if code.isdigit() and len(code) == 9 and not code.startswith("0"):
+        code = code.zfill(10)
+    return code
+
+
 def convert(path: Path) -> pd.DataFrame:
-    sheets = pd.read_excel(path, sheet_name=None)
+    sheets = pd.read_excel(path, sheet_name=None, dtype=str)
     # Assume the largest sheet (by row count) is the actual data table --
     # PSA publications sometimes carry a small "Notes"/cover sheet alongside
     # the real one. Adjust here once --inspect shows the real file's shape.
@@ -119,33 +157,51 @@ def convert(path: Path) -> pd.DataFrame:
             f"(found level={level_col!r}, code={code_col!r}, name={name_col!r}). "
             "Run with --inspect first and adjust _find_*_column() to match the real headers."
         )
+    return convert_rows(df, level_col, code_col, name_col)
 
+
+def convert_rows(df: pd.DataFrame, level_col: str, code_col: str, name_col: str) -> pd.DataFrame:
+    df = df.dropna(subset=[code_col]).copy()
+    df[code_col] = df[code_col].map(_normalize_code)
     df = df.sort_values(code_col).reset_index(drop=True)
 
     rows: list[dict] = []
     current_region: str | None = None
     current_province: str | None = None
+    current_province_prefix: str | None = None
     current_municipality: str | None = None
     dropped = 0
 
     for _, row in df.iterrows():
         level = _classify_level(row[level_col])
         raw_name = str(row[name_col]).strip()
-        code = str(row[code_col]).strip()
+        code = row[code_col]
+        prefix = code[:_PROVINCE_PREFIX_LEN.get(len(code), 5)]
 
         if level == "region":
             current_region = raw_name
             current_province = None
+            current_province_prefix = None
             current_municipality = None
         elif level == "province":
             current_province = raw_name
+            current_province_prefix = prefix
             current_municipality = None
         elif level == "city_mun":
             current_municipality = raw_name
             # HUC/NCR cities have no real parent province -- see this
-            # script's module docstring for the chosen convention.
-            if current_province is None:
+            # script's module docstring for the chosen convention. Detected
+            # by province code segment, not "no province seen yet": the old
+            # `if current_province is None` check only caught the FIRST such
+            # city after a region row, so every later NCR city inherited the
+            # first one's name as its "province", and an HUC listed after a
+            # regular province (Cagayan de Oro after Misamis Oriental)
+            # inherited that province.
+            if prefix != current_province_prefix:
                 current_province = raw_name
+                current_province_prefix = prefix
+        elif level == "submun":
+            pass  # barangays stay attributed to the parent city (see _SUBMUN_LEVELS)
         elif level == "barangay":
             if current_province is None or current_municipality is None:
                 dropped += 1
@@ -165,6 +221,36 @@ def convert(path: Path) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=["psgc_code", "province", "municipality", "barangay"])
 
 
+def preserve_existing_names(new_df: pd.DataFrame, existing_df: pd.DataFrame) -> pd.DataFrame:
+    """For every psgc_code already in the current CSV, keeps its existing
+    (province, municipality, barangay) spelling -- existing tbl_admin_boundaries
+    rows, farms and PABS uploads (upload.py's _load_psgc_lookup) all resolve
+    through those exact names. E.g. the current CSV files HUC Butuan under
+    ("Agusan del Norte", "City of Butuan"), where the PSA hierarchy alone would
+    make it its own province. Prints every difference so it can be reviewed."""
+    existing_by_code = existing_df.set_index("psgc_code")[["province", "municipality", "barangay"]]
+    new_df = new_df.copy()
+    changed = 0
+    for idx, row in new_df.iterrows():
+        code = row["psgc_code"]
+        if code not in existing_by_code.index:
+            continue
+        old = existing_by_code.loc[code]
+        if tuple(old) != (row["province"], row["municipality"], row["barangay"]):
+            changed += 1
+            print(f"  kept existing name for {code}: {tuple(old)} (PSA: {(row['province'], row['municipality'], row['barangay'])})")
+            new_df.loc[idx, ["province", "municipality", "barangay"]] = list(old)
+
+    missing = sorted(set(existing_by_code.index) - set(new_df["psgc_code"]))
+    print(f"\n{changed} existing row(s) differed from the PSA spelling -- existing names kept.")
+    if missing:
+        # Kept, not dropped -- existing farms may already reference them.
+        print(f"WARNING: {len(missing)} psgc_code(s) in the current CSV are absent from the PSA file "
+              f"(first few: {missing[:10]}). Kept as-is in the new CSV -- check before committing.")
+        new_df = pd.concat([new_df, existing_df[existing_df["psgc_code"].isin(missing)]], ignore_index=True)
+    return new_df
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("path", type=Path, help="Path to the raw PSA PSGC Publication Excel file")
@@ -180,6 +266,12 @@ def main() -> None:
         return
 
     out_df = convert(args.path)
+    if _OUTPUT_PATH.exists():
+        existing_df = pd.read_csv(_OUTPUT_PATH, dtype=str)
+        out_df = preserve_existing_names(out_df, existing_df)
+        backup_path = _OUTPUT_PATH.with_suffix(".csv.bak")
+        existing_df.to_csv(backup_path, index=False)
+        print(f"Previous CSV backed up to {backup_path}")
     out_df.to_csv(_OUTPUT_PATH, index=False)
 
     print(f"\nWrote {len(out_df)} rows to {_OUTPUT_PATH}")

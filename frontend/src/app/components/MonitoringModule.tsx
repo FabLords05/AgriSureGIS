@@ -45,6 +45,22 @@ function groupAreasBySignalLevel(signals: TcbSignal[]): { level: number; areas: 
     .map(([level, areas]) => ({ level, areas: Array.from(areas) }));
 }
 
+const ISLAND_GROUP_LABELS: Record<string, string> = { "0": "Luzon", "1": "Visayas", "2": "Mindanao" };
+
+// PAGASA's raw TCWS text per level (highest first), each with its island-group
+// cells -- fallback for when no area resolved to a tbl_tcb_signals row.
+function rawTcwsByLevel(tcwsAreas: Bulletin["tcws_areas"]): { level: number; cells: { island: string; text: string }[] }[] {
+  if (!tcwsAreas) return [];
+  return Object.entries(tcwsAreas)
+    .map(([level, byIsland]) => ({
+      level: Number(level),
+      cells: Object.entries(byIsland)
+        .sort((a, b) => Number(a[0]) - Number(b[0]))
+        .map(([group, text]) => ({ island: ISLAND_GROUP_LABELS[group] ?? `Group ${group}`, text })),
+    }))
+    .sort((a, b) => b.level - a.level);
+}
+
 function signalLevelColor(level: number): string {
   return level >= 3 ? "#ef4444" : level === 2 ? "#d97706" : "#166534";
 }
@@ -62,9 +78,13 @@ function formatIssuedAt(isoString: string | null | undefined): string {
 
 // ─── TCB Detail Viewer Modal ─────────────────────────────────────────────────
 function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bulletin: Bulletin; signals: TcbSignal[]; isLoadingSignals: boolean; onClose: () => void }) {
-  const highestSignal = maxSignalLevel(signals);
+  const highestSignal = Math.max(maxSignalLevel(signals), bulletin.max_signal_level ?? 0);
   const signalColor = signalLevelColor(highestSignal);
   const areasByLevel = groupAreasBySignalLevel(signals);
+  const rawAreasByLevel = rawTcwsByLevel(bulletin.tcws_areas);
+  // max_signal_level 0 = PAGASA explicitly stated no wind signal is hoisted
+  // (vs null = no signal information parsed at all).
+  const noSignalHoisted = highestSignal === 0 && bulletin.max_signal_level === 0;
 
   const handleDownloadTCB = () => {
     const content = [
@@ -86,6 +106,13 @@ function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bull
             `  Signal No. ${level}:`,
             ...areas.map(a => `    • ${a}`),
           ])
+        : rawAreasByLevel.length
+        ? rawAreasByLevel.flatMap(({ level, cells }) => [
+            `  Signal No. ${level}:`,
+            ...cells.map(c => `    ${c.island}: ${c.text.replace(/\s*\n\s*/g, " ")}`),
+          ])
+        : noSignalHoisted
+        ? ["  No Wind Signal is currently hoisted (per PAGASA)."]
         : ["  (no signal data recorded for this bulletin)"]),
       "",
       "═══════════════════════════════════════════════════════════════════",
@@ -132,7 +159,7 @@ function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bull
               <div className="px-6 py-3 rounded-xl border-2 text-center" style={{ borderColor: signalColor, background: signalColor + "15" }}>
                 <p className="text-[10px] uppercase tracking-widest" style={{ color: signalColor }}>{bulletin.category ?? "Tropical Cyclone"}</p>
                 <p className="text-3xl font-black" style={{ color: signalColor }}>
-                  {isLoadingSignals ? "…" : highestSignal > 0 ? `Signal No. ${highestSignal}` : "No Signal Data"}
+                  {isLoadingSignals ? "…" : highestSignal > 0 ? `Signal No. ${highestSignal}` : noSignalHoisted ? "No Wind Signal Is Raised" : "No Signal Data"}
                 </p>
                 <p className="text-[11px] font-semibold mt-0.5" style={{ color: signalColor }}>
                   {bulletin.max_sustained_winds ?? "—"} km/h sustained · gusts {bulletin.gustiness ?? "—"} km/h
@@ -178,6 +205,26 @@ function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bull
                     </div>
                   ))}
                 </div>
+              ) : rawAreasByLevel.length ? (
+                <div className="space-y-2.5">
+                  {rawAreasByLevel.map(({ level, cells }) => (
+                    <div key={level}>
+                      <p className="text-[10px] font-bold mb-1" style={{ color: signalLevelColor(level) }}>
+                        Signal No. {level}
+                      </p>
+                      <ul className="space-y-0.5 pl-1">
+                        {cells.map(({ island, text }) => (
+                          <li key={island} className="flex items-start gap-2 text-[10px]">
+                            <span className="w-1.5 h-1.5 rounded-full shrink-0 mt-1" style={{ background: signalLevelColor(level) }} />
+                            <span><span className="font-semibold">{island}:</span> {text.replace(/\s*\n\s*/g, " ")}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              ) : noSignalHoisted ? (
+                <p className="text-[10px] text-muted-foreground">No Wind Signal is Currently Listed.</p>
               ) : (
                 <p className="text-[10px] text-muted-foreground">No signal/area data recorded for this bulletin.</p>
               )}

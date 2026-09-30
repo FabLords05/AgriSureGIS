@@ -17,7 +17,7 @@ class ExposureCalculatorServiceTests(unittest.TestCase):
         bulletin_query.filter.return_value.order_by.return_value.all.return_value = bulletins
 
         admin_query = MagicMock()
-        admin_query.all.return_value = boundaries
+        admin_query.options.return_value.all.return_value = boundaries
 
         summary_query = MagicMock()
         summary_query.filter.return_value.first.return_value = None
