@@ -2,13 +2,13 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import { toast } from "sonner";
 import {
   Activity, Download, FileDown,
-  RefreshCw, Eye, BarChart2, TrendingUp, Zap,
-  X, MapPinned, ShieldCheck,
+  RefreshCw, Eye, BarChart2, Zap,
+  X, MapPinned, ShieldCheck, AlertTriangle,
   ChevronUp, ChevronDown, ArrowUpDown
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, Tooltip as RTooltip, ResponsiveContainer,
-  PieChart, Pie, Cell, LineChart, Line, CartesianGrid, Legend
+  CartesianGrid, Legend
 } from "recharts";
 import {
   Bulletin, TcbSignal, InsuranceSummary, ActiveTyphoon, AssessmentsSummary,
@@ -20,7 +20,6 @@ import {
 type BulletinSortField = "bulletin_count" | "typhoon_name" | "issued_at" | "category" | "max_sustained_winds" | "gustiness";
 type SortDir = "asc" | "desc";
 
-const GROWTH_STAGE_COLORS = ["#22c55e", "#eab308", "#f59e0b", "#86efac", "#a3a3a3"];
 const SIGNAL_BAR_COLOR = "#166534";
 
 function uniqueAreas(signals: TcbSignal[]): string[] {
@@ -390,14 +389,6 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
   const totalFarms = assessmentsSummary?.total_farms ?? 0;
   const affectedFarms = assessmentsSummary?.affected_farms ?? 0;
   const totalArea = assessmentsSummary?.total_area ?? 0;
-  const totalIndemnity = assessmentsSummary?.total_indemnity ?? 0;
-
-  const growthStageData = useMemo(
-    () => (assessmentsSummary?.growth_stage_distribution ?? []).map((d, i) => ({
-      name: d.crop_stage, value: d.farm_count, color: GROWTH_STAGE_COLORS[i % GROWTH_STAGE_COLORS.length],
-    })),
-    [assessmentsSummary]
-  );
 
   const signalChartData = useMemo(
     () => [...(assessmentsSummary?.signal_breakdown ?? [])]
@@ -405,21 +396,6 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
       .map(d => ({ signal: `Signal ${d.wind_velocity}`, farms: d.farm_count, area: Math.round(d.total_area * 10) / 10 })),
     [assessmentsSummary]
   );
-
-  const bulletinTimelineData = useMemo(() => {
-    const byDate = new Map<string, number>();
-    for (const b of bulletins) {
-      if (!b.issued_at) continue;
-      const day = b.issued_at.slice(0, 10);
-      byDate.set(day, (byDate.get(day) ?? 0) + 1);
-    }
-    const sortedDays = Array.from(byDate.keys()).sort();
-    let cumulative = 0;
-    return sortedDays.map(day => {
-      cumulative += byDate.get(day)!;
-      return { day, bulletins: cumulative };
-    });
-  }, [bulletins]);
 
   const loadBulletins = useCallback(async () => {
     setIsLoadingBulletins(true);
@@ -568,12 +544,41 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
 
   const activeTyphoonNames = activeTyphoons.map(t => t.name).join(", ");
 
-  const statCards = [
-    { label:"Active Typhoon",       value: activeTyphoonNames || "N/A", sub:"From PAGASA status page", icon:<Zap size={14} />,        color:"#ef4444", bg:"bg-red-50 dark:bg-red-950/30",     border:"border-red-200 dark:border-red-900" },
-    { label:"TCBs Downloaded",      value: bulletins.length, sub:"from PAGASA parser",  icon:<Download size={18} />,   color:"#1e3a5f", bg:"bg-blue-50 dark:bg-blue-950/30",   border:"border-blue-200 dark:border-blue-900" },
-    { label:"Affected Farms",       value:`${affectedFarms}/${totalFarms}`,  sub:`${totalArea.toFixed(1)} ha`,icon:<Activity size={18} />, color:"#166534", bg:"bg-green-50 dark:bg-green-950/30", border:"border-green-200 dark:border-green-900" },
-    { label:"Est. Total Indemnity", value:`₱${(totalIndemnity/1000).toFixed(0)}K`, sub:"From real computed assessments", icon:<BarChart2 size={18} />, color:"#ca8a04", bg:"bg-amber-50 dark:bg-amber-950/30", border:"border-amber-200 dark:border-amber-900" },
-    { label:"Active Insurance",     value: insuranceSummary ? `${insuranceSummary.active_count}/${insuranceSummary.total_count}` : "—", sub:"Within coverage window", icon:<ShieldCheck size={18} />, color:"#7c3aed", bg:"bg-purple-50 dark:bg-purple-950/30", border:"border-purple-200 dark:border-purple-900" },
+  // TCBs Downloaded is scoped to one typhoon, not a lifetime total -- the
+  // first/primary active typhoon if there is one (per Fabio: two storms
+  // active at once is rare enough not to bother summing/listing separately),
+  // falling back to the most recently-issued bulletin's typhoon once nothing
+  // is active anymore, so the count + "done collecting" alert below still
+  // has something to point at right after a typhoon closes out.
+  const primaryTyphoonName = activeTyphoons[0]?.name ?? bulletins[0]?.typhoon_name ?? null;
+  const isPrimaryTyphoonActive = primaryTyphoonName !== null && activeTyphoons.some(t => t.name === primaryTyphoonName);
+  const primaryTyphoonBulletinCount = primaryTyphoonName
+    ? bulletins.filter(b => b.typhoon_name === primaryTyphoonName).length
+    : 0;
+  // "Done collecting" = there's a tracked typhoon, it has at least one
+  // downloaded bulletin, and it's no longer on PAGASA's active list --
+  // Typhoon.is_active flipping false, not the bulletin's own "F" marker
+  // (which is parse-time-only, never persisted -- see FUNCTION_CHANGES.md
+  // for why this was the chosen signal).
+  const typhoonDoneCollecting = primaryTyphoonName !== null && primaryTyphoonBulletinCount > 0 && !isPrimaryTyphoonActive;
+
+  const statCards: {
+    label: string; value: string | number; sub: string; icon: React.ReactNode;
+    color: string; bg: string; border: string; alert: string | null;
+  }[] = [
+    { label:"Active Typhoon",   value: activeTyphoonNames || "N/A", sub:"From PAGASA status page", icon:<Zap size={18} />,        color:"#ef4444", bg:"bg-red-50 dark:bg-red-950/30",     border:"border-red-200 dark:border-red-900", alert: null },
+    {
+      label:"TCBs Downloaded",
+      value: primaryTyphoonBulletinCount,
+      sub: primaryTyphoonName ? `for ${primaryTyphoonName}` : "No tracked typhoon yet",
+      icon: typhoonDoneCollecting ? <AlertTriangle size={18} /> : <Download size={18} />,
+      color: typhoonDoneCollecting ? "#d97706" : "#1e3a5f",
+      bg: typhoonDoneCollecting ? "bg-amber-50 dark:bg-amber-950/30" : "bg-blue-50 dark:bg-blue-950/30",
+      border: typhoonDoneCollecting ? "border-amber-300 dark:border-amber-700" : "border-blue-200 dark:border-blue-900",
+      alert: typhoonDoneCollecting ? "Ready for assessment" : null,
+    },
+    { label:"Affected Farms",   value:`${affectedFarms}/${totalFarms}`,  sub:`${totalArea.toFixed(1)} ha`,icon:<Activity size={18} />, color:"#166534", bg:"bg-green-50 dark:bg-green-950/30", border:"border-green-200 dark:border-green-900", alert: null },
+    { label:"Active Insurance", value: insuranceSummary ? `${insuranceSummary.active_count}/${insuranceSummary.total_count}` : "—", sub:"Within coverage window", icon:<ShieldCheck size={18} />, color:"#7c3aed", bg:"bg-purple-50 dark:bg-purple-950/30", border:"border-purple-200 dark:border-purple-900", alert: null },
   ];
 
   return (
@@ -596,20 +601,28 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
         />
       )}
 
-      {/* Stat Cards */}
-      <div className="grid grid-cols-5 gap-3 shrink-0">
+      {/* Stat Cards -- Est. Total Indemnity and Growth Stage/TCB Timeline
+          charts removed per Fabio's redesign; TCBs Downloaded brought back
+          but rescoped to one typhoon with a "done collecting" alert. */}
+      <div className="grid grid-cols-4 gap-4 shrink-0">
         {statCards.map((c, i) => (
-          <div key={i} className={`bg-card border rounded-xl p-4 transition-shadow hover:shadow-md ${c.border}`}>
-            <div className="flex items-start justify-between">
+          <div key={i} className={`bg-card border rounded-xl p-5 transition-shadow hover:shadow-md ${c.border}`}>
+            <div className="flex items-center justify-between">
               <div>
-                <p className="text-[11px] text-muted-foreground uppercase tracking-wide">{c.label}</p>
-                <p className="text-2xl font-bold mt-0.5" style={{ color: c.color }}>{c.value}</p>
-                <p className="text-[10px] text-muted-foreground mt-0.5">{c.sub}</p>
+                <p className="text-[12px] text-muted-foreground uppercase tracking-wide">{c.label}</p>
+                <p className="text-3xl font-bold mt-1" style={{ color: c.color }}>{c.value}</p>
+                <p className="text-[11px] text-muted-foreground mt-1">{c.sub}</p>
               </div>
-              <div className="w-10 h-10 rounded-lg flex items-center justify-center" style={{ backgroundColor: c.color + "20", color: c.color }}>
+              <div className="w-14 h-14 rounded-xl flex items-center justify-center" style={{ backgroundColor: c.color + "20", color: c.color }}>
                 {c.icon}
               </div>
             </div>
+            {c.alert && (
+              <div className="mt-3 flex items-center gap-1.5 px-2 py-1.5 rounded-lg bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300">
+                <AlertTriangle size={12} className="shrink-0" />
+                <span className="text-[10px] font-medium leading-tight">{c.alert}</span>
+              </div>
+            )}
           </div>
         ))}
       </div>
@@ -722,93 +735,36 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
           )}
         </div>
 
-        {/* Right Panel -- System Status moved to Calibration & Settings */}
+        {/* Right Panel -- Farms by Signal Number now sits beside the
+            Bulletins list (previously a separate bottom row alongside the
+            now-removed TCB Download Timeline); System Status moved to
+            Calibration & Settings, Growth Stage Distribution removed. */}
         <div className="flex flex-col gap-4">
-          {/* Growth Stage Distribution -- from real assessment.crop_stage values */}
-          <div className="bg-card border border-border rounded-xl p-4 flex-1">
-            <div className="flex items-center gap-2 mb-2">
-              <TrendingUp size={14} className="text-[#ca8a04]" />
-              <span className="text-xs font-semibold">Growth Stage Distribution</span>
+          <div className="bg-card border border-border rounded-xl p-4 flex-1 flex flex-col">
+            <div className="flex items-center gap-2 mb-3">
+              <BarChart2 size={14} className="text-[#1e3a5f]" />
+              <span className="text-xs font-semibold">Farms by Signal Number</span>
             </div>
-            {growthStageData.length === 0 ? (
-              <p className="text-[11px] text-muted-foreground py-6 text-center">No farms yet.</p>
+            {signalChartData.length === 0 ? (
+              <p className="text-[11px] text-muted-foreground py-8 text-center">No assessed farms yet.</p>
             ) : (
-              <>
-                <ResponsiveContainer width="100%" height={130}>
-                  <PieChart>
-                    <Pie data={growthStageData} dataKey="value" cx="50%" cy="50%" innerRadius={30} outerRadius={55} paddingAngle={3}>
-                      {growthStageData.map((d, i) => <Cell key={i} fill={d.color} />)}
-                    </Pie>
-                    <RTooltip
-                      contentStyle={{ backgroundColor: darkMode ? "#111e11" : "#fff", border:"1px solid #ccc", borderRadius:6, fontSize:11 }}
-                      formatter={(v: number) => [`${v} farms`, ""]}
-                    />
-                  </PieChart>
-                </ResponsiveContainer>
-                <div className="flex flex-wrap gap-x-2 gap-y-1 mt-1">
-                  {growthStageData.map(d => (
-                    <span key={d.name} className="flex items-center gap-1 text-[10px]">
-                      <span className="w-2 h-2 rounded-sm" style={{ backgroundColor: d.color }} />
-                      {d.name} ({d.value})
-                    </span>
-                  ))}
-                </div>
-              </>
+              <ResponsiveContainer width="100%" height="100%" minHeight={180}>
+                <BarChart data={signalChartData} barSize={28}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={darkMode ? "#1c2e1c" : "#e5e7eb"} />
+                  <XAxis dataKey="signal" tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
+                  <YAxis tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
+                  <RTooltip
+                    contentStyle={{ backgroundColor: darkMode ? "#111e11" : "#fff", border:"1px solid #ccc", borderRadius:6, fontSize:11 }}
+                  />
+                  <Bar dataKey="farms"  name="Farms"       fill={SIGNAL_BAR_COLOR} radius={[4,4,0,0]} />
+                  <Bar dataKey="area"   name="Area (ha)"   fill="#1e3a5f" radius={[4,4,0,0]} />
+                  <Legend iconSize={10} iconType="square" wrapperStyle={{ fontSize: 10 }} />
+                </BarChart>
+              </ResponsiveContainer>
             )}
           </div>
         </div>
       </div>
-
-      {/* Bottom Charts Row -- from real assessment/bulletin data */}
-      <div className="grid grid-cols-2 gap-4 shrink-0">
-        <div className="bg-card border border-border rounded-xl p-4">
-          <div className="flex items-center gap-2 mb-3">
-            <BarChart2 size={14} className="text-[#1e3a5f]" />
-            <span className="text-xs font-semibold">Farms by Signal Number</span>
-          </div>
-          {signalChartData.length === 0 ? (
-            <p className="text-[11px] text-muted-foreground py-8 text-center">No assessed farms yet.</p>
-          ) : (
-            <ResponsiveContainer width="100%" height={150}>
-              <BarChart data={signalChartData} barSize={28}>
-                <CartesianGrid strokeDasharray="3 3" stroke={darkMode ? "#1c2e1c" : "#e5e7eb"} />
-                <XAxis dataKey="signal" tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
-                <YAxis tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
-                <RTooltip
-                  contentStyle={{ backgroundColor: darkMode ? "#111e11" : "#fff", border:"1px solid #ccc", borderRadius:6, fontSize:11 }}
-                />
-                <Bar dataKey="farms"  name="Farms"       fill={SIGNAL_BAR_COLOR} radius={[4,4,0,0]} />
-                <Bar dataKey="area"   name="Area (ha)"   fill="#1e3a5f" radius={[4,4,0,0]} />
-                <Legend iconSize={10} iconType="square" wrapperStyle={{ fontSize: 10 }} />
-              </BarChart>
-            </ResponsiveContainer>
-          )}
-        </div>
-
-        <div className="bg-card border border-border rounded-xl p-4">
-          <div className="flex items-center gap-2 mb-3">
-            <Activity size={14} className="text-[#ef4444]" />
-            <span className="text-xs font-semibold">TCB Download Timeline</span>
-          </div>
-          {bulletinTimelineData.length === 0 ? (
-            <p className="text-[11px] text-muted-foreground py-8 text-center">No bulletins with a known issue date yet.</p>
-          ) : (
-            <ResponsiveContainer width="100%" height={150}>
-              <LineChart data={bulletinTimelineData}>
-                <CartesianGrid strokeDasharray="3 3" stroke={darkMode ? "#1c2e1c" : "#e5e7eb"} />
-                <XAxis dataKey="day" tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
-                <YAxis tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
-                <RTooltip
-                  contentStyle={{ backgroundColor: darkMode ? "#111e11" : "#fff", border:"1px solid #ccc", borderRadius:6, fontSize:11 }}
-                />
-                <Line type="monotone" dataKey="bulletins" name="Cumulative Bulletins" stroke="#166534" strokeWidth={2} dot={{ r:3 }} />
-                <Legend iconSize={10} wrapperStyle={{ fontSize: 10 }} />
-              </LineChart>
-            </ResponsiveContainer>
-          )}
-        </div>
-      </div>
-
     </div>
   );
 }

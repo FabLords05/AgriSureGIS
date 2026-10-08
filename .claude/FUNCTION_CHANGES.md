@@ -5531,3 +5531,56 @@ barangay so Luzon/Visayas areas also resolve for exposure.
   `tbl_admin_boundaries`, so it will list every municipality nationwide.
 * Known gap: "Metro Manila" isn't a PSGC province name -- only the raw text
   shows it. No nationwide polygons (map still Region X only).
+
+---
+
+## [2026-10-09] - Monitoring & Extraction Redesign (branch: develop, direct push per user)
+
+Per Fabio (relayed via the user): simplify the Monitoring & Extraction stat
+cards and layout, then (after an initial "revert" request) bring back "TCBs
+Downloaded" rescoped to one typhoon instead of a lifetime total, plus a new
+"done collecting" alert.
+
+### 1. File: `frontend/src/app/components/MonitoringModule.tsx`
+* Removed the "Est. Total Indemnity" stat card, "Growth Stage Distribution"
+  chart, and "TCB Download Timeline" chart entirely, along with their
+  supporting code (`growthStageData`, `bulletinTimelineData`,
+  `GROWTH_STAGE_COLORS`, now-unused `PieChart`/`LineChart`/`TrendingUp`
+  imports).
+* "Farms by Signal Number" moved up into the right panel, now sitting
+  beside "PAGASA TCB Bulletins" (previously a separate bottom row with TCB
+  Download Timeline, which is now gone) -- the whole bottom charts row is
+  removed.
+* "TCBs Downloaded" brought back (initially removed, then explicitly
+  reverted per Fabio) but rescoped: instead of `bulletins.length` (a
+  lifetime total across every typhoon ever parsed), it now counts bulletins
+  for one tracked typhoon -- the first/primary active typhoon if there is
+  one, falling back to the most recently-issued bulletin's typhoon once
+  nothing is active (so the count/alert still has something to point at
+  right after a typhoon closes out). Two storms active at once is rare
+  enough that summing/listing separately wasn't worth the complexity, per
+  Fabio's explicit call.
+* New "done collecting" alert badge (amber, `AlertTriangle` icon) on that
+  card once the tracked typhoon is no longer on PAGASA's active list
+  (`Typhoon.is_active` turning false) -- chosen over the bulletin's own "F"
+  (final bulletin) marker since that's parse-time-only today, never
+  persisted, and would have needed a new DB column + API change. Badge text
+  is exactly "Ready for assessment", per the user's explicit wording choice
+  after trying a couple of longer alternatives.
+* Stat card grid: 5 cards -> 4, `grid-cols-5` -> `grid-cols-4`, each card
+  made visibly larger (bigger padding/icon/value text) so the row doesn't
+  look sparse with one fewer card.
+
+### Status / Next Steps
+* Verified working directly with the user (including the alert wording
+  iteration) before this push.
+* This redesign was implemented twice -- first against an older version of
+  this file, but that work was discarded unpushed after a large upstream
+  pull (`ca5bf34` "farms on-demand pagination stage 2", `ca5bf34`'s
+  sibling commits) changed `MonitoringModule.tsx` to pull stats from a new
+  `GET /api/assessments/summary` endpoint instead of client-side-computed
+  `farms`/`assessments` arrays -- the original diff would not have applied
+  cleanly. Redone from scratch against the current file; no leftover
+  references to the old data-fetching approach.
+* Pushed directly to `develop` per the user's explicit instruction, not
+  through a feature branch/PR.
