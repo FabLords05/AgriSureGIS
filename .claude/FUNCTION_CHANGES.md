@@ -4,6 +4,77 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-08] - Sprint 3: GeoPackage (.gpkg) Farm Boundary Ingestion
+
+The client sent its real farm boundary data as a GeoPackage
+(`docs/PCICX GPX_EXISTING IC AFFECTED BY TY TINO_11-05-2025.gpkg`) instead of
+individual GPX files: one layer, 1,113 features (one per originally walked GPX
+file), EPSG:4326, carrying `FARMERSID`/`FARMID`/`FARMER NAME`/`file_name`
+attributes. The layer declares POLYGON but 383 features are MultiPolygon, and 13
+FARMIDs appear twice (exact re-exports or a later re-walk). The existing
+"Upload GPX" flow now accepts `.gpkg` too. Per Fabio: **update-only** (existing
+farms get `location_geom`; unmatched features are reported, nothing is created)
+and **latest walk date wins** for duplicate FARMIDs.
+
+### 1. File: `backend/app/services/gpkg_parser.py` (new)
+* **`GpkgParserService.parse_gpkg_features(path)`**: opens the GeoPackage read-only
+  with stdlib `sqlite3` (no GDAL/pyogrio dependency), discovers feature layers via
+  `gpkg_contents`/`gpkg_geometry_columns`, rejects non-EPSG:4326 layers, and reads
+  each feature's attributes (header lookup normalized like upload.py's
+  `_normalize_header`) plus its raw geometry blob.
+* **`GpkgParserService.dedupe_by_farm_reference(features)`**: keeps the most recent
+  walk per FARMID (date parsed leniently from `file_name`, e.g. `2025-8-29`),
+  falling back to the later feature; returns `(kept, skipped_duplicates)`.
+* **`GpkgFeature`** dataclass: `to_location_geom()` decodes lazily (a bad geometry
+  only fails its own feature); `to_match_input()` builds a `ParsedGpxFilename`
+  from FARMERSID (id1) / FARMID (id2) / FARMER NAME.
+* **`_gpkg_blob_to_geometry(blob)`**: strips the GeoPackageBinary header (envelope
+  size computed from the flags byte, not hardcoded), decodes WKB via shapely,
+  forces 2D.
+
+### 2. File: `backend/app/services/gpx_parser.py`
+* Extracted **`to_multipolygon_wkt(geometry)`** from `parse_gpx_to_polygon()` so
+  both parsers share it. Now also accepts MultiPolygon input, and handles
+  `buffer(0)` returning a MultiPolygon/empty geometry (previously
+  `MultiPolygon([multipolygon])` would have raised).
+
+### 3. File: `backend/app/services/gpx_farmer_matcher.py`
+* Split **`match(filename, db)`** into `parse_filename` + new
+  **`match_parsed(parsed, db)`** (matching rules unchanged) so GPKG features can
+  feed attribute-derived IDs straight in.
+* Extracted **`parse_farmer_name(name)`** from `parse_filename()` (now a
+  classmethod) for reuse on the GPKG `FARMER NAME` attribute.
+
+### 4. File: `backend/app/api/upload.py`
+* Added **`upload_gpkg()`** (`POST /api/upload/gpkg`): writes the upload to a temp
+  file (sqlite needs a path), parses + dedupes, then per feature in its own
+  SAVEPOINT matches via `GpxFarmerMatcherService.match_parsed` and sets
+  `farm.location_geom`. Rejects a second feature landing on a farm already updated
+  in the same upload (guards `_pick_farm`'s single-farm fallback). One commit, then
+  `invalidate_farms_cache()`. Returns `features_total/updated/failed`,
+  `duplicates_skipped`, `failures` (up to 200).
+
+### 5. Frontend
+* `frontend/src/lib/api.ts`: added `uploadGpkg(file)`, `UploadGpkgResult`,
+  `UploadGpkgFeatureFailure`.
+* `frontend/src/app/App.tsx` **`handleGpxFilesSelected`**: routes `.gpkg` files to
+  `uploadGpkg`, folding per-feature successes/failures into the existing toast,
+  notification and failure-details modal; toast now reads "Updated N farm
+  boundary(ies)" and notes skipped duplicate walks.
+* `frontend/src/app/components/SpatialAnalysisModule.tsx`: GPX file input now
+  `accept=".gpx,.gpkg"` (same button, no layout change).
+
+### 6. Tests
+* New `backend/tests/test_gpkg_parser.py` (builds a small GeoPackage with stdlib
+  sqlite3: Polygon + MultiPolygon, dedupe across date formats, wrong SRS, non-GPKG
+  file, bad blob isolation) and `backend/tests/test_upload_gpkg_api.py`.
+
+### 7. Docs
+* `.claude/API_CONTRACT.md`: documented `POST /api/upload/gpkg`.
+* `.claude/BACKEND_DATABASE_WORKFLOW.md`: Sprint 3 ingestion step mentions `.gpkg`.
+
+---
+
 ## [2026-08-21] - Fix Cascading InFailedSqlTransaction in PAGASA Scraper
 
 Remote backend's scheduled PAGASA scraper was completely broken: every 15-min

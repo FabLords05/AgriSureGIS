@@ -468,7 +468,7 @@ export function SpatialAnalysisModule({
             <input
               ref={gpxInputRef}
               type="file"
-              accept=".gpx"
+              accept=".gpx,.gpkg"
               multiple
               hidden
               onChange={onGpxFilesSelected}

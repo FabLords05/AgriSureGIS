@@ -39,7 +39,24 @@ class GpxFarmerMatcherService:
     """
 
     @staticmethod
-    def parse_filename(filename: str) -> ParsedGpxFilename:
+    def parse_farmer_name(name: str) -> tuple[str | None, str | None, str | None]:
+        """Splits a 'LAST, FIRST [MIDDLE] M.' name into (last, first, middle_initial).
+        Shared by the GPX filename parser below and GeoPackage ingestion, whose
+        features carry the same convention in their 'FARMER NAME' attribute
+        (e.g. 'ABARICO, REPARADA C.')."""
+        last_name = first_name = middle_initial = None
+        if "," in name:
+            last_raw, _, rest = name.partition(",")
+            last_name = last_raw.strip() or None
+            pieces = rest.strip().split()
+            if pieces:
+                first_name = pieces[0]
+                if len(pieces) > 1:
+                    middle_initial = pieces[-1].rstrip(".") or None
+        return last_name, first_name, middle_initial
+
+    @classmethod
+    def parse_filename(cls, filename: str) -> ParsedGpxFilename:
         tail = _TAIL_RE.search(filename)
         id1 = id2 = walk_date = None
         if tail:
@@ -49,16 +66,7 @@ class GpxFarmerMatcherService:
             name_part = re.sub(r"\.gpx$", "", filename, flags=re.IGNORECASE)
 
         name_part = re.sub(r"^TAB_", "", name_part, flags=re.IGNORECASE)
-
-        last_name = first_name = middle_initial = None
-        if "," in name_part:
-            last_raw, _, rest = name_part.partition(",")
-            last_name = last_raw.strip() or None
-            pieces = rest.strip().split()
-            if pieces:
-                first_name = pieces[0]
-                if len(pieces) > 1:
-                    middle_initial = pieces[-1].rstrip(".") or None
+        last_name, first_name, middle_initial = cls.parse_farmer_name(name_part)
 
         return ParsedGpxFilename(
             last_name=last_name,
@@ -71,8 +79,13 @@ class GpxFarmerMatcherService:
 
     @classmethod
     def match(cls, filename: str, db: Session) -> GpxMatchResult:
-        parsed = cls.parse_filename(filename)
+        return cls.match_parsed(cls.parse_filename(filename), db)
 
+    @classmethod
+    def match_parsed(cls, parsed: ParsedGpxFilename, db: Session) -> GpxMatchResult:
+        """Matching logic proper, split out of match() so GeoPackage ingestion can
+        feed it IDs/name read straight from each feature's attributes (FARMERSID
+        as id1, FARMID as id2) instead of re-parsing a filename."""
         if parsed.id1:
             farmer = db.query(FarmerProfile).filter(FarmerProfile.farmers_id == parsed.id1).first()
             if farmer is not None:

@@ -1,7 +1,10 @@
 import functools
 import io
 import logging
+import os
 import re
+import shutil
+import tempfile
 import threading
 import time
 from collections.abc import Iterable, Iterator
@@ -22,6 +25,7 @@ from app.core.farms_cache import invalidate_farms_cache
 from app.core.farms_view import refresh_farm_latest_insurance_view
 from app.core.security import get_current_user
 from app.models import models
+from app.services.gpkg_parser import GpkgParserService
 from app.services.gpx_farmer_matcher import GpxFarmerMatcherService
 from app.services.gpx_parser import GpxParserService
 
@@ -806,4 +810,110 @@ def upload_gpx(
         "farm_id": farm.farm_id,
         "matched_by": matched_by,
         "farmer_name": (f"{farm.farmer.first_name} {farm.farmer.last_name}".strip() if farm.farmer else None),
+    }
+
+
+@router.post("/gpkg", status_code=status.HTTP_200_OK)
+def upload_gpkg(
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """
+    GeoPackage counterpart to upload_gpx() above -- one .gpkg holds many farm
+    boundaries (the client's real export has 1,113), one feature per originally
+    walked GPX file. Each feature is matched to an EXISTING farm via the same
+    GpxFarmerMatcherService rules, fed from its FARMERSID/FARMID/FARMER NAME
+    attributes, and only that farm's location_geom is updated -- nothing new is
+    created (per Fabio, 2026-10-08: unmatched features are reported so the
+    matching CSV can be imported first and the file re-uploaded).
+    """
+    if not file.filename or not file.filename.lower().endswith(".gpkg"):
+        raise HTTPException(status_code=400, detail="Please upload a GeoPackage (.gpkg) file.")
+
+    if file.file.seekable():
+        file.file.seek(0)
+
+    # sqlite3 can only open a real path, not an in-memory upload stream.
+    with tempfile.NamedTemporaryFile(suffix=".gpkg", delete=False) as tmp:
+        shutil.copyfileobj(file.file, tmp)
+        tmp_path = tmp.name
+    try:
+        try:
+            features = GpkgParserService.parse_gpkg_features(tmp_path)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Unable to read GeoPackage file: {exc}") from exc
+    finally:
+        os.remove(tmp_path)
+
+    kept, duplicates = GpkgParserService.dedupe_by_farm_reference(features)
+
+    updated = 0
+    failures: list[dict[str, Any]] = []
+    # Guards against two different features landing on the same farm in one
+    # upload -- _pick_farm() falls back to a farmer's only farm on file, so a
+    # farmer with two GPKG farms but just one imported would otherwise have
+    # one polygon silently overwrite the other.
+    updated_farm_ids: dict[int, str] = {}
+
+    for feature in kept:
+        # Per-feature SAVEPOINT, same reasoning as _run_csv_ingestion(): one
+        # unmatched/bad feature shouldn't discard every good one in the file.
+        savepoint = db.begin_nested()
+        try:
+            location_geom = feature.to_location_geom()
+            match = GpxFarmerMatcherService.match_parsed(feature.to_match_input(), db)
+            if match.farm is None:
+                if match.candidates:
+                    raise ValueError("Multiple farmer records match by name; no unique farm found.")
+                raise ValueError(
+                    f"No matching farm found (FARMID {feature.farm_reference}, FARMERSID {feature.farmers_id}). "
+                    "Import its CSV record first."
+                )
+            if match.farm.farm_id in updated_farm_ids:
+                raise ValueError(
+                    f"Matched farm {match.farm.farm_id} was already updated from {updated_farm_ids[match.farm.farm_id]}."
+                )
+            match.farm.location_geom = location_geom
+            db.flush()
+            savepoint.commit()
+            updated_farm_ids[match.farm.farm_id] = feature.label
+            updated += 1
+        except Exception as exc:
+            savepoint.rollback()
+            failures.append({
+                "feature": feature.fid,
+                "file_name": feature.label,
+                "farm_reference": feature.farm_reference,
+                "error": str(exc),
+            })
+
+    try:
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        logger.exception("GPKG ingestion for %s failed and was rolled back", file.filename)
+        raise HTTPException(status_code=500, detail=f"GeoPackage ingestion failed: {exc}") from exc
+
+    # A no-op unless REDIS_URL is configured -- see app/core/farms_cache.py.
+    invalidate_farms_cache()
+
+    logger.info(
+        "GPKG ingestion finished: %s -- %d feature(s), %d updated, %d failed, %d duplicate(s) skipped",
+        file.filename, len(features), updated, len(failures), len(duplicates),
+    )
+
+    message = f"Updated {updated} farm boundary(ies) from GeoPackage."
+    if failures:
+        message = f"Updated {updated} farm boundary(ies) from GeoPackage; {len(failures)} feature(s) not applied."
+
+    return {
+        "status": "success",
+        "message": message,
+        "features_total": len(features),
+        "features_updated": updated,
+        "features_failed": len(failures),
+        "duplicates_skipped": len(duplicates),
+        "failures": failures[:200],
     }

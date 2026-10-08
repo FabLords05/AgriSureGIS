@@ -86,6 +86,23 @@ export interface UploadGpxResult {
   farmer_name?: string | null;
 }
 
+export interface UploadGpkgFeatureFailure {
+  feature: number;
+  file_name: string;
+  farm_reference: string | null;
+  error: string;
+}
+
+export interface UploadGpkgResult {
+  status: string;
+  message: string;
+  features_total: number;
+  features_updated: number;
+  features_failed: number;
+  duplicates_skipped: number;
+  failures: UploadGpkgFeatureFailure[];
+}
+
 export interface UploadCsvRowFailure {
   row: number;
   policy_no: string | null;
@@ -284,6 +301,17 @@ export function uploadGpx(file: File, farmerId?: number, farmId?: number): Promi
   if (farmerId != null) formData.append('farmer_id', String(farmerId));
   if (farmId != null) formData.append('farm_id', String(farmId));
   return request<UploadGpxResult>('/api/upload/gpx', {
+    method: 'POST',
+    body: formData,
+  });
+}
+
+// One .gpkg holds many farm boundaries -- each feature is matched to its farm
+// by the backend from the feature's own FARMERSID/FARMID attributes.
+export function uploadGpkg(file: File): Promise<UploadGpkgResult> {
+  const formData = new FormData();
+  formData.append('file', file);
+  return request<UploadGpkgResult>('/api/upload/gpkg', {
     method: 'POST',
     body: formData,
   });
