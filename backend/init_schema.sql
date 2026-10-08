@@ -8,6 +8,7 @@ DROP TABLE IF EXISTS tbl_tropical_cyclone_bulletins CASCADE;
 DROP TABLE IF EXISTS tbl_insurance_usage CASCADE;
 DROP TABLE IF EXISTS tbl_typhoons CASCADE;
 DROP TABLE IF EXISTS tbl_risk_assessment CASCADE;
+DROP TABLE IF EXISTS tbl_crop_stage_mapping CASCADE;
 DROP TABLE IF EXISTS tbl_recsap_matrix CASCADE;
 DROP TABLE IF EXISTS tbl_indemnity_factor_matrix CASCADE;
 DROP TABLE IF EXISTS tbl_insurance_records CASCADE;
@@ -77,11 +78,16 @@ CREATE TABLE tbl_recsap_matrix (
 );
 
 -- Step 2 of the parametric lookup: (crop stage group, yield loss % bracket) -> indemnity factor.
--- Source: PCIC Rice Indemnity Factor Table. crop_stage_group uses PCIC's own 5-stage
--- taxonomy, which differs from tbl_recsap_matrix.crop_stage_no's 3-stage taxonomy
--- (Booting/Flowering/Maturity); the mapping is Booting->Late Vegetative,
--- Flowering->Reproductive, Maturity->Maturity (confirmed with Fabio, not stated
--- verbatim in the manuscript). Brackets are exclusive-lower/inclusive-upper, e.g.
+-- Source: PCIC Rice Indemnity Factor Table (RECSAP-From-IRR.pptx, Table 1).
+-- crop_stage_group uses PCIC's own 5-stage taxonomy, which differs from
+-- tbl_recsap_matrix.crop_stage_no's 3-stage taxonomy (Booting/Flowering/Maturity).
+-- The group is NO LONGER derived from crop_stage_no -- it is resolved independently
+-- via tbl_crop_stage_mapping below and persisted on tbl_risk_assessment.stage_group.
+-- (Fabio, 2026-10-09: Milking and Flowering share crop_stage_no 2 but sit in
+-- different groups -- Late Reproductive vs Reproductive -- so one cannot be derived
+-- from the other. The older Booting->Late Vegetative mapping recorded here was
+-- superseded at the same time; see tbl_crop_stage_mapping's comment.)
+-- Brackets are exclusive-lower/inclusive-upper, e.g.
 -- ">10 to 15" means yield_loss_min=10, yield_loss_max=15, matched as
 -- (estimated_yield_loss > yield_loss_min AND estimated_yield_loss <= yield_loss_max).
 CREATE TABLE tbl_indemnity_factor_matrix (
@@ -92,6 +98,47 @@ CREATE TABLE tbl_indemnity_factor_matrix (
     indemnity_factor NUMERIC(7,2) NOT NULL,
     is_active BOOLEAN NOT NULL DEFAULT TRUE
 );
+
+-- Translation layer between the crop-stage vocabularies the two real PCIC CSV exports
+-- use and the two lookup tables above. Needed because neither export speaks the
+-- 3-stage Table 11 taxonomy directly:
+--   * the legacy export (docs/Rice Risk Exposure Region X 04-15-2026.csv) carries
+--     "Stage No.", PCIC's own 0-9 agronomic code (0=S/T, then the Table 7a/7b
+--     sequence MnTl|MxTl|PI|BS|FS|MS|SD|HD|YR);
+--   * the newer PABS/GPX export carries "Stage of Crop" as free text only.
+-- Before this table existed, "Stage No." was written straight into
+-- tbl_risk_assessment.crop_stage_no, which AssessmentService reads as the Table 11
+-- scale -- so code 1 (Maximum Tillering) was assessed as Booting while code 4
+-- (the real Booting) fell outside {1,2,3} and was dropped entirely.
+--
+-- crop_stage_no NULL means "ingest the row but never assess it". Three reasons occur:
+-- Table 11 Note 1 ("MnTl,MxTl,PI stages - No immediate direct damage"), a harvested
+-- crop, and the deliberately-unresolved PI/BS pairing (see its row's note).
+-- stage_group is resolved independently of crop_stage_no -- see the comment above.
+CREATE TABLE tbl_crop_stage_mapping (
+    mapping_id SERIAL PRIMARY KEY,
+    -- Exactly one of these two is populated per row: source_code keys the legacy
+    -- export's integer "Stage No.", source_label keys the newer export's lowercased
+    -- "Stage of Crop" text.
+    source_code INT,
+    source_label VARCHAR(80),
+    pcic_stage VARCHAR(20) NOT NULL,
+    crop_stage_no INT,
+    stage_group VARCHAR(30),
+    notes TEXT,
+    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+    CONSTRAINT ck_crop_stage_mapping_one_key CHECK (
+        (source_code IS NOT NULL AND source_label IS NULL)
+        OR (source_code IS NULL AND source_label IS NOT NULL)
+    )
+);
+
+-- Partial, so a retired (is_active = FALSE) row can be superseded by a new one
+-- carrying the same key instead of having to be deleted.
+CREATE UNIQUE INDEX ux_crop_stage_mapping_source_code
+    ON tbl_crop_stage_mapping (source_code) WHERE is_active AND source_code IS NOT NULL;
+CREATE UNIQUE INDEX ux_crop_stage_mapping_source_label
+    ON tbl_crop_stage_mapping (source_label) WHERE is_active AND source_label IS NOT NULL;
 
 -- 4. Build the Spatial Table (Child of Farmers & Boundaries)
 CREATE TABLE tbl_farms (
@@ -145,6 +192,10 @@ CREATE TABLE tbl_risk_assessment (
     indemnity_matrix_id INT REFERENCES tbl_indemnity_factor_matrix(indemnity_id) ON DELETE SET NULL,
     crop_stage_no INT,
     crop_stage VARCHAR(150),
+    -- PCIC 5-stage group, resolved independently of crop_stage_no via
+    -- tbl_crop_stage_mapping (Fabio, 2026-10-09). Carries the step-2 indemnity
+    -- lookup; NULL falls back to indemnity_calc.CROP_STAGE_TO_INDEMNITY_GROUP.
+    stage_group VARCHAR(30),
     period_of_exposure INT,
     wind_velocity INT,
     indemnity_factor NUMERIC(7,2),
@@ -381,3 +432,37 @@ INSERT INTO tbl_indemnity_factor_matrix (crop_stage_group, yield_loss_min, yield
 ('Maturity', 20.00, 25.00, 413.00),
 ('Maturity', 25.00, 30.00, 490.00),
 ('Maturity', 30.00, 35.00, 560.00);
+
+-- Step 0: source crop-stage vocabulary -> (crop_stage_no, stage_group).
+-- Stage names follow PCIC's own abbreviations as printed in the Table 7a/7b column
+-- headers (RECSAP-From-IRR.pptx): MnTl|MxTl|PI|BS|FS|MS|SD|HD|YR, with S/T
+-- (seedling/transplanting) preceding them in the legacy export's numbering.
+--
+-- Group assignment (Fabio, 2026-10-09) is read off the legacy export's own
+-- parenthetical labels -- e.g. "4 - Booting Stg. (REPRODUCTIVE)", "6 - Milking Stg.
+-- (LATE REPRODUCTIVE)", "7 - Dough Stg. (MATURITY)" -- which land on Table 1's five
+-- group names exactly, leaving none unassigned. This supersedes the earlier
+-- Booting->Late Vegetative mapping, which this file itself had flagged as
+-- "inferred ... not independently confirmed"; Late Vegetative is MxTl.
+-- Flowering->Reproductive is confirmed verbatim by the manuscript's worked example
+-- (p. 53: Flowering -> Reproductive -> IF 392.00).
+INSERT INTO tbl_crop_stage_mapping (source_code, source_label, pcic_stage, crop_stage_no, stage_group, notes) VALUES
+-- Legacy export, "Stage No." (PCIC agronomic code).
+(0, NULL, 'S/T',  NULL, 'Early Vegetative',  'Table 11 Note 1: no immediate direct wind damage.'),
+(1, NULL, 'MnTl', NULL, 'Early Vegetative',  'Table 11 Note 1: no immediate direct wind damage.'),
+(2, NULL, 'MxTl', NULL, 'Late Vegetative',   'Table 11 Note 1: no immediate direct wind damage.'),
+(3, NULL, 'PI',   NULL, 'Reproductive',      'Table 11 Note 1: no immediate direct wind damage.'),
+(4, NULL, 'BS',   1,    'Reproductive',      'Table 11 BOOTING row.'),
+(5, NULL, 'FS',   2,    'Reproductive',      'Table 11 FLOWERING row.'),
+(6, NULL, 'MS',   2,    'Late Reproductive', 'Table 11 FLOWERING row -- PCIC pairs FS/MS as one unit in Tables 9 and 10 -- but the Table 1 group is Late Reproductive.'),
+(7, NULL, 'SD',   3,    'Maturity',          'Table 11 MATURITY row.'),
+(8, NULL, 'HD',   3,    'Maturity',          'Table 11 MATURITY row.'),
+(9, NULL, 'YR',   3,    'Maturity',          'Table 11 MATURITY row.'),
+-- Newer PABS/GPX export, "Stage of Crop" (free text, stored lowercased).
+(NULL, 'vegetative/tillering',       'MnTl/MxTl', NULL, 'Early Vegetative',  'Table 11 Note 1: no immediate direct wind damage.'),
+(NULL, 'panicle initiation/booting', 'PI/BS',     NULL, NULL,                'ON HOLD (Fabio, 2026-10-09): merges PI (no wind damage per Table 11 Note 1) with BS (eligible, crop_stage_no 1), and no PCIC document gives a days-after-transplanting threshold to separate them. Rows ingest but are never assessed. To enable: set crop_stage_no=1, stage_group=''Reproductive'' once PCIC supplies the days-per-stage table.'),
+(NULL, 'flowering',                  'FS',        2,    'Reproductive',      'Table 11 FLOWERING row.'),
+(NULL, 'milking stage',              'MS',        2,    'Late Reproductive', 'Table 11 FLOWERING row via PCIC''s FS/MS pairing; the Table 1 group is Late Reproductive.'),
+(NULL, 'dough stage',                'SD/HD',     3,    'Maturity',          'Table 11 MATURITY row.'),
+(NULL, 'yellow ripening',            'YR',        3,    'Maturity',          'Table 11 MATURITY row.'),
+(NULL, 'harvested',                  'Harvested', NULL, NULL,                'No standing crop at typhoon occurrence -- nothing to assess.');

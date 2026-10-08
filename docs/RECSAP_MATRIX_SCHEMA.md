@@ -17,14 +17,62 @@ is two lookups chained together, not one flat table:
 
 The two source tables also use different growth-stage taxonomies. Step 1 uses 3 stages
 (Booting, Flowering, Maturity). Step 2 uses PCIC's own 5-stage taxonomy (Early
-Vegetative, Late Vegetative, Reproductive, Late Reproductive, Maturity). The mapping
-between them (confirmed with Fabio, not stated verbatim in the manuscript):
+Vegetative, Late Vegetative, Reproductive, Late Reproductive, Maturity).
 
-| `tbl_recsap_matrix.crop_stage_no` | Stage 1 name | -> | `tbl_indemnity_factor_matrix.crop_stage_group` |
+**Superseded 2026-10-09.** The group is no longer derived from `crop_stage_no` at all.
+The two are genuinely not a function of one another: Milking and Flowering both resolve
+to `crop_stage_no` 2 (PCIC pairs `FS/MS` as a single unit in Tables 9 and 10) while
+Table 1 keeps them in different groups. Both values are now resolved independently from
+`tbl_crop_stage_mapping` and persisted on `tbl_risk_assessment.stage_group`; see the
+step 0 section below. `indemnity_calc.CROP_STAGE_TO_INDEMNITY_GROUP` survives only as a
+fallback for a row carrying no `stage_group`, and its Booting entry changed with the
+rest:
+
+| `tbl_recsap_matrix.crop_stage_no` | Stage 1 name | -> | fallback `crop_stage_group` |
 |---|---|---|---|
-| 1 | Booting | -> | Late Vegetative |
+| 1 | Booting | -> | Reproductive *(was Late Vegetative)* |
 | 2 | Flowering | -> | Reproductive |
 | 3 | Maturity | -> | Maturity |
+
+## Step 0 — source crop stage -> (`crop_stage_no`, `stage_group`)
+
+`tbl_crop_stage_mapping` (added 2026-10-09) translates whichever vocabulary a given
+PCIC CSV export uses. Two exports, two vocabularies:
+
+* the legacy export carries `Stage No.`, PCIC's own 0-9 agronomic code -- 0 = S/T, then
+  the sequence printed as the Table 7a/7b column headers:
+  `MnTl | MxTl | PI | BS | FS | MS | SD | HD | YR`;
+* the newer PABS/GPX export carries `Stage of Crop` as free text only.
+
+Before this table existed, `Stage No.` was written straight into `crop_stage_no`, which
+`AssessmentService` reads as the Table 11 scale -- so code 1 (Maximum Tillering) was
+assessed as Booting, while code 4 (the real Booting) fell outside `{1,2,3}` and was
+dropped entirely.
+
+The 5-group assignment is read off the legacy export's own parenthetical labels
+("4 - Booting Stg. (REPRODUCTIVE)", "6 - Milking Stg. (LATE REPRODUCTIVE)",
+"7 - Dough Stg. (MATURITY)"), which land on Table 1's five group names exactly, leaving
+none unassigned:
+
+| PCIC stage | `crop_stage_no` | `stage_group` |
+|---|---|---|
+| S/T, MnTl | — | Early Vegetative |
+| MxTl | — | Late Vegetative |
+| PI | — | Reproductive |
+| BS | 1 | Reproductive |
+| FS | 2 | Reproductive |
+| MS | 2 | Late Reproductive |
+| SD, HD, YR | 3 | Maturity |
+
+`crop_stage_no` NULL means the row ingests but is never assessed. Three reasons occur:
+Table 11's Note 1 ("MnTl,MxTl,PI stages - No immediate direct damage"), a harvested
+crop, and the newer export's merged `Panicle Initiation/Booting` label.
+
+That last one is **deliberately left unmapped**: it joins a no-damage stage (PI) to an
+eligible one (BS), and no PCIC document supplies a days-after-transplanting threshold to
+separate them. It is 176 of the 1,114 rows in the real file. Enabling it once PCIC
+supplies that table is a single `UPDATE` setting `crop_stage_no = 1` and
+`stage_group = 'Reproductive'` on that row -- no code change.
 
 ## `tbl_recsap_matrix` (step 1: yield loss %)
 

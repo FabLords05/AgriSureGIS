@@ -4,6 +4,191 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-09] - Sprint 3: CSV Ingest Reuses Preloaded Boundaries + Ingestion Test Harness Fix
+
+Verification of the crop-stage branch below on Cristian's PC. The first run
+of the suite failed every `test_upload_csv_ingestion.py` test, and the real
+upload of `PCIC10 GPX 11-05-2025 WITH EXISTING IC AFFECTED BY TY.csv` gave
+1,055 inserted / 14 skipped / **45 failed** (expected 0), which left the
+`.gpkg` upload at 1,055 updated / 45 failed.
+
+All 45 failures were one barangay: `POBLACION (ALEGRIA)`, Alegria, Surigao del
+Norte. The exact-name lookup missed, `_resolve_psgc_code()` stripped the
+parenthetical to reach `POBLACION` (`1606701001`), and the ingest inserted a
+new boundary with that code. `tbl_admin_boundaries` has been preloaded
+nationwide since 2026-09-30, so the row already existed and the insert hit
+`tbl_admin_boundaries_psgc_code_key`. This bug predates the crop-stage
+branch; the new export is the first file to contain such a variant.
+
+### 1. File: `backend/app/api/upload.py`
+* **`_ingest_row()`**: after `_resolve_psgc_code()` succeeds, looks up an
+  existing `AdminBoundary` by `psgc_code` and reuses it. Only inserts a new
+  boundary when none exists. The caller still caches the result under the
+  CSV's own spelling, so the extra query runs once per variant per upload.
+
+### 2. File: `backend/tests/test_upload_csv_ingestion.py`
+* **`_extract_filter()`**: handles `Model.column.is_(True)` — its `.right`
+  is a `True_`/`False_` constant with no `.value`. `CropStageResolver.load()`
+  uses this filter, so every ingestion run raised `AttributeError` in
+  `_prefetch_caches()` and returned `None` (the cause of all 19 failures).
+  Added `False_`, `True_` imports.
+* **`_run_ingestion()`**: raises `AssertionError` with the `mark_error()`
+  message instead of returning `None`, so a swallowed crash is visible.
+* New **`test_name_variant_reuses_existing_boundary_by_psgc_code`**.
+* `test_repeated_boundary_across_many_rows_is_only_queried_once`: expected
+  `AdminBoundary` query count 2 → 3 (the new `psgc_code` lookup).
+
+### 3. File: `.claude/LOCAL_SERVER_SETUP.md` (new)
+* Runbook for running the full stack on Cristian's PC without Docker:
+  PostgreSQL, backend, native GeoServer 3.0.1 (datastore host `localhost`),
+  frontend, startup order, upload order, and known non-bugs (Active Insurance
+  Only filter, raster overlay not clickable). No secrets in the file.
+
+### Status / Next Steps
+* Applied `backend/migrations/2026-10-09_crop_stage_mapping.sql` on Cristian's
+  PC's DB (2026-10-09): 17 mapping rows seeded.
+* After the harness fix, `test_upload_csv_ingestion.py` passed 19/19
+  (2026-10-09), before the boundary fix and new test.
+* To do: re-run the suite, re-upload the CSV (expect the 45 rows to insert),
+  then re-upload the `.gpkg`.
+* Pre-existing, not fixed here: 10 `test_farms_api.py` tests fail on `develop`
+  too. They call `list_farms()` without `municipality`/`farmer_id`, so the
+  truthy FastAPI `Query(None)` default triggers `.join()` on the fake query
+  (since `273532d`).
+
+## [2026-10-09] - Sprint 3: Second PABS/GPX CSV Layout + Crop-Stage Translation
+
+The client's newer export ("PCIC10 GPX 11-05-2025 WITH EXISTING IC AFFECTED BY
+TY.csv", 42 columns, 1,114 rows) would not ingest. Only 9 of its headers collide
+with the legacy layout after normalization: it calls the policy number `CIC NO`,
+AreaInsured `AREA`, carries the farmer as one combined `FARMER NAME` field, and
+gives the crop stage as free text (`Dough Stage`) where the legacy export gives an
+integer `Stage No.`.
+
+Mapping that stage column surfaced a live bug in the EXISTING path. `Stage No.` is
+PCIC's own 0-9 agronomic code (0=S/T, then the Table 7a/7b sequence
+MnTl|MxTl|PI|BS|FS|MS|SD|HD|YR), but `prepare_row_payload()` wrote it straight into
+`tbl_risk_assessment.crop_stage_no`, which `AssessmentService` reads as the Table 11
+scale (1=Booting, 2=Flowering, 3=Maturity). Two different scales. On the legacy
+file that meant 41 of 100 rows passed the eligibility gate with every one of them
+mis-staged (code 1 = Maximum Tillering assessed as Booting, code 3 = Panicle
+Initiation assessed as Maturity), while the genuinely eligible rows -- code 4
+(Booting) and code 7 (Dough) -- fell outside {1,2,3} and were silently dropped.
+
+Decisions taken with Fabio, sourced from `USTP CAPSTONE/RECSAP-From-IRR.pptx`
+(Tables 1, 7a/7b, 9, 10, 11) and the manuscript's worked example (p. 53):
+* Milking Stage resolves to `crop_stage_no` 2, the Flowering row -- PCIC pairs
+  `FS/MS` as one unit in Tables 9 and 10.
+* Booting's indemnity group moved Late Vegetative -> Reproductive. The real PABS
+  export labels it "4 - Booting Stg. (REPRODUCTIVE)", and the full assignment that
+  implies (Early Vegetative = S/T, MnTl; Late Vegetative = MxTl; Reproductive = PI,
+  BS, FS; Late Reproductive = MS; Maturity = SD, HD, YR) leaves no group unused.
+  The previous value was flagged in init_schema.sql as inferred and unconfirmed.
+* `Panicle Initiation/Booting` (176 rows, 15.8%) stays deliberately UNMAPPED. Table
+  11 Note 1 excludes PI from wind damage but BS is eligible, and no PCIC document
+  gives a days-after-transplanting threshold to separate them. Those rows ingest and
+  are never assessed; enabling them later is one UPDATE, not a deploy.
+* `crop_stage_no` and `stage_group` are now resolved INDEPENDENTLY. Milking and
+  Flowering share `crop_stage_no` 2 but sit in different Table 1 groups, which the
+  old derive-group-from-stage-number approach could not express.
+
+Fabio is resetting his development database rather than migrating it, so no backfill
+of existing mis-staged rows was written.
+
+### 1. File: `backend/app/services/crop_stage_resolver.py` (new)
+* **`normalize_stage_label()`**: lowercases and collapses whitespace. Deliberately
+  does NOT strip `/` the way `upload.py:_normalize_header()` strips punctuation from
+  column names -- the slash carries meaning in PCIC's merged labels.
+* **`coerce_stage_code()`**: coerces `Stage No.` to int across every shape pandas
+  infers for that column (int64, float64 when any row is blank, object).
+* **`ResolvedCropStage`**: frozen dataclass of
+  `(crop_stage_no, stage_group, pcic_stage, matched_by)` with an `is_assessable`
+  property. `crop_stage_no` None means "ingest but never assess".
+* **`CropStageResolver.load()`**: one query per upload into two dicts (by code, by
+  label); warns if the mapping table is empty.
+* **`CropStageResolver.resolve()`**: integer code is tried first -- it distinguishes
+  PI from BS, which the merged text label cannot. Unknown values warn once per
+  distinct value, not once per row.
+
+### 2. File: `backend/app/api/upload.py`
+* **`prepare_row_payload()`**: added second header spellings via the existing
+  `get(*header_names)` alias helper -- `CIC NO`, `FARMERSID`, `AREA`,
+  `AMOUNT OF COVER`, `VARIETY NAME`. When `Surname`/`Firstname` are absent it now
+  splits `FARMER NAME` through `GpxFarmerMatcherService.parse_farmer_name()`, the
+  same parser the GeoPackage path uses on the same field, so a CSV-created farmer
+  and the .gpkg feature carrying its boundary agree on the name.
+* **`prepare_row_payload()`**: `crop_stage_seed` now carries RAW `stage_code` /
+  `stage_label` instead of emitting a `crop_stage_no` of its own, keeping the
+  function DB-free and unit-testable. Translation moved to `_ingest_row()`.
+* **`_IngestCaches`**: new read-only `crop_stage: CropStageResolver | None` field.
+* **`_prefetch_caches()`**: loads the resolver once per upload.
+* **`_ingest_row()`**: resolves the stage and writes both `crop_stage_no` and the
+  new `stage_group` onto the seed `RiskAssessment`.
+
+### 3. File: `backend/app/services/gpx_farmer_matcher.py`
+* New module-level **`_INITIAL_RE`** (`^[A-Za-z]\.?$`).
+* **`parse_farmer_name()`**: everything between the comma and a trailing middle
+  initial is now the first name. Taking only the first token truncated compound
+  first names -- 131 of the real export's 1,114 rows have three or more tokens,
+  e.g. 'ACERO, ANNA MARIE S.' lost 'MARIE'. A trailing token only counts as an
+  initial when it looks like one, so 'SMITH, JOHN PAUL' keeps both words.
+
+### 4. File: `backend/app/core/indemnity_calc.py`
+* **`CROP_STAGE_TO_INDEMNITY_GROUP`**: now a FALLBACK only, consulted when a row
+  carries no `stage_group`. `1` moved `"Late Vegetative"` -> `"Reproductive"`.
+* **`get_matrix_rule()`** / **`calculate_final_payout()`**: take an optional
+  `stage_group` parameter used in place of the derived one.
+* Manual testing CLI: new optional stage-group prompt so Milking can be exercised.
+
+### 5. File: `backend/app/services/assessment_service.py`
+* **`calculate_for_bulletin()`**: reads the seed row's own `stage_group`, passes it
+  into both lookups, and copies it onto the assessment rows it writes.
+
+### 6. Files: `backend/app/models/models.py`, `backend/init_schema.sql`, `backend/migrations/2026-10-09_crop_stage_mapping.sql` (new)
+* New **`CropStageMapping`** model / `tbl_crop_stage_mapping` table: keyed on either
+  `source_code` (legacy integer) or `source_label` (newer text), with a CHECK
+  constraint enforcing exactly one, and partial unique indexes on each. Seeded with
+  17 rows covering both vocabularies; every ineligible row carries a `notes` value
+  saying why.
+* **`RiskAssessment`** / `tbl_risk_assessment`: new nullable `stage_group VARCHAR(30)`.
+* The migration exists for the OTHER provisioned instances (e.g. Cristian's
+  Tailscale-hosted backend) that are not being reset; it is idempotent via
+  `IF NOT EXISTS` / `ON CONFLICT DO NOTHING`.
+
+### 7. Tests
+* `backend/tests/test_crop_stage_resolver.py` (new): normalization, both lookup
+  paths, code-wins-over-label, the held PI/BS row, warn-once behaviour, empty table.
+* `backend/tests/test_upload_csv_ingestion.py`: **the whole harness was dead.** All
+  14 tests called `upload_csv(file=..., db=mock_db)`, but `upload_csv()` has taken
+  only `file` since the row loop moved into `_run_csv_ingestion()` with its own
+  `SessionLocal` -- every test was raising `TypeError`. Replaced `_fake_upload_file()`
+  with **`_dataframe()`** (mirrors the endpoint's own UTF-8 -> cp1252 decode chain)
+  and **`_run_ingestion()`**, which drives `_run_csv_ingestion()` with `SessionLocal`,
+  `upload_jobs`, `invalidate_farms_cache` and `refresh_farm_latest_insurance_view`
+  patched and returns the `mark_done()` payload. Added **`_stage_mapping()`** and
+  seeded the fake DB's `CropStageMapping` table. New `CropStageTranslationTests`.
+* `backend/tests/test_csv_upload.py`: updated the `crop_stage_seed` assertion for the
+  new raw-passthrough keys; new `NewPabsGpxLayoutTests` (header aliases, name split,
+  compound first names, legacy columns winning, separator/dash parsing).
+* `backend/tests/test_assessment_service.py`: pinned `stage_group` on the existing
+  prior mocks, exposed `mock_db.indemnity_query`, and added a test proving Milking
+  filters the Late Reproductive bracket despite sharing `crop_stage_no` 2.
+* `backend/tests/test_gpx_farmer_matcher.py`: new `ParseFarmerNameTests`.
+
+### 8. File: `frontend/src/app/App.tsx`
+* **`handleCsvFileSelected()`**: maps `result.failures` into the existing
+  `UploadFailuresModal` via a "View details" toast action, the way the GPX/GPKG
+  handler already did. Per-row CSV reasons were previously dropped entirely, so a
+  rejected row surfaced only as a count.
+
+### Status / Next Steps
+* NOT YET RUN -- `cd backend && python -m pytest tests/ -v` is Fabio's to run, as is
+  the `init_schema.sql` reset. See the verification sequence in the approved plan.
+* `panicle initiation/booting` (176 rows) will ingest and never pay out until PCIC
+  supplies a days-per-stage table. Enabling it is one UPDATE on
+  `tbl_crop_stage_mapping`, no deploy.
+* `docs/RECSAP_MATRIX_SCHEMA.md` updated for the superseded Booting mapping.
+
 ## [2026-10-08] - Sprint 3: GeoPackage (.gpkg) Farm Boundary Ingestion
 
 The client sent its real farm boundary data as a GeoPackage

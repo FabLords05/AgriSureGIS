@@ -79,13 +79,20 @@ class AssessmentService:
                     continue
 
                 exposure_hours = int(summary.total_exposure_hours)
-                rule = assessment.get_matrix_rule(prior.crop_stage_no, summary.max_signal_level, exposure_hours)
+                # The seed row's own PCIC group, resolved at ingestion from the CSV's
+                # crop-stage column. Carried explicitly rather than derived from
+                # crop_stage_no, which cannot distinguish Milking (Late Reproductive)
+                # from Flowering (Reproductive) -- both are crop_stage_no 2.
+                stage_group = getattr(prior, "stage_group", None)
+                rule = assessment.get_matrix_rule(
+                    prior.crop_stage_no, summary.max_signal_level, exposure_hours, stage_group
+                )
                 if rule is None:
                     continue
 
                 amount_cover = float(insurance.amount_cover)
                 payout = assessment.calculate_final_payout(
-                    amount_cover, prior.crop_stage_no, summary.max_signal_level, exposure_hours
+                    amount_cover, prior.crop_stage_no, summary.max_signal_level, exposure_hours, stage_group
                 )
                 estimated_damage = round(amount_cover * float(rule.estimated_yield_loss) / 100, 2)
 
@@ -108,6 +115,7 @@ class AssessmentService:
                 existing.indemnity_matrix_id = rule.indemnity_matrix_id
                 existing.crop_stage_no = prior.crop_stage_no
                 existing.crop_stage = prior.crop_stage
+                existing.stage_group = stage_group
                 existing.period_of_exposure = exposure_hours
                 existing.wind_velocity = summary.max_signal_level
                 existing.indemnity_factor = rule.indemnity_factor

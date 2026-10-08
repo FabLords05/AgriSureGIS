@@ -4,8 +4,16 @@ from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
+from sqlalchemy.sql.elements import False_, True_
+
 from app.api import upload as upload_module
 from app.models import models
+
+# These tests drive _run_csv_ingestion() directly rather than the /csv endpoint.
+# upload_csv() now only validates + parses the file and hands the row loop to a
+# background thread with its own SessionLocal, so there is no longer a `db` to
+# inject at the endpoint -- see _run_ingestion() below.
 
 # Test fixtures use "Bukidnon/Malaybalay/Casisang" as a stand-in boundary --
 # _load_psgc_lookup() reads a real on-disk reference file (whose exact contents
@@ -22,11 +30,63 @@ _PK_FIELDS = {
 }
 
 
-def _fake_upload_file(csv_text: str, encoding: str = "utf-8", filename: str = "export.csv"):
+def _dataframe(csv_text: str, encoding: str = "utf-8"):
+    """Mirrors upload_csv()'s own decode chain (UTF-8 first, then cp1252 for the
+    Windows-exported files PABS actually produces) so an encoding regression is
+    still caught here even though the endpoint itself is no longer called."""
+    raw_bytes = csv_text.encode(encoding)
+    for candidate in ("utf-8-sig", "cp1252"):
+        try:
+            return pd.read_csv(io.BytesIO(raw_bytes), encoding=candidate)
+        except UnicodeDecodeError:
+            continue
+    raise AssertionError("fixture CSV could not be decoded")
+
+
+def _run_ingestion(csv_text: str, mock_db, encoding: str = "utf-8", filename: str = "export.csv"):
+    """Runs one full ingestion against the in-memory fake DB and returns the result
+    dict _run_csv_ingestion() hands to upload_jobs.mark_done() -- the same payload
+    GET /csv/status/{job_id} eventually serves to the frontend.
+
+    Fails the calling test with the mark_error() message if the run errored out
+    instead -- _run_csv_ingestion() swallows its own exceptions, so without this
+    a crash surfaces only as an opaque None result.
+    """
+    outcome = {}
+
+    def mark_done(job_id, result):
+        outcome["result"] = result
+
+    def mark_error(job_id, message):
+        outcome["error"] = message
+
+    jobs = MagicMock()
+    jobs.mark_done.side_effect = mark_done
+    jobs.mark_error.side_effect = mark_error
+
+    with (
+        patch.object(upload_module, "SessionLocal", return_value=mock_db),
+        patch.object(upload_module, "upload_jobs", jobs),
+        # Both touch real infrastructure (Redis, a materialized view) and are
+        # no-ops in production unless configured; stubbed so the suite needs neither.
+        patch.object(upload_module, "invalidate_farms_cache"),
+        patch.object(upload_module, "refresh_farm_latest_insurance_view"),
+    ):
+        upload_module._run_csv_ingestion("job-test", filename, _dataframe(csv_text, encoding))
+
+    if "error" in outcome:
+        raise AssertionError(f"CSV ingestion errored: {outcome['error']}")
+    return outcome["result"]
+
+
+def _stage_mapping(source_code=None, source_label=None, pcic_stage="XX", crop_stage_no=None, stage_group=None):
     return SimpleNamespace(
-        filename=filename,
-        content_type="text/csv",
-        file=io.BytesIO(csv_text.encode(encoding)),
+        source_code=source_code,
+        source_label=source_label,
+        pcic_stage=pcic_stage,
+        crop_stage_no=crop_stage_no,
+        stage_group=stage_group,
+        is_active=True,
     )
 
 
@@ -72,8 +132,14 @@ def _extract_filter(criterion):
     # Function wrapping it (whose .clauses holds the wrapped column); .right is
     # the bound literal/list (has .value). upload_csv() only ever wraps columns
     # in func.upper(), so that's the only transform simulated here.
+    # "Model.column.is_(True)" (CropStageResolver.load()) is the exception: its
+    # .right is a True_/False_ constant with no .value, compared here by equality.
     left = criterion.left
-    value = criterion.right.value
+    right = criterion.right
+    if isinstance(right, (True_, False_)):
+        value = isinstance(right, True_)
+    else:
+        value = right.value
     is_in = getattr(criterion.operator, "__name__", "") == "in_op"
     if getattr(left, "name", None) == "upper" and hasattr(left, "clauses"):
         inner = list(left.clauses)[0]
@@ -99,6 +165,25 @@ class _FakeQuery:
 
 def _build_mock_db():
     tables = {model: _FakeTable() for model in _PK_FIELDS}
+    # tbl_crop_stage_mapping is a read-only lookup CropStageResolver.load() pulls
+    # once per upload (via _prefetch_caches). Seeded with the subset of
+    # init_schema.sql's rows these fixtures use: 1 = MnTl (ineligible),
+    # 5 = FS (Flowering), 6 = MS (Milking -- same crop_stage_no as Flowering but a
+    # different group), plus the newer export's text labels.
+    tables[models.CropStageMapping] = _FakeTable()
+    for mapping in (
+        _stage_mapping(source_code=1, pcic_stage="MnTl", crop_stage_no=None, stage_group="Early Vegetative"),
+        _stage_mapping(source_code=2, pcic_stage="MxTl", crop_stage_no=None, stage_group="Late Vegetative"),
+        _stage_mapping(source_code=4, pcic_stage="BS", crop_stage_no=1, stage_group="Reproductive"),
+        _stage_mapping(source_code=5, pcic_stage="FS", crop_stage_no=2, stage_group="Reproductive"),
+        _stage_mapping(source_code=6, pcic_stage="MS", crop_stage_no=2, stage_group="Late Reproductive"),
+        _stage_mapping(source_code=7, pcic_stage="SD", crop_stage_no=3, stage_group="Maturity"),
+        _stage_mapping(source_label="flowering", pcic_stage="FS", crop_stage_no=2, stage_group="Reproductive"),
+        _stage_mapping(source_label="milking stage", pcic_stage="MS", crop_stage_no=2, stage_group="Late Reproductive"),
+        _stage_mapping(source_label="dough stage", pcic_stage="SD/HD", crop_stage_no=3, stage_group="Maturity"),
+        _stage_mapping(source_label="panicle initiation/booting", pcic_stage="PI/BS", crop_stage_no=None, stage_group=None),
+    ):
+        tables[models.CropStageMapping].add(mapping)
     counters = {model: 0 for model in _PK_FIELDS}
     added_instances: list = []
     query_call_counts: dict = {}
@@ -115,7 +200,8 @@ def _build_mock_db():
         model = type(instance)
         added_instances.append(instance)
         # Models outside _PK_FIELDS (e.g. RiskAssessment) are only ever inserted,
-        # never queried back by upload_csv() -- nothing to track a fake PK for.
+        # never queried back by the ingest -- nothing to track a fake PK for.
+        # CropStageMapping is the mirror image: queried, never inserted.
         if model in tables:
             tables[model].add(instance)
             counters[model] += 1
@@ -172,7 +258,7 @@ class UploadCsvIngestionTests(unittest.TestCase):
         )
         mock_db = _build_mock_db()
 
-        result = upload_module.upload_csv(file=_fake_upload_file(csv_text), db=mock_db)
+        result = _run_ingestion(csv_text, mock_db)
 
         self.assertEqual(result["rows_inserted"], 2)
         farmers = mock_db.tables[models.FarmerProfile].rows
@@ -186,7 +272,7 @@ class UploadCsvIngestionTests(unittest.TestCase):
         )
         mock_db = _build_mock_db()
 
-        upload_module.upload_csv(file=_fake_upload_file(csv_text), db=mock_db)
+        _run_ingestion(csv_text, mock_db)
 
         farmers = mock_db.tables[models.FarmerProfile].rows
         self.assertEqual(len(farmers), 1)
@@ -199,12 +285,12 @@ class UploadCsvIngestionTests(unittest.TestCase):
         # spans far fewer distinct boundaries (the same barangay repeats across
         # ~10-20 rows on average), and the original per-row implementation
         # re-queried the database for the same boundary on every single row.
-        # Expected count is 2, not 1: _prefetch_caches() does one whole-table
+        # Expected count is 3, not 1: _prefetch_caches() does one whole-table
         # `.all()` query up front (query #1), and this boundary doesn't exist yet
-        # in the fake DB, so the first row still falls back to one real lookup
-        # (query #2) before creating + caching it -- rows 2 and 3 then hit that
-        # cache and issue no further queries, so the count still doesn't scale
-        # with the number of repeated rows.
+        # in the fake DB, so the first row still falls back to one name lookup
+        # (query #2) and one psgc_code lookup (query #3) before creating + caching
+        # it -- rows 2 and 3 then hit that cache and issue no further queries, so
+        # the count still doesn't scale with the number of repeated rows.
         csv_text = _csv(
             _row("POL-1", "Cruz", "Ana", farmers_id="111", farmid="5001"),
             _row("POL-2", "Reyes", "Ben", farmers_id="222", farmid="5002"),
@@ -212,9 +298,37 @@ class UploadCsvIngestionTests(unittest.TestCase):
         )
         mock_db = _build_mock_db()
 
-        upload_module.upload_csv(file=_fake_upload_file(csv_text), db=mock_db)
+        _run_ingestion(csv_text, mock_db)
 
-        self.assertEqual(mock_db.query_call_counts.get(models.AdminBoundary, 0), 2)
+        self.assertEqual(mock_db.query_call_counts.get(models.AdminBoundary, 0), 3)
+
+    def test_name_variant_reuses_existing_boundary_by_psgc_code(self):
+        # Regression test for the 2026-10-09 PCIC10 export: 'POBLACION (ALEGRIA)'
+        # missed the name lookup, _resolve_psgc_code() stripped the parenthetical
+        # to reach 'POBLACION' (1606701001) -- a boundary already preloaded under
+        # that spelling -- and the ingest tried to insert it a second time, failing
+        # all 45 such rows on tbl_admin_boundaries_psgc_code_key.
+        mock_db = _build_mock_db()
+        existing = models.AdminBoundary(
+            psgc_code="1001312012", province="BUKIDNON", municipality="MALAYBALAY", barangay="CASISANG"
+        )
+        mock_db.add(existing)
+        csv_text = _csv(
+            _row("POL-1", "Cruz", "Ana", farmers_id="111", farmid="5001").replace(
+                ",Casisang,", ",Casisang (Pob.),", 1
+            ),
+            _row("POL-2", "Reyes", "Ben", farmers_id="222", farmid="5002").replace(
+                ",Casisang,", ",Casisang (Pob.),", 1
+            ),
+        )
+
+        result = _run_ingestion(csv_text, mock_db)
+
+        self.assertEqual(result["rows_failed"], 0)
+        self.assertEqual(result["rows_inserted"], 2)
+        self.assertEqual(mock_db.tables[models.AdminBoundary].rows, [existing])
+        farms = mock_db.tables[models.Farm].rows
+        self.assertEqual({farm.boundary_id for farm in farms}, {existing.boundary_id})
 
     def test_same_rsbsa_no_across_rows_is_only_queried_once(self):
         # Expected count is 2, not 1: _prefetch_caches() issues one batched
@@ -230,7 +344,7 @@ class UploadCsvIngestionTests(unittest.TestCase):
         )
         mock_db = _build_mock_db()
 
-        upload_module.upload_csv(file=_fake_upload_file(csv_text), db=mock_db)
+        _run_ingestion(csv_text, mock_db)
 
         farmers = mock_db.tables[models.FarmerProfile].rows
         self.assertEqual(len(farmers), 1)
@@ -243,7 +357,7 @@ class UploadCsvIngestionTests(unittest.TestCase):
         )
         mock_db = _build_mock_db()
 
-        upload_module.upload_csv(file=_fake_upload_file(csv_text), db=mock_db)
+        _run_ingestion(csv_text, mock_db)
 
         farms = mock_db.tables[models.Farm].rows
         self.assertEqual(len(farms), 2)
@@ -255,7 +369,7 @@ class UploadCsvIngestionTests(unittest.TestCase):
         )
         mock_db = _build_mock_db()
 
-        upload_module.upload_csv(file=_fake_upload_file(csv_text), db=mock_db)
+        _run_ingestion(csv_text, mock_db)
 
         insurance = mock_db.tables[models.InsuranceRecord].rows[0]
         farmer = mock_db.tables[models.FarmerProfile].rows[0]
@@ -263,17 +377,22 @@ class UploadCsvIngestionTests(unittest.TestCase):
         self.assertEqual(insurance.product_name, "S/T Stg (EARLY VEGETATIVE)")
 
     def test_crop_stage_seed_uses_estimated_damage_as_final_indemnity_payment_placeholder(self):
+        # Stage No. 5 is PCIC's Flowering Stage (FS), which tbl_crop_stage_mapping
+        # translates to the Table 11 crop_stage_no 2. The legacy export's own code
+        # is NOT that scale -- see test_legacy_stage_code_is_translated_not_copied.
         csv_text = _csv(
-            _row("POL-1", "Cruz", "Ana", farmers_id="111", farmid="5001", stage_no=2, stage="Flowering", estimated_damage="777.50")
+            _row("POL-1", "Cruz", "Ana", farmers_id="111", farmid="5001", stage_no=5,
+                 stage="5 - Flowering Stg. (REPRODUCTIVE)", estimated_damage="777.50")
         )
         mock_db = _build_mock_db()
 
-        upload_module.upload_csv(file=_fake_upload_file(csv_text), db=mock_db)
+        _run_ingestion(csv_text, mock_db)
 
         seeds = [i for i in mock_db.added_instances if isinstance(i, models.RiskAssessment)]
         self.assertEqual(len(seeds), 1)
         seed = seeds[0]
         self.assertEqual(seed.crop_stage_no, 2)
+        self.assertEqual(seed.stage_group, "Reproductive")
         self.assertEqual(seed.estimated_damage, Decimal("777.50"))
         self.assertEqual(seed.final_indemnity_payment, Decimal("777.50"))
         # Intentionally unset -- this is a seed row, not a real computed assessment.
@@ -288,7 +407,7 @@ class UploadCsvIngestionTests(unittest.TestCase):
         mock_db = _build_mock_db()
 
         with self.assertLogs("app.api.upload", level="WARNING") as captured:
-            upload_module.upload_csv(file=_fake_upload_file(csv_text), db=mock_db)
+            _run_ingestion(csv_text, mock_db)
         self.assertTrue(any("differs from EstimatedDamage" in message for message in captured.output))
 
     def test_missing_psgc_code_is_reported_as_a_row_failure_not_a_raised_exception(self):
@@ -302,7 +421,7 @@ class UploadCsvIngestionTests(unittest.TestCase):
         )
         mock_db = _build_mock_db()
 
-        result = upload_module.upload_csv(file=_fake_upload_file(csv_text), db=mock_db)
+        result = _run_ingestion(csv_text, mock_db)
 
         self.assertEqual(result["rows_failed"], 1)
         self.assertEqual(result["rows_inserted"], 0)
@@ -318,7 +437,7 @@ class UploadCsvIngestionTests(unittest.TestCase):
         )
         mock_db = _build_mock_db()
 
-        result = upload_module.upload_csv(file=_fake_upload_file(csv_text), db=mock_db)
+        result = _run_ingestion(csv_text, mock_db)
 
         self.assertEqual(result["rows_processed"], 2)
         self.assertEqual(result["rows_inserted"], 1)
@@ -334,7 +453,7 @@ class UploadCsvIngestionTests(unittest.TestCase):
         csv_text = _csv(_row("POL-1", "SEÑERES", "Ana", farmers_id="111", farmid="5001"))
         mock_db = _build_mock_db()
 
-        result = upload_module.upload_csv(file=_fake_upload_file(csv_text, encoding="cp1252"), db=mock_db)
+        result = _run_ingestion(csv_text, mock_db, encoding="cp1252")
 
         self.assertEqual(result["rows_inserted"], 1)
         farmer = mock_db.tables[models.FarmerProfile].rows[0]
@@ -350,7 +469,7 @@ class UploadCsvIngestionTests(unittest.TestCase):
         )
         mock_db = _build_mock_db()
 
-        result = upload_module.upload_csv(file=_fake_upload_file(csv_text), db=mock_db)
+        result = _run_ingestion(csv_text, mock_db)
 
         self.assertEqual(result["rows_inserted"], 1)
         farmer = mock_db.tables[models.FarmerProfile].rows[0]
@@ -371,7 +490,7 @@ class UploadCsvIngestionTests(unittest.TestCase):
         csv_text = _csv(_row("1192155", "Cruz", "Ana", farmers_id="111", farmid="5001"))
         mock_db = _build_mock_db()
 
-        result = upload_module.upload_csv(file=_fake_upload_file(csv_text), db=mock_db)
+        result = _run_ingestion(csv_text, mock_db)
 
         self.assertEqual(result["rows_inserted"], 1)
         self.assertEqual(result["rows_failed"], 0)
@@ -399,7 +518,7 @@ class UploadCsvIngestionTests(unittest.TestCase):
         csv_text = _csv(*(rows + duplicate_rows))
         mock_db = _build_mock_db()
 
-        result = upload_module.upload_csv(file=_fake_upload_file(csv_text), db=mock_db)
+        result = _run_ingestion(csv_text, mock_db)
 
         self.assertEqual(result["rows_processed"], n + 50)
         self.assertEqual(result["rows_inserted"], n)
@@ -418,6 +537,96 @@ class UploadCsvIngestionTests(unittest.TestCase):
             {f.farmers_id for f in mock_db.tables[models.FarmerProfile].rows},
             {str(i) for i in range(n)},
         )
+
+
+class CropStageTranslationTests(unittest.TestCase):
+    """The ingest must translate whichever crop-stage vocabulary a CSV layout uses
+    into the Table 11 crop_stage_no, never copy it through. Before 2026-10-09 the
+    legacy export's PCIC agronomic code was written straight into crop_stage_no,
+    which AssessmentService reads as the 1=Booting/2=Flowering/3=Maturity scale --
+    so code 1 (Maximum Tillering) was assessed as Booting while code 4 (the real
+    Booting) fell outside {1,2,3} and was dropped."""
+
+    def setUp(self):
+        patcher = patch("app.api.upload._load_psgc_lookup", return_value=_FAKE_PSGC_LOOKUP)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _seed_for(self, **row_kwargs):
+        csv_text = _csv(_row("POL-1", "Cruz", "Ana", farmers_id="111", farmid="5001", **row_kwargs))
+        mock_db = _build_mock_db()
+        _run_ingestion(csv_text, mock_db)
+        seeds = [i for i in mock_db.added_instances if isinstance(i, models.RiskAssessment)]
+        self.assertEqual(len(seeds), 1)
+        return seeds[0]
+
+    def test_legacy_stage_code_is_translated_not_copied(self):
+        # Code 4 is Booting -- previously dropped because 4 is not in {1,2,3}.
+        seed = self._seed_for(stage_no=4, stage="4 - Booting Stg. (REPRODUCTIVE)")
+
+        self.assertEqual(seed.crop_stage_no, 1)
+        self.assertEqual(seed.stage_group, "Reproductive")
+
+    def test_legacy_tillering_code_is_not_mistaken_for_booting(self):
+        # Code 1 is Maximum/Minimum Tillering, which takes no wind damage at all
+        # (Table 11 Note 1) -- it must NOT land on crop_stage_no 1 (Booting).
+        seed = self._seed_for(stage_no=1, stage="1 - Mn. Tl. Stg. (EARLY VEGETATIVE)")
+
+        self.assertIsNone(seed.crop_stage_no)
+        self.assertEqual(seed.stage_group, "Early Vegetative")
+
+    def test_milking_and_flowering_share_a_stage_no_but_not_a_group(self):
+        flowering = self._seed_for(stage_no=5, stage="5 - Flowering Stg. (REPRODUCTIVE)")
+        milking = self._seed_for(stage_no=6, stage="6 - Milking Stg. (LATE REPRODUCTIVE)")
+
+        self.assertEqual(flowering.crop_stage_no, milking.crop_stage_no)
+        self.assertEqual(flowering.stage_group, "Reproductive")
+        self.assertEqual(milking.stage_group, "Late Reproductive")
+
+    def test_unresolvable_stage_still_ingests_the_row(self):
+        # "Panicle Initiation/Booting" is deliberately unmapped (it merges a
+        # no-damage stage with an eligible one and PCIC has not supplied a
+        # days-after-transplanting threshold). The row must still land.
+        header = (
+            "PROVINCE,MUNICIPALITY,BARANGAY,CIC NO,FARMERSID,FARMER NAME,FARMID,"
+            "AREA,AMOUNT OF COVER,Stage of Crop,EFFECTIVITY DATE,EXPIRY DATE"
+        )
+        csv_text = header + "\n" + (
+            "Bukidnon,Malaybalay,Casisang,1742153,29136,\"ABANES, ALFONSO F.\",365827,"
+            "1,\"20,000.00\",Panicle Initiation/Booting,08/15/2025,02/28/2026"
+        ) + "\n"
+        mock_db = _build_mock_db()
+
+        result = _run_ingestion(csv_text, mock_db)
+
+        self.assertEqual(result["rows_inserted"], 1)
+        self.assertEqual(result["rows_failed"], 0)
+        seed = [i for i in mock_db.added_instances if isinstance(i, models.RiskAssessment)][0]
+        self.assertIsNone(seed.crop_stage_no)
+        self.assertIsNone(seed.stage_group)
+
+    def test_new_layout_text_label_resolves(self):
+        header = (
+            "PROVINCE,MUNICIPALITY,BARANGAY,CIC NO,FARMERSID,FARMER NAME,FARMID,"
+            "AREA,AMOUNT OF COVER,Stage of Crop,EFFECTIVITY DATE,EXPIRY DATE"
+        )
+        csv_text = header + "\n" + (
+            "Bukidnon,Malaybalay,Casisang,1742153,29136,\"ABANES, ALFONSO F.\",365827,"
+            "1,\"20,000.00\",Dough Stage,08/15/2025,02/28/2026"
+        ) + "\n"
+        mock_db = _build_mock_db()
+
+        result = _run_ingestion(csv_text, mock_db)
+
+        self.assertEqual(result["rows_inserted"], 1)
+        seed = [i for i in mock_db.added_instances if isinstance(i, models.RiskAssessment)][0]
+        self.assertEqual(seed.crop_stage_no, 3)
+        self.assertEqual(seed.stage_group, "Maturity")
+        # And the combined name field was split on the way through.
+        farmer = [i for i in mock_db.added_instances if isinstance(i, models.FarmerProfile)][0]
+        self.assertEqual(farmer.last_name, "ABANES")
+        self.assertEqual(farmer.first_name, "ALFONSO")
+
 
 
 if __name__ == "__main__":
