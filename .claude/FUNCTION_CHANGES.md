@@ -4,6 +4,58 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-09] - Sprint 3: CSV Ingest Reuses Preloaded Boundaries + Ingestion Test Harness Fix
+
+Verification of the crop-stage branch below on Cristian's PC. The first run
+of the suite failed every `test_upload_csv_ingestion.py` test, and the real
+upload of `PCIC10 GPX 11-05-2025 WITH EXISTING IC AFFECTED BY TY.csv` gave
+1,055 inserted / 14 skipped / **45 failed** (expected 0), which left the
+`.gpkg` upload at 1,055 updated / 45 failed.
+
+All 45 failures were one barangay: `POBLACION (ALEGRIA)`, Alegria, Surigao del
+Norte. The exact-name lookup missed, `_resolve_psgc_code()` stripped the
+parenthetical to reach `POBLACION` (`1606701001`), and the ingest inserted a
+new boundary with that code. `tbl_admin_boundaries` has been preloaded
+nationwide since 2026-09-30, so the row already existed and the insert hit
+`tbl_admin_boundaries_psgc_code_key`. This bug predates the crop-stage
+branch; the new export is the first file to contain such a variant.
+
+### 1. File: `backend/app/api/upload.py`
+* **`_ingest_row()`**: after `_resolve_psgc_code()` succeeds, looks up an
+  existing `AdminBoundary` by `psgc_code` and reuses it. Only inserts a new
+  boundary when none exists. The caller still caches the result under the
+  CSV's own spelling, so the extra query runs once per variant per upload.
+
+### 2. File: `backend/tests/test_upload_csv_ingestion.py`
+* **`_extract_filter()`**: handles `Model.column.is_(True)` — its `.right`
+  is a `True_`/`False_` constant with no `.value`. `CropStageResolver.load()`
+  uses this filter, so every ingestion run raised `AttributeError` in
+  `_prefetch_caches()` and returned `None` (the cause of all 19 failures).
+  Added `False_`, `True_` imports.
+* **`_run_ingestion()`**: raises `AssertionError` with the `mark_error()`
+  message instead of returning `None`, so a swallowed crash is visible.
+* New **`test_name_variant_reuses_existing_boundary_by_psgc_code`**.
+* `test_repeated_boundary_across_many_rows_is_only_queried_once`: expected
+  `AdminBoundary` query count 2 → 3 (the new `psgc_code` lookup).
+
+### 3. File: `.claude/LOCAL_SERVER_SETUP.md` (new)
+* Runbook for running the full stack on Cristian's PC without Docker:
+  PostgreSQL, backend, native GeoServer 3.0.1 (datastore host `localhost`),
+  frontend, startup order, upload order, and known non-bugs (Active Insurance
+  Only filter, raster overlay not clickable). No secrets in the file.
+
+### Status / Next Steps
+* Applied `backend/migrations/2026-10-09_crop_stage_mapping.sql` on Cristian's
+  PC's DB (2026-10-09): 17 mapping rows seeded.
+* After the harness fix, `test_upload_csv_ingestion.py` passed 19/19
+  (2026-10-09), before the boundary fix and new test.
+* To do: re-run the suite, re-upload the CSV (expect the 45 rows to insert),
+  then re-upload the `.gpkg`.
+* Pre-existing, not fixed here: 10 `test_farms_api.py` tests fail on `develop`
+  too. They call `list_farms()` without `municipality`/`farmer_id`, so the
+  truthy FastAPI `Query(None)` default triggers `.join()` on the fake query
+  (since `273532d`).
+
 ## [2026-10-09] - Sprint 3: Second PABS/GPX CSV Layout + Crop-Stage Translation
 
 The client's newer export ("PCIC10 GPX 11-05-2025 WITH EXISTING IC AFFECTED BY

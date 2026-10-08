@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
+from sqlalchemy.sql.elements import False_, True_
 
 from app.api import upload as upload_module
 from app.models import models
@@ -47,8 +48,9 @@ def _run_ingestion(csv_text: str, mock_db, encoding: str = "utf-8", filename: st
     dict _run_csv_ingestion() hands to upload_jobs.mark_done() -- the same payload
     GET /csv/status/{job_id} eventually serves to the frontend.
 
-    Returns None if the run errored out instead (mark_error), which the failure
-    tests assert on.
+    Fails the calling test with the mark_error() message if the run errored out
+    instead -- _run_csv_ingestion() swallows its own exceptions, so without this
+    a crash surfaces only as an opaque None result.
     """
     outcome = {}
 
@@ -72,7 +74,9 @@ def _run_ingestion(csv_text: str, mock_db, encoding: str = "utf-8", filename: st
     ):
         upload_module._run_csv_ingestion("job-test", filename, _dataframe(csv_text, encoding))
 
-    return outcome.get("result")
+    if "error" in outcome:
+        raise AssertionError(f"CSV ingestion errored: {outcome['error']}")
+    return outcome["result"]
 
 
 def _stage_mapping(source_code=None, source_label=None, pcic_stage="XX", crop_stage_no=None, stage_group=None):
@@ -128,8 +132,14 @@ def _extract_filter(criterion):
     # Function wrapping it (whose .clauses holds the wrapped column); .right is
     # the bound literal/list (has .value). upload_csv() only ever wraps columns
     # in func.upper(), so that's the only transform simulated here.
+    # "Model.column.is_(True)" (CropStageResolver.load()) is the exception: its
+    # .right is a True_/False_ constant with no .value, compared here by equality.
     left = criterion.left
-    value = criterion.right.value
+    right = criterion.right
+    if isinstance(right, (True_, False_)):
+        value = isinstance(right, True_)
+    else:
+        value = right.value
     is_in = getattr(criterion.operator, "__name__", "") == "in_op"
     if getattr(left, "name", None) == "upper" and hasattr(left, "clauses"):
         inner = list(left.clauses)[0]
@@ -275,12 +285,12 @@ class UploadCsvIngestionTests(unittest.TestCase):
         # spans far fewer distinct boundaries (the same barangay repeats across
         # ~10-20 rows on average), and the original per-row implementation
         # re-queried the database for the same boundary on every single row.
-        # Expected count is 2, not 1: _prefetch_caches() does one whole-table
+        # Expected count is 3, not 1: _prefetch_caches() does one whole-table
         # `.all()` query up front (query #1), and this boundary doesn't exist yet
-        # in the fake DB, so the first row still falls back to one real lookup
-        # (query #2) before creating + caching it -- rows 2 and 3 then hit that
-        # cache and issue no further queries, so the count still doesn't scale
-        # with the number of repeated rows.
+        # in the fake DB, so the first row still falls back to one name lookup
+        # (query #2) and one psgc_code lookup (query #3) before creating + caching
+        # it -- rows 2 and 3 then hit that cache and issue no further queries, so
+        # the count still doesn't scale with the number of repeated rows.
         csv_text = _csv(
             _row("POL-1", "Cruz", "Ana", farmers_id="111", farmid="5001"),
             _row("POL-2", "Reyes", "Ben", farmers_id="222", farmid="5002"),
@@ -290,7 +300,35 @@ class UploadCsvIngestionTests(unittest.TestCase):
 
         _run_ingestion(csv_text, mock_db)
 
-        self.assertEqual(mock_db.query_call_counts.get(models.AdminBoundary, 0), 2)
+        self.assertEqual(mock_db.query_call_counts.get(models.AdminBoundary, 0), 3)
+
+    def test_name_variant_reuses_existing_boundary_by_psgc_code(self):
+        # Regression test for the 2026-10-09 PCIC10 export: 'POBLACION (ALEGRIA)'
+        # missed the name lookup, _resolve_psgc_code() stripped the parenthetical
+        # to reach 'POBLACION' (1606701001) -- a boundary already preloaded under
+        # that spelling -- and the ingest tried to insert it a second time, failing
+        # all 45 such rows on tbl_admin_boundaries_psgc_code_key.
+        mock_db = _build_mock_db()
+        existing = models.AdminBoundary(
+            psgc_code="1001312012", province="BUKIDNON", municipality="MALAYBALAY", barangay="CASISANG"
+        )
+        mock_db.add(existing)
+        csv_text = _csv(
+            _row("POL-1", "Cruz", "Ana", farmers_id="111", farmid="5001").replace(
+                ",Casisang,", ",Casisang (Pob.),", 1
+            ),
+            _row("POL-2", "Reyes", "Ben", farmers_id="222", farmid="5002").replace(
+                ",Casisang,", ",Casisang (Pob.),", 1
+            ),
+        )
+
+        result = _run_ingestion(csv_text, mock_db)
+
+        self.assertEqual(result["rows_failed"], 0)
+        self.assertEqual(result["rows_inserted"], 2)
+        self.assertEqual(mock_db.tables[models.AdminBoundary].rows, [existing])
+        farms = mock_db.tables[models.Farm].rows
+        self.assertEqual({farm.boundary_id for farm in farms}, {existing.boundary_id})
 
     def test_same_rsbsa_no_across_rows_is_only_queried_once(self):
         # Expected count is 2, not 1: _prefetch_caches() issues one batched

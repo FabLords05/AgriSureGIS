@@ -420,9 +420,20 @@ def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> 
                     f"No PSGC code on file for {boundary_key}. Add it to "
                     "app/data/psgc_nationwide_boundaries.csv before ingesting this row."
                 )
-            boundary = models.AdminBoundary(psgc_code=psgc_code, **payload["boundary"])
-            db.add(boundary)
-            db.flush()
+            # A name miss that _resolve_psgc_code() still resolved (e.g. 'POBLACION
+            # (ALEGRIA)' -> 'POBLACION') usually points at a boundary that already
+            # exists under the reference file's own spelling -- tbl_admin_boundaries
+            # is preloaded nationwide -- so reuse it rather than insert a second row
+            # that would violate tbl_admin_boundaries_psgc_code_key.
+            boundary = (
+                db.query(models.AdminBoundary)
+                .filter(models.AdminBoundary.psgc_code == psgc_code)
+                .first()
+            )
+            if boundary is None:
+                boundary = models.AdminBoundary(psgc_code=psgc_code, **payload["boundary"])
+                db.add(boundary)
+                db.flush()
 
     # Farmer identity: prefer farmers_id (100% populated in real PABS exports)
     # over rsbsa_no (blank on ~29% of real rows). Never match on a blank/None
