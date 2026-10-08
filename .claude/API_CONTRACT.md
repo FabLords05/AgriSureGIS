@@ -22,6 +22,11 @@
   - **Description:** Upload GPX track files to build farm boundary geometries.
   - **Payload:** Multipart Form (GPX file, optional `farmer_id`, `farm_id`).
   - **Matching:** If `farmer_id`/`farm_id` are both omitted, the farmer/farm is auto-detected from the uploaded filename (pattern `TAB_<LASTNAME> , <FIRSTNAME> <MI>._<ID1>_<ID2>_<DATE>.gpx`) via `GpxFarmerMatcherService` — ID-based match first, normalized-name fallback. Returns 404/400 with no DB change if no match (or an ambiguous name match) is found; the caller falls back to supplying both IDs manually. Providing exactly one of the two IDs is a 400.
+* **POST `/api/upload/gpkg`**
+  - **Description:** Upload a GeoPackage holding many farm boundary polygons (one feature per walked farm) and attach each to its existing farm. Update-only — no farmer/farm/policy records are created.
+  - **Payload:** Multipart Form (`.gpkg` file). Layer(s) must be EPSG:4326; Polygon and MultiPolygon features accepted.
+  - **Matching:** Per feature, `GpxFarmerMatcherService.match_parsed` using the feature's `FARMERSID` (as id1), `FARMID` (as id2) and `FARMER NAME` attributes — same rules as GPX auto-detect. Duplicate FARMIDs: latest walk date (from `file_name`) wins. Each feature runs in its own SAVEPOINT; unmatched/ambiguous/bad-geometry features are reported, not fatal.
+  - **Response:** `{status, message, features_total, features_updated, features_failed, duplicates_skipped, failures: [{feature, file_name, farm_reference, error}] (≤200)}`. 400 if the file isn't a readable GeoPackage, has no feature layer, or isn't EPSG:4326.
 
 ## 3. PAGASA Bulletin Monitoring
 * **GET `/api/bulletins/`** - List all parsed tropical cyclone bulletins.

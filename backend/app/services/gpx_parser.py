@@ -36,9 +36,27 @@ class GpxParserService:
         if points[0] != points[-1]:
             points.append(points[0])
 
-        polygon = Polygon(points)
-        if not polygon.is_valid:
-            polygon = polygon.buffer(0)
+        return to_multipolygon_wkt(Polygon(points))
 
-        multipolygon = MultiPolygon([polygon])
-        return WKTElement(multipolygon.wkt, srid=4326)
+
+def to_multipolygon_wkt(geometry) -> WKTElement:
+    """
+    Normalizes a farm boundary geometry (Polygon or MultiPolygon) into the
+    MultiPolygon/SRID 4326 shape tbl_farms.location_geom stores. Shared by the
+    GPX parser above and GpkgParserService -- the client's real GeoPackage mixes
+    Polygon and MultiPolygon features under one layer. buffer(0) repairs an
+    invalid (e.g. self-intersecting walked) ring, and can itself hand back a
+    MultiPolygon, so both shapes are handled after the repair too.
+    """
+    if not geometry.is_valid:
+        geometry = geometry.buffer(0)
+
+    if geometry.is_empty:
+        raise ValueError("Farm boundary polygon is empty.")
+
+    if isinstance(geometry, Polygon):
+        geometry = MultiPolygon([geometry])
+    elif not isinstance(geometry, MultiPolygon):
+        raise ValueError(f"Farm boundary must be a polygon, got {geometry.geom_type}.")
+
+    return WKTElement(geometry.wkt, srid=4326)

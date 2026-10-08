@@ -101,7 +101,7 @@ gantt
 ### Sprint 3: GPX Parser & Spatial Boundary Processing
 * **Objective:** Ingest farm boundaries and check coordinate topologies.
 * **Step-by-Step Backend Tasks:**
-  1. **GPX Ingestion:** Endpoint `/api/upload/gpx` accepting `.gpx` files.
+  1. **GPX Ingestion:** Endpoint `/api/upload/gpx` accepting `.gpx` files; endpoint `/api/upload/gpkg` accepting a `.gpkg` GeoPackage of many farm polygons (the client's real data format, added 2026-10-08).
   2. **GPX Parsing:** Use `gpxpy` to parse trackpoints (Lat, Lon, Elevation) from GPX files.
   3. **Geometry Construction:** Convert coordinate streams into Shapely `Polygon` structures.
   4. **Coordinate Transformation:** Standardize all coordinates to WGS 84 (SRID 4326) using `pyproj` and `GeoPandas`.

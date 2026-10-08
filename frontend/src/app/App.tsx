@@ -15,7 +15,7 @@ import { AccountSettingsModule } from "./components/AccountSettingsModule";
 import { AppNotification } from "./components/mockData";
 import {
   Bulletin, getBulletins, logoutUser, SystemUser,
-  uploadCsv, uploadGpx, getCsvUploadStatus,
+  uploadCsv, uploadGpx, uploadGpkg, getCsvUploadStatus,
 } from "@/lib/api";
 import { useFarmsData } from "@/lib/useFarmsData";
 import { CurrentUser, loadPersistedUser, persistUser, persistToken, clearPersistedUser } from "@/lib/authStorage";
@@ -289,19 +289,33 @@ export default function App() {
   // GpxFarmerMatcherService) -- uploaded one at a time, not in parallel, so a
   // large batch doesn't hammer the backend all at once. Each file completing
   // is itself the progress signal (no backend job needed, unlike CSV above).
+  // A .gpkg (2026-10-08, the client's real boundary data format) goes through
+  // the same button but carries many farms in one file -- its per-feature
+  // results are folded into the same succeeded/failures counts, so the toast,
+  // notification and failure-details modal below work unchanged.
   const handleGpxFilesSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
     e.target.value = ""; // allow re-selecting the same filename(s) later
     if (files.length === 0) return;
 
     let succeeded = 0;
+    let duplicatesSkipped = 0;
     const failures: string[] = [];
     setGpxUploadProgress({ current: 0, total: files.length });
     try {
       for (const [index, file] of files.entries()) {
         try {
-          await uploadGpx(file);
-          succeeded++;
+          if (file.name.toLowerCase().endsWith(".gpkg")) {
+            const result = await uploadGpkg(file);
+            succeeded += result.features_updated;
+            duplicatesSkipped += result.duplicates_skipped;
+            for (const f of result.failures) failures.push(`${f.file_name}: ${f.error}`);
+            const unlisted = result.features_failed - result.failures.length;
+            if (unlisted > 0) failures.push(`${file.name}: ${unlisted} more feature(s) not applied (list truncated).`);
+          } else {
+            await uploadGpx(file);
+            succeeded++;
+          }
         } catch (error) {
           failures.push(`${file.name}: ${error instanceof Error ? error.message : "upload failed"}`);
         }
@@ -309,8 +323,9 @@ export default function App() {
       }
 
       const timestamp = new Date().toLocaleTimeString("en-PH", { hour: "2-digit", minute: "2-digit" }) + " PHT";
+      const duplicateSuffix = duplicatesSkipped > 0 ? ` (${duplicatesSkipped} older duplicate walk(s) skipped)` : "";
       if (failures.length === 0) {
-        const message = `Uploaded ${succeeded} GPX file(s) successfully.`;
+        const message = `Updated ${succeeded} farm boundary(ies) successfully.${duplicateSuffix}`;
         toast.success(message);
         setNotifications(ns => [{
           id: `gpx-upload-${Date.now()}`,
@@ -321,7 +336,7 @@ export default function App() {
           read: false,
         }, ...ns]);
       } else {
-        const message = `${succeeded} succeeded, ${failures.length} failed.`;
+        const message = `${succeeded} succeeded, ${failures.length} failed.${duplicateSuffix}`;
         toast.error(message, {
           action: {
             label: "View details",
