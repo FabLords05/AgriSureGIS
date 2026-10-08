@@ -243,7 +243,22 @@ export default function App() {
           const result = status.result;
           const failedSuffix = result.rows_failed > 0 ? `, ${result.rows_failed} failed` : "";
           const message = `${result.message} (${result.rows_inserted} inserted, ${result.rows_skipped} skipped${failedSuffix})`;
-          toast.success(message);
+          // Per-row reasons were previously dropped on the floor for CSV (only the
+          // GPX/GPKG path surfaced them), so a row rejected for e.g. an unmappable
+          // PSGC boundary showed up as nothing but a count. Reuses the same modal.
+          const rowFailures = (result.failures ?? []).map(
+            f => `Row ${f.row}${f.policy_no ? ` (policy ${f.policy_no})` : ""}: ${f.error}`,
+          );
+          if (rowFailures.length > 0) {
+            toast.warning(message, {
+              action: {
+                label: "View details",
+                onClick: () => { setUploadFailureDetails(rowFailures); setShowUploadDetails(true); },
+              },
+            });
+          } else {
+            toast.success(message);
+          }
           setNotifications(ns => [{
             id: `csv-upload-${job_id}`,
             type: result.rows_failed > 0 ? "warning" : "success",

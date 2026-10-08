@@ -152,6 +152,31 @@ class IndemnityFactorMatrix(Base):
     is_active = Column(Boolean, nullable=False, default=True)
 
 
+class CropStageMapping(Base):
+    """Translates the crop-stage vocabulary of either real PCIC CSV export into the
+    two taxonomies the lookup tables use. The legacy export keys on `source_code`
+    (its integer "Stage No."), the newer PABS/GPX export on `source_label` (its
+    lowercased "Stage of Crop" text); exactly one is populated per row.
+
+    `crop_stage_no` NULL means "ingest the row but never assess it" -- Table 11
+    Note 1 stages, a harvested crop, or the deliberately-unresolved PI/BS pairing.
+    `stage_group` is resolved independently of `crop_stage_no`, because Milking and
+    Flowering share crop_stage_no 2 while sitting in different Table 1 groups.
+    See CropStageResolver and init_schema.sql's seed comment.
+    """
+
+    __tablename__ = "tbl_crop_stage_mapping"
+
+    mapping_id = Column(Integer, primary_key=True, index=True)
+    source_code = Column(Integer)
+    source_label = Column(String(80))
+    pcic_stage = Column(String(20), nullable=False)
+    crop_stage_no = Column(Integer)
+    stage_group = Column(String(30))
+    notes = Column(String)
+    is_active = Column(Boolean, nullable=False, default=True)
+
+
 class RiskAssessment(Base):
     __tablename__ = "tbl_risk_assessment"
 
@@ -162,6 +187,9 @@ class RiskAssessment(Base):
     indemnity_matrix_id = Column(Integer, ForeignKey("tbl_indemnity_factor_matrix.indemnity_id", ondelete="SET NULL"))
     crop_stage_no = Column(Integer)
     crop_stage = Column(String(150))
+    # PCIC 5-stage group, resolved independently of crop_stage_no via
+    # tbl_crop_stage_mapping. NULL falls back to CROP_STAGE_TO_INDEMNITY_GROUP.
+    stage_group = Column(String(30))
     period_of_exposure = Column(Integer)
     wind_velocity = Column(Integer)
     indemnity_factor = Column(Numeric(7, 2))

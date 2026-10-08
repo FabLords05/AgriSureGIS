@@ -83,6 +83,10 @@ class AssessmentServiceTests(unittest.TestCase):
             raise AssertionError(f"Unexpected model queried in test: {model}")
 
         mock_db.query.side_effect = query_side_effect
+        # Exposed so a test can assert WHICH crop_stage_group the step-2 lookup
+        # filtered on -- the mock returns the same rule regardless, so the filter
+        # arguments are the only evidence the right bracket was chosen.
+        mock_db.indemnity_query = indemnity_query
         return mock_db
 
     @patch("app.services.assessment_service.ExposureCalculatorService.compute_for_typhoon")
@@ -92,7 +96,7 @@ class AssessmentServiceTests(unittest.TestCase):
         mock_compute.return_value = [summary]
 
         insurance = self._insurance_record()
-        prior = MagicMock(spec=RiskAssessment, crop_stage_no=2, crop_stage="Flowering")
+        prior = MagicMock(spec=RiskAssessment, crop_stage_no=2, crop_stage="Flowering", stage_group="Reproductive")
         # Flowering -> Reproductive stage group; 25.00% falls in the >20 to 25 bracket.
         yield_loss_rule = MagicMock(spec=RecsapMatrix, matrix_id=3, estimated_yield_loss=Decimal("25.00"))
         indemnity_rule = MagicMock(spec=IndemnityFactorMatrix, indemnity_id=8, indemnity_factor=Decimal("330.00"))
@@ -109,6 +113,7 @@ class AssessmentServiceTests(unittest.TestCase):
         self.assertEqual(result.indemnity_matrix_id, 8)
         self.assertEqual(result.crop_stage_no, 2)
         self.assertEqual(result.crop_stage, "Flowering")
+        self.assertEqual(result.stage_group, "Reproductive")
         self.assertEqual(result.period_of_exposure, 12)
         self.assertEqual(result.wind_velocity, 3)
         # I = (AC / 1000) * IF = (50000 / 1000) * 330.00 = 16500.0
@@ -123,7 +128,7 @@ class AssessmentServiceTests(unittest.TestCase):
         mock_compute.return_value = [summary]
 
         insurance = self._insurance_record()
-        prior = MagicMock(spec=RiskAssessment, crop_stage_no=5, crop_stage="Ripening")
+        prior = MagicMock(spec=RiskAssessment, crop_stage_no=5, crop_stage="Ripening", stage_group="Maturity")
 
         mock_db = self._build_mock_db(bulletin, [insurance], prior, yield_loss_rule=None)
 
@@ -131,6 +136,42 @@ class AssessmentServiceTests(unittest.TestCase):
 
         self.assertEqual(results, [])
         mock_db.commit.assert_called_once()
+
+    @patch("app.services.assessment_service.ExposureCalculatorService.compute_for_typhoon")
+    def test_milking_stage_uses_its_own_group_not_the_one_implied_by_crop_stage_no(self, mock_compute):
+        # Milking resolves to crop_stage_no 2, the same Table 11 row as Flowering
+        # (PCIC pairs FS/MS), but sits in the Late Reproductive indemnity group
+        # rather than Reproductive. Deriving the group from crop_stage_no -- which
+        # is what CROP_STAGE_TO_INDEMNITY_GROUP does -- would pay the wrong factor,
+        # so the row's own resolved stage_group has to win.
+        bulletin = self._bulletin()
+        summary = self._summary()
+        mock_compute.return_value = [summary]
+
+        insurance = self._insurance_record()
+        prior = MagicMock(
+            spec=RiskAssessment, crop_stage_no=2, crop_stage="Milking Stage", stage_group="Late Reproductive"
+        )
+        yield_loss_rule = MagicMock(spec=RecsapMatrix, matrix_id=3, estimated_yield_loss=Decimal("25.00"))
+        # >20 to 25, Late Reproductive -> 372.00 (Reproductive would be 330.00).
+        indemnity_rule = MagicMock(spec=IndemnityFactorMatrix, indemnity_id=13, indemnity_factor=Decimal("372.00"))
+
+        mock_db = self._build_mock_db(bulletin, [insurance], prior, yield_loss_rule, indemnity_rule)
+
+        results = AssessmentService.calculate_for_bulletin(1, 12, mock_db)
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].stage_group, "Late Reproductive")
+        # I = (50000 / 1000) * 372.00
+        self.assertEqual(results[0].final_indemnity_payment, 18600.0)
+
+        groups_filtered = {
+            criterion.right.value
+            for call in mock_db.indemnity_query.filter.call_args_list
+            for criterion in call.args
+            if getattr(criterion.left, "name", None) == "crop_stage_group"
+        }
+        self.assertEqual(groups_filtered, {"Late Reproductive"})
 
     @patch("app.services.assessment_service.ExposureCalculatorService.compute_for_typhoon")
     def test_calculate_for_bulletin_skips_summary_below_signal_threshold(self, mock_compute):

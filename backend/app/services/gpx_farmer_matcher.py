@@ -27,6 +27,11 @@ class GpxMatchResult:
     candidates: list[FarmerProfile] = field(default_factory=list)
 
 
+# A single letter, optionally dotted -- the shape a middle initial takes in every
+# real PCIC name field seen so far ("C.", "J", "S.").
+_INITIAL_RE = re.compile(r"^[A-Za-z]\.?$")
+
+
 class GpxFarmerMatcherService:
     """
     Matches an uploaded GPX boundary-walk file to an existing farmer/farm using only
@@ -41,18 +46,29 @@ class GpxFarmerMatcherService:
     @staticmethod
     def parse_farmer_name(name: str) -> tuple[str | None, str | None, str | None]:
         """Splits a 'LAST, FIRST [MIDDLE] M.' name into (last, first, middle_initial).
-        Shared by the GPX filename parser below and GeoPackage ingestion, whose
-        features carry the same convention in their 'FARMER NAME' attribute
-        (e.g. 'ABARICO, REPARADA C.')."""
+        Shared by the GPX filename parser below, GeoPackage ingestion and CSV
+        ingestion, all of which carry the same convention -- the GPKG and the newer
+        PABS CSV both in a 'FARMER NAME' field (e.g. 'ABARICO, REPARADA C.').
+
+        Everything between the comma and the trailing middle initial is the first
+        name. Taking only the first token (as this did before 2026-10-09) silently
+        truncated compound first names -- 131 of the 1,114 rows in the real PABS
+        export have three or more tokens, e.g. 'ACERO, ANNA MARIE S.' lost 'MARIE'.
+        A trailing token only counts as a middle initial when it actually looks like
+        one (a single letter, optionally dotted); otherwise it is part of the first
+        name, so 'SMITH, JOHN PAUL' keeps both words rather than reading 'PAUL' as
+        an initial.
+        """
         last_name = first_name = middle_initial = None
         if "," in name:
             last_raw, _, rest = name.partition(",")
             last_name = last_raw.strip() or None
             pieces = rest.strip().split()
             if pieces:
-                first_name = pieces[0]
-                if len(pieces) > 1:
+                if len(pieces) > 1 and _INITIAL_RE.match(pieces[-1]):
                     middle_initial = pieces[-1].rstrip(".") or None
+                    pieces = pieces[:-1]
+                first_name = " ".join(pieces) or None
         return last_name, first_name, middle_initial
 
     @classmethod
