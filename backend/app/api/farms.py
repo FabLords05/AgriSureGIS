@@ -7,6 +7,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
+from app.core.farmer_name import format_given_first
 from app.core.farms_cache import cache_farms_page, get_cached_farms_page
 from app.core.farms_view import fetch_latest_insurance_from_view, materialized_view_available
 from app.core.security import get_current_user
@@ -201,11 +202,10 @@ def list_farms(
             {
                 "farm_id": farm.farm_id,
                 "farmer_id": farm.farmer_id,
-                "farmer_name": (
-                    f"{farm.farmer.first_name} {farm.farmer.last_name}".strip()
-                    if farm.farmer
-                    else None
-                ),
+                # None (not "") when no name is on file, so the frontend's
+                # `farmer_name ?? "—"` fallback actually fires -- see
+                # app/core/farmer_name.py.
+                "farmer_name": format_given_first(farm.farmer),
                 "province": farm.boundary.province if farm.boundary else None,
                 "municipality": farm.boundary.municipality if farm.boundary else None,
                 "barangay": farm.boundary.barangay if farm.boundary else None,
@@ -421,7 +421,15 @@ def search_farmers(
     return {
         "status": "success",
         "data": [
-            {"farmer_id": r.farmer_id, "name": f"{r.first_name} {r.last_name}".strip()}
+            # `name` stays a non-empty string here (unlike list_farms' nullable
+            # farmer_name) because the suggestion list renders it as the clickable
+            # label -- a null/'' would render an invisible, unselectable row. A
+            # farmer with no name on file is labelled by id instead, so the gap is
+            # visible and still pickable rather than silently blank.
+            {
+                "farmer_id": r.farmer_id,
+                "name": format_given_first(r) or f"(unnamed farmer #{r.farmer_id})",
+            }
             for r in rows
         ],
     }

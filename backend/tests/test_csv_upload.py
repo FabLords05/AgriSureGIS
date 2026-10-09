@@ -61,15 +61,21 @@ class CsvUploadPreparationTests(unittest.TestCase):
                 "product_name": None,
             },
         )
+        # Stage values are carried RAW here and translated in _ingest_row() via
+        # CropStageResolver (2026-10-09) -- "Stage No." is PCIC's 0-9 agronomic code,
+        # not the Table 11 1/2/3 scale, so prepare_row_payload must NOT emit a
+        # crop_stage_no of its own.
         self.assertEqual(
             payload["crop_stage_seed"],
             {
-                "crop_stage_no": "1",
+                "stage_code": "1",
+                "stage_label": None,
                 "crop_stage": "Vegetative",
                 "estimated_damage": Decimal("20.50"),
                 "risk_exposure_amount": Decimal("10000.00"),
             },
         )
+        self.assertNotIn("crop_stage_no", payload["crop_stage_seed"])
         # adjuster_calculation no longer exists as a field anywhere -- it mapped to a
         # RiskAssessment kwarg that was never a real column and crashed every upload.
         self.assertNotIn("adjuster_calculation", payload["crop_stage_seed"])
@@ -161,6 +167,95 @@ class CsvUploadPreparationTests(unittest.TestCase):
         self.assertIsInstance(payload["insurance"]["policy_no"], str)
         self.assertEqual(payload["farmer"]["farmers_id"], "229159")
         self.assertEqual(payload["farm"]["csv_farm_reference"], "1033691")
+
+
+class NewPabsGpxLayoutTests(unittest.TestCase):
+    """The client's newer export
+    ("PCIC10 GPX 11-05-2025 WITH EXISTING IC AFFECTED BY TY.csv", 42 columns).
+    Only 9 of its headers collide with the legacy layout after normalization, so
+    everything else resolves through prepare_row_payload()'s alias list."""
+
+    @staticmethod
+    def _row(**overrides):
+        row = {
+            "REGION": "X",
+            "FARMERSID": 29136,
+            "FARMER NAME": "ABANES, ALFONSO F.",
+            "CIC NO": 1742153,
+            "EFFECTIVITY DATE": "08/15/2025",
+            "EXPIRY DATE": "02/28/2026",
+            "PROGRAM TYPE": "RSBSA",
+            "VARIETY NAME": "NSIC RC160 (TUBIGAN 14) TPR",
+            "FARMID": 365827,
+            "AREA": "1",
+            "PROVINCE": "Surigao del Norte",
+            "MUNICIPALITY": "MAINIT",
+            "BARANGAY": "MAGPAYANG",
+            "AMOUNT OF COVER": "20,000.00",
+            "PHASE": "105",
+            "Stage of Crop": "Dough Stage",
+            "PERIOD OF EXPOSURE, HRS": "SN3_12",
+        }
+        row.update(overrides)
+        return row
+
+    def test_new_header_spellings_resolve_to_the_same_payload_fields(self):
+        payload = prepare_row_payload(pd.DataFrame([self._row()]).iloc[0])
+
+        self.assertEqual(payload["boundary"], {
+            "province": "SURIGAO DEL NORTE", "municipality": "MAINIT", "barangay": "MAGPAYANG",
+        })
+        # "CIC NO" is this layout's name for the policy number, "AREA" for
+        # AreaInsured, "AMOUNT OF COVER" for AmountofCover.
+        self.assertEqual(payload["insurance"]["policy_no"], "1742153")
+        self.assertEqual(payload["insurance"]["amount_cover"], Decimal("20000.00"))
+        self.assertEqual(payload["farm"]["area_size"], Decimal("1"))
+        self.assertEqual(payload["farm"]["csv_farm_reference"], "365827")
+        self.assertEqual(payload["farmer"]["farmers_id"], "29136")
+
+    def test_combined_farmer_name_is_split_into_three_fields(self):
+        payload = prepare_row_payload(pd.DataFrame([self._row()]).iloc[0])
+
+        self.assertEqual(payload["farmer"]["last_name"], "ABANES")
+        self.assertEqual(payload["farmer"]["first_name"], "ALFONSO")
+        self.assertEqual(payload["farmer"]["middle_name"], "F")
+
+    def test_compound_first_name_survives_the_split(self):
+        # 131 of the real file's 1,114 rows carry three or more tokens after the
+        # comma; taking only the first would drop "MARIE" here.
+        payload = prepare_row_payload(
+            pd.DataFrame([self._row(**{"FARMER NAME": "ACERO, ANNA MARIE S."})]).iloc[0]
+        )
+
+        self.assertEqual(payload["farmer"]["last_name"], "ACERO")
+        self.assertEqual(payload["farmer"]["first_name"], "ANNA MARIE")
+        self.assertEqual(payload["farmer"]["middle_name"], "S")
+
+    def test_legacy_name_columns_win_over_combined_field_when_both_present(self):
+        payload = prepare_row_payload(
+            pd.DataFrame([self._row(**{"Surname": "Cruz", "Firstname": "Ana"})]).iloc[0]
+        )
+
+        self.assertEqual(payload["farmer"]["last_name"], "CRUZ")
+        self.assertEqual(payload["farmer"]["first_name"], "ANA")
+
+    def test_stage_of_crop_is_carried_as_the_label_not_a_code(self):
+        payload = prepare_row_payload(pd.DataFrame([self._row()]).iloc[0])
+
+        self.assertEqual(payload["crop_stage_seed"]["stage_label"], "Dough Stage")
+        self.assertIsNone(payload["crop_stage_seed"]["stage_code"])
+        # Falls back to "Stage of Crop" for the human-readable column, since this
+        # layout has no "Stage" column.
+        self.assertEqual(payload["crop_stage_seed"]["crop_stage"], "Dough Stage")
+
+    def test_thousands_separated_cover_and_dash_nulls_parse(self):
+        # The newer export quotes money with separators and writes "-" for null.
+        payload = prepare_row_payload(
+            pd.DataFrame([self._row(**{"AMOUNT OF COVER": "56,485.20", "AREA": "-"})]).iloc[0]
+        )
+
+        self.assertEqual(payload["insurance"]["amount_cover"], Decimal("56485.20"))
+        self.assertIsNone(payload["farm"]["area_size"])
 
 
 class NormalizeHeaderTests(unittest.TestCase):

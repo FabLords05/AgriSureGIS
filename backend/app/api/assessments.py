@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.farmer_name import format_surname_first
 from app.core.security import get_current_user
 from app.models.models import AdminBoundary, AreaExposureSummary, FarmerProfile, InsuranceRecord, RiskAssessment, Typhoon
 from app.models.models import (
@@ -372,10 +373,9 @@ def _build_pabs_rows(db: Session) -> list[dict]:
             else None
         )
 
-        farmer_name = None
-        if farmer:
-            middle_initial = f" {farmer.middle_name[0]}." if farmer.middle_name else ""
-            farmer_name = f"{farmer.last_name}, {farmer.first_name}.{middle_initial}"
+        # Same shape as before ('ABANES, ALFONSO. F.'), but a farmer with no name
+        # on file now exports as an empty cell rather than a bare ', .'.
+        farmer_name = format_surname_first(farmer, with_middle_initial=True)
 
         rows.append(
             {

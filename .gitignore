@@ -70,3 +70,14 @@ LinuxCommands/
 ## pg_dump output -- data snapshots, not source, and can carry real
 ## farmer/insurance data (e.g. the local-to-remote-server migration dump).
 *.dump
+USTP CAPSTONE-20261008T140025Z-1-001/
+
+## Google Cloud / Earth Engine service-account keys. These hold a live private
+## key for a real GCP service account (e.g. webgis-pcic-*.json for
+## agrisure-ee@webgis-pcic.iam.gserviceaccount.com) -- a credential, never
+## source. Committing one publishes it to GitHub permanently, so it is matched
+## by filename pattern here rather than relying on remembering to stage by path.
+webgis-pcic-*.json
+*-service-account*.json
+*serviceaccount*.json
+gcp-credentials*.json

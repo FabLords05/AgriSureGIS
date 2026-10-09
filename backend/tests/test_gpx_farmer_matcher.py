@@ -42,6 +42,50 @@ class ParseGpxFilenameTests(unittest.TestCase):
         self.assertIsNone(parsed.id2)
 
 
+class ParseFarmerNameTests(unittest.TestCase):
+    """parse_farmer_name() is shared by the GPX filename parser, GeoPackage
+    ingestion and (since 2026-10-09) CSV ingestion of the newer PABS export's
+    combined "FARMER NAME" column -- all three must agree on the split, or a
+    farmer created from the CSV won't match the .gpkg feature carrying its
+    boundary."""
+
+    def test_splits_last_first_and_middle_initial(self):
+        self.assertEqual(
+            GpxFarmerMatcherService.parse_farmer_name("ABARICO, REPARADA C."),
+            ("ABARICO", "REPARADA", "C"),
+        )
+
+    def test_compound_first_name_is_kept_whole(self):
+        # 131 of the real export's 1,114 rows carry three or more tokens after the
+        # comma; taking only the first dropped "MARIE" here before 2026-10-09.
+        self.assertEqual(
+            GpxFarmerMatcherService.parse_farmer_name("ACERO, ANNA MARIE S."),
+            ("ACERO", "ANNA MARIE", "S"),
+        )
+
+    def test_suffix_stays_with_the_first_name(self):
+        self.assertEqual(
+            GpxFarmerMatcherService.parse_farmer_name("APAL, ROY SR. C."),
+            ("APAL", "ROY SR.", "C"),
+        )
+
+    def test_trailing_word_that_is_not_an_initial_is_part_of_the_first_name(self):
+        self.assertEqual(
+            GpxFarmerMatcherService.parse_farmer_name("SMITH, JOHN PAUL"),
+            ("SMITH", "JOHN PAUL", None),
+        )
+
+    def test_single_first_name_has_no_middle_initial(self):
+        self.assertEqual(
+            GpxFarmerMatcherService.parse_farmer_name("SMITH, JOHN"),
+            ("SMITH", "JOHN", None),
+        )
+
+    def test_name_without_a_comma_yields_nothing(self):
+        self.assertEqual(GpxFarmerMatcherService.parse_farmer_name("UNSTRUCTURED NAME"), (None, None, None))
+
+
+
 def _mock_db(farmer_query, farm_query):
     mock_db = MagicMock()
 

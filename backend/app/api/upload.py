@@ -25,6 +25,7 @@ from app.core.farms_cache import invalidate_farms_cache
 from app.core.farms_view import refresh_farm_latest_insurance_view
 from app.core.security import get_current_user
 from app.models import models
+from app.services.crop_stage_resolver import CropStageResolver
 from app.services.gpkg_parser import GpkgParserService
 from app.services.gpx_farmer_matcher import GpxFarmerMatcherService
 from app.services.gpx_parser import GpxParserService
@@ -167,6 +168,52 @@ def _normalize_text_upper(value: Any) -> str | None:
     return normalized
 
 
+def _is_blank(value: Any) -> bool:
+    """True for the "nothing really stored here" values this ingest can leave behind
+    on a row it created earlier: None, or a string that's empty once trimmed.
+
+    tbl_farmers_profile.last_name/first_name are NOT NULL, so a CSV layout whose
+    name columns this parser didn't yet recognize stored '' rather than failing --
+    which is exactly how 952 nameless farmers landed in the database before the
+    'FARMER NAME' alias existed (2026-10-09). See _backfill_blank_fields().
+    """
+    if value is None:
+        return True
+    return isinstance(value, str) and value.strip() == ""
+
+
+def _backfill_blank_fields(instance: Any, payload: dict[str, Any], field_names: Iterable[str]) -> list[str]:
+    """Copies payload values onto an ALREADY-PERSISTENT instance, but only for the
+    fields currently blank on it -- never overwriting a value that's really there.
+
+    Why this exists: _ingest_row() resolves an existing farmer/farm purely as a
+    lookup and then used the row for nothing else, so any field this parser
+    couldn't read at the time that row was first created stayed wrong forever --
+    re-uploading the same CSV after the parser was fixed matched the broken row by
+    farmers_id and changed nothing. That made ingestion non-idempotent, which is
+    the root cause of blank farmer names in Spatial Analysis (2026-10-09).
+
+    Deliberately blank-only rather than "CSV always wins" (Fabio's call,
+    2026-10-09): the newer PABS export carries the farmer as one combined
+    'FARMER NAME' field, so letting it overwrite a non-blank name would let a
+    derived value clobber the legacy export's three discrete columns. Repairing a
+    blank can't lose information; overwriting can.
+
+    Returns the names of the fields actually changed, for the caller to log.
+    No db.add() is needed -- `instance` is already persistent, so SQLAlchemy's
+    dirty tracking emits the UPDATE within the caller's existing per-row SAVEPOINT.
+    """
+    changed = []
+    for name in field_names:
+        new_value = payload.get(name)
+        if _is_blank(new_value):
+            continue
+        if _is_blank(getattr(instance, name, None)):
+            setattr(instance, name, new_value)
+            changed.append(name)
+    return changed
+
+
 def _stringify_id(value: Any) -> str | None:
     """Coerces a pandas-inferred numeric ID column to text. Applies to every
     VARCHAR-mapped identifier read from the CSV (Policy No., FARMID, FarmersID,
@@ -247,36 +294,59 @@ def prepare_row_payload(row: Any) -> dict[str, Any]:
         "barangay": barangay,
     }
 
+    # The newer PABS/GPX export carries one combined "FARMER NAME" ('ABANES, ALFONSO F.')
+    # where the legacy export has three columns. Split it with the SAME parser the
+    # GeoPackage path uses on the same field, so a farmer created here and the .gpkg
+    # feature that later carries its boundary agree on the name -- that agreement is
+    # what makes GpxFarmerMatcherService's name-based fallback work.
+    last_name = _normalize_text_upper(get("Surname"))
+    first_name = _normalize_text_upper(get("Firstname"))
+    middle_name = _normalize_text_upper(get("Middlename"))
+    if not last_name and not first_name:
+        combined = _normalize_value(get("FARMER NAME"))
+        if combined:
+            parsed_last, parsed_first, parsed_middle = GpxFarmerMatcherService.parse_farmer_name(str(combined))
+            last_name = _normalize_text_upper(parsed_last)
+            first_name = _normalize_text_upper(parsed_first)
+            middle_name = middle_name or _normalize_text_upper(parsed_middle)
+
     farmer = {
-        "farmers_id": _stringify_id(_normalize_value(get("FarmersID"))),
+        "farmers_id": _stringify_id(_normalize_value(get("FarmersID", "FARMERSID"))),
         "rsbsa_no": _stringify_id(_normalize_value(get("RSBSA No."))),
-        "last_name": _normalize_text_upper(get("Surname")) or "",
-        "first_name": _normalize_text_upper(get("Firstname")) or "",
-        "middle_name": _normalize_text_upper(get("Middlename")),
+        "last_name": last_name or "",
+        "first_name": first_name or "",
+        "middle_name": middle_name,
     }
 
     farm = {
         "csv_farm_reference": _stringify_id(_normalize_value(get("FARMID", "Farm ID"))),
         "georef_id": _stringify_id(_normalize_value(get("Georef ID"))),
-        "area_size": _parse_decimal(get("AreaInsured")),
+        "area_size": _parse_decimal(get("AreaInsured", "AREA")),
     }
 
     insurance = {
-        "policy_no": _stringify_id(_normalize_value(get("Policy No."))) or "",
+        # The newer export calls the policy number "CIC NO".
+        "policy_no": _stringify_id(_normalize_value(get("Policy No.", "CIC NO"))) or "",
         "program_type": _normalize_value(get("Program Type")),
-        "product_name": _normalize_value(get("Product Name")),
+        "product_name": _normalize_value(get("Product Name", "VARIETY NAME")),
         "effectivity_date": _parse_date(get("Effectivity Date")),
         "expiry_date": _parse_date(get("Expiry Date")),
-        "amount_cover": _parse_decimal(get("AmountofCover")),
+        "amount_cover": _parse_decimal(get("AmountofCover", "AMOUNT OF COVER")),
     }
 
     # Not a real computed assessment -- just carries the CSV's own crop-stage/damage
     # figures forward so AssessmentService.calculate_for_bulletin() has a crop stage
     # to read for this policy once a real typhoon is assessed. risk_exposure_amount
     # is kept only to cross-check against estimated_damage, never persisted.
+    # Stage values are carried through RAW and translated in _ingest_row() via
+    # CropStageResolver -- this function stays DB-free so it remains unit-testable.
+    # "Stage No." is the legacy export's PCIC 0-9 agronomic code, NOT the Table 11
+    # 1/2/3 scale AssessmentService reads; writing it straight through (as this did
+    # before 2026-10-09) silently mis-staged every assessable row.
     crop_stage_seed = {
-        "crop_stage_no": _normalize_value(get("Stage No.")),
-        "crop_stage": _normalize_value(get("Stage")),
+        "stage_code": _normalize_value(get("Stage No.")),
+        "stage_label": _normalize_value(get("Stage of Crop")),
+        "crop_stage": _normalize_value(get("Stage", "Stage of Crop")),
         "estimated_damage": _parse_decimal(get("EstimatedDamage")),
         "risk_exposure_amount": _parse_decimal(get("RiskExposureAmount")),
     }
@@ -302,6 +372,10 @@ class _IngestCaches:
     farmers_by_farmers_id: dict[str, models.FarmerProfile] = field(default_factory=dict)
     farmers_by_rsbsa_no: dict[str, models.FarmerProfile] = field(default_factory=dict)
     farms_by_reference: dict[str, models.Farm] = field(default_factory=dict)
+    # Read-only for the whole upload, unlike the four above -- tbl_crop_stage_mapping
+    # is a ~17-row lookup nothing in this path writes to, so it is loaded once and
+    # never invalidated per row.
+    crop_stage: CropStageResolver | None = None
 
 
 def _prefetch_caches(prepared_rows: list[tuple[int, dict[str, Any]]], db: Session) -> _IngestCaches:
@@ -321,6 +395,7 @@ def _prefetch_caches(prepared_rows: list[tuple[int, dict[str, Any]]], db: Sessio
     within this same run.
     """
     caches = _IngestCaches()
+    caches.crop_stage = CropStageResolver.load(db)
 
     # tbl_admin_boundaries now covers the whole country (~42k barangay-level
     # rows as of the nationwide PSGC expansion, 2026-08-20) -- still cheaper to
@@ -391,9 +466,20 @@ def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> 
                     f"No PSGC code on file for {boundary_key}. Add it to "
                     "app/data/psgc_nationwide_boundaries.csv before ingesting this row."
                 )
-            boundary = models.AdminBoundary(psgc_code=psgc_code, **payload["boundary"])
-            db.add(boundary)
-            db.flush()
+            # A name miss that _resolve_psgc_code() still resolved (e.g. 'POBLACION
+            # (ALEGRIA)' -> 'POBLACION') usually points at a boundary that already
+            # exists under the reference file's own spelling -- tbl_admin_boundaries
+            # is preloaded nationwide -- so reuse it rather than insert a second row
+            # that would violate tbl_admin_boundaries_psgc_code_key.
+            boundary = (
+                db.query(models.AdminBoundary)
+                .filter(models.AdminBoundary.psgc_code == psgc_code)
+                .first()
+            )
+            if boundary is None:
+                boundary = models.AdminBoundary(psgc_code=psgc_code, **payload["boundary"])
+                db.add(boundary)
+                db.flush()
 
     # Farmer identity: prefer farmers_id (100% populated in real PABS exports)
     # over rsbsa_no (blank on ~29% of real rows). Never match on a blank/None
@@ -423,6 +509,16 @@ def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> 
         farmer = models.FarmerProfile(**farmer_payload)
         db.add(farmer)
         db.flush()
+    else:
+        # Repair a farmer this ingest created earlier under a CSV layout whose name
+        # columns weren't recognized yet -- without this, an existing-but-blank
+        # profile is matched by farmers_id and kept blank no matter how many times
+        # the corrected file is re-uploaded. Blank-only; see _backfill_blank_fields().
+        filled = _backfill_blank_fields(farmer, farmer_payload, ("last_name", "first_name", "middle_name"))
+        if filled:
+            logger.info(
+                "Backfilled %s on existing farmer farmers_id=%s", ", ".join(filled), farmer.farmers_id
+            )
 
     # Farm identity: same never-match-on-blank rule as farmer identity above.
     farm_payload = payload["farm"]
@@ -446,6 +542,17 @@ def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> 
         )
         db.add(farm)
         db.flush()
+    elif farm_payload["area_size"] and not farm.area_size:
+        # Same repair as the farmer above, for the one Farm field that has the same
+        # problem. Not routed through _backfill_blank_fields() because "blank" here
+        # is 0, not None/'' -- area_size is NOT NULL and the create path above
+        # coerces an unreadable AreaInsured/AREA column to 0, so 0 is this column's
+        # "never actually read" marker. A real farm is never 0 ha.
+        farm.area_size = farm_payload["area_size"]
+        logger.info(
+            "Backfilled area_size=%s on existing farm csv_farm_reference=%s",
+            farm.area_size, farm.csv_farm_reference,
+        )
 
     def _result(outcome: str) -> _RowIngestResult:
         return _RowIngestResult(
@@ -503,11 +610,20 @@ def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> 
             risk_exposure_amount,
             estimated_damage,
         )
+    # Translate whichever stage vocabulary this CSV layout uses into the Table 11
+    # crop_stage_no and the Table 1 stage_group. Both can legitimately come back
+    # None -- an ineligible stage (tillering, harvested) or the deliberately
+    # unresolved PI/BS pairing -- in which case the row still ingests and simply
+    # never produces an assessment.
+    resolver = caches.crop_stage or CropStageResolver.load(db)
+    resolved = resolver.resolve(stage_code=seed["stage_code"], stage_label=seed["stage_label"])
+
     db.add(
         models.RiskAssessment(
             insurance_records_id=insurance.insurance_records_id,
-            crop_stage_no=seed["crop_stage_no"],
+            crop_stage_no=resolved.crop_stage_no,
             crop_stage=seed["crop_stage"],
+            stage_group=resolved.stage_group,
             estimated_damage=estimated_damage,
             final_indemnity_payment=estimated_damage,
         )

@@ -7,11 +7,21 @@ from app.models.models import IndemnityFactorMatrix, RecsapMatrix
 
 # tbl_recsap_matrix's crop_stage_no (1=Booting, 2=Flowering, 3=Maturity) uses a
 # different, 3-stage taxonomy than tbl_indemnity_factor_matrix's crop_stage_group,
-# which follows PCIC's own 5-stage taxonomy. Mapping confirmed with Fabio; not
-# stated verbatim in the manuscript.
+# which follows PCIC's own 5-stage taxonomy.
+#
+# FALLBACK ONLY as of 2026-10-09. The stage group is now resolved independently of
+# crop_stage_no (CropStageResolver -> tbl_risk_assessment.stage_group) and passed in,
+# because the two are genuinely not a function of one another: Milking and Flowering
+# share crop_stage_no 2 while sitting in Late Reproductive and Reproductive
+# respectively. This map is consulted only when a row carries no stage_group.
+#
+# Booting moved Late Vegetative -> Reproductive at the same time (Fabio, 2026-10-09).
+# The real PABS export labels it "4 - Booting Stg. (REPRODUCTIVE)", and the full
+# assignment it implies leaves no group unused (Late Vegetative is MxTl). The
+# previous value was flagged in init_schema.sql as inferred and never confirmed.
 CROP_STAGE_TO_INDEMNITY_GROUP = {
-    1: "Late Vegetative",  # Booting
-    2: "Reproductive",  # Flowering
+    1: "Reproductive",  # Booting
+    2: "Reproductive",  # Flowering (Milking also resolves to 2, but to Late Reproductive)
     3: "Maturity",  # Maturity
 }
 
@@ -42,12 +52,20 @@ class ParametricAssessment:
         self.db = db
 
     def get_matrix_rule(
-        self, crop_stage_no: int, wind_signal_tcws: int, exposure_hours: int
+        self,
+        crop_stage_no: int,
+        wind_signal_tcws: int,
+        exposure_hours: int,
+        stage_group: str | None = None,
     ) -> ParametricRule | None:
         """Two-step PCIC lookup: (1) tbl_recsap_matrix for yield loss %, then
         (2) tbl_indemnity_factor_matrix for the indemnity factor, by yield-loss
         bracket and crop-stage group. Brackets are exclusive-lower/inclusive-upper
-        (e.g. ">10 to 15" matches yield_loss_min < x <= yield_loss_max)."""
+        (e.g. ">10 to 15" matches yield_loss_min < x <= yield_loss_max).
+
+        `stage_group` is the row's own resolved PCIC group; it falls back to
+        CROP_STAGE_TO_INDEMNITY_GROUP when absent, which is what pre-2026-10-09
+        rows (and any row whose stage could not be resolved) carry."""
         bucketed_hours = _bucket_exposure_hours(exposure_hours)
         if bucketed_hours is None:
             return None
@@ -65,7 +83,7 @@ class ParametricAssessment:
         if yield_loss_rule is None:
             return None
 
-        stage_group = CROP_STAGE_TO_INDEMNITY_GROUP.get(crop_stage_no)
+        stage_group = stage_group or CROP_STAGE_TO_INDEMNITY_GROUP.get(crop_stage_no)
         if stage_group is None:
             return None
 
@@ -95,6 +113,7 @@ class ParametricAssessment:
         crop_stage_no: int,
         wind_signal_tcws: int,
         exposure_hours: int,
+        stage_group: str | None = None,
     ) -> float:
         """Final Indemnity Payout Calculation: I = (AC / 1000) * IF.
 
@@ -102,7 +121,7 @@ class ParametricAssessment:
         confirmed with Fabio 2026-07-23, correcting the earlier (AC/1000)*IF*Area
         version this engine originally shipped with.
         """
-        rule = self.get_matrix_rule(crop_stage_no, wind_signal_tcws, exposure_hours)
+        rule = self.get_matrix_rule(crop_stage_no, wind_signal_tcws, exposure_hours, stage_group)
         if rule is None:
             return 0.0
 
@@ -126,9 +145,15 @@ if __name__ == "__main__":
         tcws = int(input("2. Peak TCWS Level (e.g., 2, 3, 4, 5): "))
         hours = int(input("3. Period of Exposure in hours (e.g., 6, 12, 24): "))
         crop_stage_no = int(input("4. Crop Stage No. (per tbl_recsap_matrix, e.g., 2 for Flowering): "))
+        # Optional: blank falls back to CROP_STAGE_TO_INDEMNITY_GROUP. Needed to test
+        # Milking, which shares crop_stage_no 2 with Flowering but pays at the Late
+        # Reproductive factor.
+        stage_group = input(
+            "5. Stage group (blank = default; e.g. 'Late Reproductive' for Milking): "
+        ).strip() or None
 
-        rule = assessment.get_matrix_rule(crop_stage_no, tcws, hours)
-        payout = assessment.calculate_final_payout(ac, crop_stage_no, tcws, hours)
+        rule = assessment.get_matrix_rule(crop_stage_no, tcws, hours, stage_group)
+        payout = assessment.calculate_final_payout(ac, crop_stage_no, tcws, hours, stage_group)
 
         print("\n" + "-" * 50)
         print("               ASSESSMENT RESULTS")
