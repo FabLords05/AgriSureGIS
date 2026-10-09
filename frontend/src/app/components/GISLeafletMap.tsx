@@ -570,7 +570,9 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
             <span className="text-[11px] font-bold text-[#166534] uppercase tracking-wide">Farm Details</span>
             <button onClick={() => onSelectFarm(null)} className="text-muted-foreground hover:text-foreground text-[10px]">✕</button>
           </div>
-          <p className="text-[12px] font-semibold">{selectedFarm.farmer_name ?? "Unknown farmer"}</p>
+          {/* `||` not `??` -- see the matching note in SpatialAnalysisModule's
+              Farmer cell: a blank-but-not-null name must still fall back. */}
+          <p className="text-[12px] font-semibold">{selectedFarm.farmer_name || "Unknown farmer"}</p>
           <p className="text-[10px] text-muted-foreground mb-2">Farm #{selectedFarm.farm_id}</p>
           <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px]">
             <span className="text-muted-foreground">Municipality:</span><span className="font-medium">{selectedFarm.municipality ?? "—"}</span>

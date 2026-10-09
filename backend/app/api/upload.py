@@ -168,6 +168,52 @@ def _normalize_text_upper(value: Any) -> str | None:
     return normalized
 
 
+def _is_blank(value: Any) -> bool:
+    """True for the "nothing really stored here" values this ingest can leave behind
+    on a row it created earlier: None, or a string that's empty once trimmed.
+
+    tbl_farmers_profile.last_name/first_name are NOT NULL, so a CSV layout whose
+    name columns this parser didn't yet recognize stored '' rather than failing --
+    which is exactly how 952 nameless farmers landed in the database before the
+    'FARMER NAME' alias existed (2026-10-09). See _backfill_blank_fields().
+    """
+    if value is None:
+        return True
+    return isinstance(value, str) and value.strip() == ""
+
+
+def _backfill_blank_fields(instance: Any, payload: dict[str, Any], field_names: Iterable[str]) -> list[str]:
+    """Copies payload values onto an ALREADY-PERSISTENT instance, but only for the
+    fields currently blank on it -- never overwriting a value that's really there.
+
+    Why this exists: _ingest_row() resolves an existing farmer/farm purely as a
+    lookup and then used the row for nothing else, so any field this parser
+    couldn't read at the time that row was first created stayed wrong forever --
+    re-uploading the same CSV after the parser was fixed matched the broken row by
+    farmers_id and changed nothing. That made ingestion non-idempotent, which is
+    the root cause of blank farmer names in Spatial Analysis (2026-10-09).
+
+    Deliberately blank-only rather than "CSV always wins" (Fabio's call,
+    2026-10-09): the newer PABS export carries the farmer as one combined
+    'FARMER NAME' field, so letting it overwrite a non-blank name would let a
+    derived value clobber the legacy export's three discrete columns. Repairing a
+    blank can't lose information; overwriting can.
+
+    Returns the names of the fields actually changed, for the caller to log.
+    No db.add() is needed -- `instance` is already persistent, so SQLAlchemy's
+    dirty tracking emits the UPDATE within the caller's existing per-row SAVEPOINT.
+    """
+    changed = []
+    for name in field_names:
+        new_value = payload.get(name)
+        if _is_blank(new_value):
+            continue
+        if _is_blank(getattr(instance, name, None)):
+            setattr(instance, name, new_value)
+            changed.append(name)
+    return changed
+
+
 def _stringify_id(value: Any) -> str | None:
     """Coerces a pandas-inferred numeric ID column to text. Applies to every
     VARCHAR-mapped identifier read from the CSV (Policy No., FARMID, FarmersID,
@@ -463,6 +509,16 @@ def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> 
         farmer = models.FarmerProfile(**farmer_payload)
         db.add(farmer)
         db.flush()
+    else:
+        # Repair a farmer this ingest created earlier under a CSV layout whose name
+        # columns weren't recognized yet -- without this, an existing-but-blank
+        # profile is matched by farmers_id and kept blank no matter how many times
+        # the corrected file is re-uploaded. Blank-only; see _backfill_blank_fields().
+        filled = _backfill_blank_fields(farmer, farmer_payload, ("last_name", "first_name", "middle_name"))
+        if filled:
+            logger.info(
+                "Backfilled %s on existing farmer farmers_id=%s", ", ".join(filled), farmer.farmers_id
+            )
 
     # Farm identity: same never-match-on-blank rule as farmer identity above.
     farm_payload = payload["farm"]
@@ -486,6 +542,17 @@ def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> 
         )
         db.add(farm)
         db.flush()
+    elif farm_payload["area_size"] and not farm.area_size:
+        # Same repair as the farmer above, for the one Farm field that has the same
+        # problem. Not routed through _backfill_blank_fields() because "blank" here
+        # is 0, not None/'' -- area_size is NOT NULL and the create path above
+        # coerces an unreadable AreaInsured/AREA column to 0, so 0 is this column's
+        # "never actually read" marker. A real farm is never 0 ha.
+        farm.area_size = farm_payload["area_size"]
+        logger.info(
+            "Backfilled area_size=%s on existing farm csv_farm_reference=%s",
+            farm.area_size, farm.csv_farm_reference,
+        )
 
     def _result(outcome: str) -> _RowIngestResult:
         return _RowIngestResult(
