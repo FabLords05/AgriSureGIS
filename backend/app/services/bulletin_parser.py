@@ -431,6 +431,7 @@ class BulletinParserService:
                 center_geom=center_geom,
                 max_signal_level=max_signal_level,
                 tcws_areas=tcws_areas,
+                is_final=parsed_data.get("is_final", False),
             )
             db.add(bulletin)
             db.commit()
@@ -450,6 +451,14 @@ class BulletinParserService:
             already_seeded = db.query(TcbSignal).filter(TcbSignal.tcb_id == bulletin.tcb_id).first()
             if already_seeded is None:
                 cls._seed_tcb_signals(bulletin, signals, db)
+            db.commit()
+
+        # Separate from the backfill above (not an elif): flags an
+        # already-saved bulletin as final when a re-scrape/re-upload of its PDF
+        # says so -- covers bulletins saved before is_final was stored
+        # (2026-10-09). Only ever flips False -> True.
+        if parsed_data.get("is_final") and not bulletin.is_final:
+            bulletin.is_final = True
             db.commit()
 
         return bulletin

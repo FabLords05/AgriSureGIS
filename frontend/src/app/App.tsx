@@ -438,17 +438,32 @@ export default function App() {
         }
         if (maxId > seenMaxTcbId.current) {
           const newest = bulletins.find(b => b.tcb_id === maxId)!;
+          // Every final bulletin among *all* bulletins new since the last
+          // poll, not just the newest -- a final TCB parsed in the same cycle
+          // as another typhoon's bulletin must still notify.
+          const prevSeen = seenMaxTcbId.current;
+          const newFinals = bulletins.filter(b => b.tcb_id > prevSeen && b.is_final);
           seenMaxTcbId.current = maxId;
+          const timestamp = new Date().toLocaleTimeString("en-PH", { hour: "2-digit", minute: "2-digit" }) + " PHT";
           const notif: AppNotification = {
             id: `bulletin-${newest.tcb_id}`,
             type: "bulletin",
             title: "New TCB Parsed",
             message: `Bulletin No. ${newest.bulletin_count} for ${newest.typhoon_name} has been downloaded and parsed successfully.`,
-            timestamp: new Date().toLocaleTimeString("en-PH", { hour: "2-digit", minute: "2-digit" }) + " PHT",
+            timestamp,
             read: false,
           };
-          setNotifications(ns => [notif, ...ns]);
+          const finalNotifs: AppNotification[] = newFinals.map(b => ({
+            id: `bulletin-final-${b.tcb_id}`,
+            type: "success",
+            title: "Final TCB — Ready for Assessment",
+            message: `Bulletin No. ${b.bulletin_count} for ${b.typhoon_name} is the final bulletin. The typhoon is ready for assessment.`,
+            timestamp,
+            read: false,
+          }));
+          setNotifications(ns => [...finalNotifs, notif, ...ns]);
           toast.success(notif.title, { description: notif.message });
+          finalNotifs.forEach(n => toast.success(n.title, { description: n.message }));
         }
       } catch {
         // Silent — a failed poll shouldn't surface as a user-facing error.

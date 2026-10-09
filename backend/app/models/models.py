@@ -266,6 +266,11 @@ class TropicalCycloneBulletin(Base):
     # bulletins saved before this column existed, or with no TCWS table.
     max_signal_level = Column(Integer, nullable=True)
     tcws_areas = Column(JSONB, nullable=True)
+    # True for a typhoon's last bulletin (PAGASA's trailing "F" on the
+    # bulletin number, or an LPA bulletin) -- see backend/migrations/
+    # 2026-10-09_tcb_is_final.sql. Drives the Monitoring "ready for
+    # assessment" notice.
+    is_final = Column(Boolean, nullable=False, default=False)
 
     typhoon = relationship("Typhoon")
 

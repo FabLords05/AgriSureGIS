@@ -484,12 +484,33 @@ export function SpatialAnalysisModule({
             ref={scrollContainerRef}
             onScroll={e => setTableScrollTop(e.currentTarget.scrollTop)}
           >
+            {/* The table is wider than the panel, so it scrolls horizontally
+                instead of wrapping text. Every cell is whitespace-nowrap so each row stays at
+                exactly ROW_HEIGHT -- a wrapped cell made that row taller,
+                desyncing the virtualization math and making rows jump while
+                scrolling vertically. The 1600px width keeps horizontal scroll
+                available even on wide screens where the columns would
+                otherwise fit (per Fabio's request). table-fixed + the
+                column widths below are required because of the
+                virtualization: with auto layout the browser sized columns
+                from only the currently-rendered window of rows, so columns
+                visibly widened/shifted as longer values (e.g. long crop
+                stage labels) scrolled into view. Overlong values truncate
+                with an ellipsis (full text in the title tooltip). */}
             {isLoadingFirstPage ? (
               <div className="flex items-center justify-center h-full text-[11px] text-muted-foreground">
                 Loading farm records…
               </div>
             ) : (
-            <table className="w-full text-[11px]">
+            <table className="table-fixed w-[1600px] min-w-full text-[11px]">
+              {/* Column order: Farm ID (pinned), Farmer, Municipality,
+                  Barangay, Area, GPX Boundary, Effective, Expiry, Crop Stage,
+                  Signal, Exp (h), Est. Payment -- sums to 1600px. */}
+              <colgroup>
+                {[90, 200, 140, 150, 100, 120, 120, 120, 260, 90, 90, 120].map((w, i) => (
+                  <col key={i} style={{ width: w }} />
+                ))}
+              </colgroup>
               <thead className="sticky top-0 z-10">
                 <tr className="bg-[#166534] text-white">
                   {[
@@ -501,7 +522,10 @@ export function SpatialAnalysisModule({
                   ].map(col => (
                     <th
                       key={col.field}
-                      className="px-2.5 py-2 text-left font-semibold cursor-pointer hover:bg-white/10 whitespace-nowrap"
+                      // Farm ID is pinned left (sticky) while scrolling
+                      // horizontally; needs its own opaque bg + higher z so
+                      // the other header cells slide underneath it.
+                      className={`px-2.5 py-2 text-left font-semibold cursor-pointer hover:bg-white/10 whitespace-nowrap ${col.field === "farm_id" ? "sticky left-0 z-20 bg-[#166534] shadow-[inset_-1px_0_0_rgba(255,255,255,0.15)]" : ""}`}
                       onClick={() => handleSort(col.field)}
                     >
                       <span className="flex items-center gap-1">
@@ -533,19 +557,28 @@ export function SpatialAnalysisModule({
                   <tr
                     key={f.farm_id}
                     onClick={() => setSelectedFarmId(f.farm_id === selectedFarmId ? null : f.farm_id)}
-                    className={`border-t border-border cursor-pointer transition-colors hover:bg-muted/50 ${f.farm_id === selectedFarmId ? "bg-[#166534]/10 border-l-2 border-l-[#166534]" : ""}`}
+                    className={`group border-t border-border cursor-pointer transition-colors hover:bg-muted/50 ${f.farm_id === selectedFarmId ? "bg-[#166534]/10 border-l-2 border-l-[#166534]" : ""}`}
                   >
-                    <td className="px-2.5 py-2 font-mono text-[#166534]">#{f.farm_id}</td>
+                    {/* Pinned Farm ID cell: opaque card-based bg (the row's own
+                        translucent hover/selected tints would let scrolled
+                        cells show through), mixed to match those tints. The
+                        inset shadows redraw the selected-row left accent
+                        (covered by the sticky cell) and a right divider. */}
+                    <td className={`sticky left-0 z-[1] px-2.5 py-2 font-mono text-[#166534] truncate ${
+                      f.farm_id === selectedFarmId
+                        ? "bg-[color-mix(in_srgb,#166534_10%,var(--card))] shadow-[inset_2px_0_0_#166534,inset_-1px_0_0_var(--border)]"
+                        : "bg-card group-hover:bg-[color-mix(in_srgb,var(--muted)_50%,var(--card))] shadow-[inset_-1px_0_0_var(--border)]"
+                    }`}>#{f.farm_id}</td>
                     {/* `||` not `??` -- a farmer with no name on file can reach
                         the client as "" (tbl_farmers_profile.last_name/first_name
                         are NOT NULL, so ingestion can store blanks), and `??`
                         only substitutes on null/undefined, which rendered the
                         cell visually empty instead of showing the dash. */}
-                    <td className="px-2.5 py-2 font-medium whitespace-nowrap">{f.farmer_name || "—"}</td>
-                    <td className="px-2.5 py-2">{f.municipality ?? "—"}</td>
-                    <td className="px-2.5 py-2 text-muted-foreground">{f.barangay ?? "—"}</td>
-                    <td className="px-2.5 py-2 text-right">{f.area_size != null ? f.area_size.toFixed(2) : "—"}</td>
-                    <td className="px-2.5 py-2">
+                    <td className="px-2.5 py-2 font-medium truncate" title={f.farmer_name || undefined}>{f.farmer_name || "—"}</td>
+                    <td className="px-2.5 py-2 truncate" title={f.municipality ?? undefined}>{f.municipality ?? "—"}</td>
+                    <td className="px-2.5 py-2 text-muted-foreground truncate" title={f.barangay ?? undefined}>{f.barangay ?? "—"}</td>
+                    <td className="px-2.5 py-2 text-right whitespace-nowrap">{f.area_size != null ? f.area_size.toFixed(2) : "—"}</td>
+                    <td className="px-2.5 py-2 whitespace-nowrap">
                       {f.has_geometry
                         ? <span className="text-emerald-600 flex items-center gap-0.5"><CheckCircle2 size={10} />Yes</span>
                         : <span className="text-muted-foreground">No</span>
@@ -553,12 +586,12 @@ export function SpatialAnalysisModule({
                     </td>
                     <td className="px-2.5 py-2 text-muted-foreground whitespace-nowrap">{f.effectivity_date ?? "—"}</td>
                     <td className="px-2.5 py-2 text-muted-foreground whitespace-nowrap">{f.expiry_date ?? "—"}</td>
-                    <td className="px-2.5 py-2">{f.assessment?.crop_stage ?? "Not yet assessed"}</td>
-                    <td className={`px-2.5 py-2 ${f.assessment?.wind_velocity ? signalColors[f.assessment.wind_velocity] ?? "" : "text-muted-foreground"}`}>
+                    <td className="px-2.5 py-2 truncate" title={f.assessment?.crop_stage ?? undefined}>{f.assessment?.crop_stage ?? "Not yet assessed"}</td>
+                    <td className={`px-2.5 py-2 whitespace-nowrap ${f.assessment?.wind_velocity ? signalColors[f.assessment.wind_velocity] ?? "" : "text-muted-foreground"}`}>
                       {f.assessment?.wind_velocity ? `No. ${f.assessment.wind_velocity}` : "—"}
                     </td>
-                    <td className="px-2.5 py-2 text-right">{f.assessment?.period_of_exposure ?? "—"}</td>
-                    <td className="px-2.5 py-2 text-right font-medium">
+                    <td className="px-2.5 py-2 text-right whitespace-nowrap">{f.assessment?.period_of_exposure ?? "—"}</td>
+                    <td className="px-2.5 py-2 text-right font-medium truncate">
                       {f.assessment ? `₱${f.assessment.final_indemnity_payment.toLocaleString()}` : "—"}
                     </td>
                   </tr>

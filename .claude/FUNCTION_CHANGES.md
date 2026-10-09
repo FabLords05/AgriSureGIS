@@ -4,6 +4,85 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-09] - Persist Final-TCB Marker (`is_final`) + "Ready for Assessment" Notice; Farm Records Pinned Column (branch: develop, direct push per Cristian)
+
+By Cristian. `bulletin_parser.py` already detected a typhoon's final bulletin
+(PAGASA's trailing "F" on the number, e.g. "NR. 14F", or a "Low Pressure Area
+(formerly ...)" bulletin) but only used it in-memory to trigger assessment —
+it was never stored, and the saved title drops the "F", so the frontend could
+not tell which bulletin was final. This persists it and drives the Monitoring
+"ready for assessment" notice from it.
+
+**Supersedes part of the "Monitoring & Extraction Redesign" entry below.**
+That entry chose `Typhoon.is_active` turning false over the "F" marker
+*because* the marker was not persisted and would have needed a new DB column
++ API change. This entry adds exactly that column and API field, and the
+"TCBs Downloaded" card now keys off the final bulletin instead of
+`is_active`. Fabio's other changes from that redesign (4-card grid, removed
+charts, Farms by Signal Number beside the bulletin list) are kept.
+
+### 1. File: `backend/migrations/2026-10-09_tcb_is_final.sql` (new), `backend/init_schema.sql`, `backend/app/models/models.py`
+* New column `tbl_tropical_cyclone_bulletins.is_final BOOLEAN NOT NULL
+  DEFAULT FALSE` (`TropicalCycloneBulletin.is_final`). The migration
+  backfills existing `'Low Pressure Area'` bulletins to `TRUE` (always final,
+  same rule the parser applies); other already-saved finals get flagged on
+  their next scrape/re-upload (below).
+
+### 2. File: `backend/app/services/bulletin_parser.py`
+* **`BulletinParserService.save_bulletin_to_db()`**: stores
+  `parsed_data["is_final"]` on new bulletins. On an already-saved bulletin,
+  flips `is_final` False → True when a re-scrape/re-upload of its PDF says it
+  is final (covers bulletins saved before the column existed). Never flips
+  True → False.
+
+### 3. File: `backend/app/api/bulletins.py`, `frontend/src/lib/api.ts`
+* **`list_bulletins()`** returns `is_final`; `Bulletin` interface gains
+  `is_final: boolean`.
+
+### 4. File: `frontend/src/app/components/MonitoringModule.tsx`
+* "TCBs Downloaded" follows a `trackedTyphoon` (`useMemo`): the active
+  typhoon with the most recent bulletin; with none active, the newest
+  bulletin's typhoon — PAGASA drops a storm from its status page right around
+  its final bulletin, so "active only" would hide the notice almost
+  immediately. Deliberately not "last typhoon with a final bulletin": that
+  jumped back to an older storm whenever the newest one's final TCB wasn't
+  flagged yet (QUEENIE 14F, saved before `is_final` was stored). Subtitle
+  shows `(+N active)` when several typhoons are active.
+* The amber `is_active`-based "Ready for assessment" alert is replaced by a
+  green notice, "Final TCB No. N received — ready for assessment", shown once
+  the tracked typhoon has an `is_final` bulletin. `AlertTriangle` import
+  dropped, `CheckCircle2` added. Stat cards slightly more compact.
+
+### 5. File: `frontend/src/app/App.tsx`
+* Bulletin polling now also raises a "Final TCB — Ready for Assessment"
+  notification + toast for **every** final bulletin among all bulletins new
+  since the last poll — not just the newest — so a final TCB parsed in the
+  same cycle as another typhoon's bulletin still notifies.
+
+### 6. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* Farm Records table: `table-fixed` at `w-[1600px]` with a `<colgroup>` of
+  fixed widths, every cell `whitespace-nowrap`/`truncate` (full text in a
+  `title` tooltip). Required by the row virtualization: a wrapped cell made a
+  row taller than `ROW_HEIGHT` and desynced scrolling, and auto layout sized
+  columns from only the rendered window so they shifted while scrolling.
+* Farm ID column pinned (`sticky left-0`) with an opaque background mixed to
+  match the row's hover/selected tints.
+* Keeps the `farmer_name || "—"` fix from the blank-farmer-names entry below
+  (merged on top of it; the tooltip uses `|| undefined` for the same reason).
+
+### 7. File: `backend/tests/test_bulletin_parser.py`
+* `test_save_bulletin_to_db_stores_is_final_on_new_bulletin`,
+  `test_reparse_flags_existing_bulletin_as_final`.
+
+### Status / Next Steps
+* **Apply the migration before running this code on any existing DB** —
+  the model now selects `is_final`, so bulletin queries fail on a DB without
+  the column:
+  `psql -U agrisure_admin -d agrisure_db -f backend/migrations/2026-10-09_tcb_is_final.sql`
+* Pushed directly to `develop` per Cristian's explicit instruction.
+
+---
+
 ## [2026-10-09] - Sprint 3: Blank Farmer Names in Spatial Analysis — Ingest Idempotency Fix
 
 Reported by Fabio: after ingesting `PCIC10 GPX 11-05-2025 WITH EXISTING IC

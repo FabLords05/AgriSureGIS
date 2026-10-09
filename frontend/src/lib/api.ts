@@ -20,6 +20,9 @@ export interface Bulletin {
   // Null for bulletins with no TCWS table, or saved before this was stored.
   max_signal_level: number | null;
   tcws_areas: Record<string, Record<string, string>> | null;
+  // PAGASA's final-bulletin marker (trailing "F" on the number, or an LPA
+  // bulletin) -- the typhoon is ready for assessment once one arrives.
+  is_final: boolean;
 }
 
 export interface GeoJsonMultiPolygon {

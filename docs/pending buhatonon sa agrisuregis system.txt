@@ -1,0 +1,4 @@
+documentation sa mga passwords sa agrisuregis.
+indicator nga nigawas naba sa par ang typhoon.
+create and testing actual mock data.
+improving the frontend.

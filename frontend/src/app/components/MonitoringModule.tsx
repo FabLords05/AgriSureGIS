@@ -2,8 +2,8 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import { toast } from "sonner";
 import {
   Activity, Download, FileDown,
-  RefreshCw, Eye, BarChart2, Zap,
-  X, MapPinned, ShieldCheck, AlertTriangle,
+  RefreshCw, Eye, BarChart2, Zap, CheckCircle2,
+  X, MapPinned, ShieldCheck,
   ChevronUp, ChevronDown, ArrowUpDown
 } from "lucide-react";
 import {
@@ -544,41 +544,52 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
 
   const activeTyphoonNames = activeTyphoons.map(t => t.name).join(", ");
 
-  // TCBs Downloaded is scoped to one typhoon, not a lifetime total -- the
-  // first/primary active typhoon if there is one (per Fabio: two storms
-  // active at once is rare enough not to bother summing/listing separately),
-  // falling back to the most recently-issued bulletin's typhoon once nothing
-  // is active anymore, so the count + "done collecting" alert below still
-  // has something to point at right after a typhoon closes out.
-  const primaryTyphoonName = activeTyphoons[0]?.name ?? bulletins[0]?.typhoon_name ?? null;
-  const isPrimaryTyphoonActive = primaryTyphoonName !== null && activeTyphoons.some(t => t.name === primaryTyphoonName);
-  const primaryTyphoonBulletinCount = primaryTyphoonName
-    ? bulletins.filter(b => b.typhoon_name === primaryTyphoonName).length
-    : 0;
-  // "Done collecting" = there's a tracked typhoon, it has at least one
-  // downloaded bulletin, and it's no longer on PAGASA's active list --
-  // Typhoon.is_active flipping false, not the bulletin's own "F" marker
-  // (which is parse-time-only, never persisted -- see FUNCTION_CHANGES.md
-  // for why this was the chosen signal).
-  const typhoonDoneCollecting = primaryTyphoonName !== null && primaryTyphoonBulletinCount > 0 && !isPrimaryTyphoonActive;
+  // Typhoon the "TCBs Downloaded" card follows: the active typhoon (the one
+  // with the most recent bulletin, if several are active). With none active,
+  // it keeps showing the most recent typhoon (newest bulletin's) until a new
+  // one becomes active -- PAGASA drops a storm from its status page right
+  // around its final bulletin, so "active only" would hide the "ready for
+  // assessment" notice almost immediately. Deliberately not "last typhoon
+  // with a final bulletin": that jumped back to an older storm whenever the
+  // newest one's final TCB wasn't flagged yet (QUEENIE 14F, saved before
+  // is_final was stored). `bulletins` is newest-issued-first.
+  const trackedTyphoon = useMemo(() => {
+    const activeIds = new Set(activeTyphoons.map(t => t.typhoon_id));
+    let typhoonId: number | null = null;
+    let name: string | null = null;
+    if (activeIds.size > 0) {
+      const latestActive = bulletins.find(b => activeIds.has(b.typhoon_id));
+      typhoonId = latestActive?.typhoon_id ?? activeTyphoons[0].typhoon_id;
+      name = latestActive?.typhoon_name ?? activeTyphoons[0].name;
+    } else if (bulletins.length > 0) {
+      typhoonId = bulletins[0].typhoon_id;
+      name = bulletins[0].typhoon_name;
+    }
+    if (typhoonId === null) return null;
+    const own = bulletins.filter(b => b.typhoon_id === typhoonId);
+    return {
+      name,
+      count: own.length,
+      finalBulletin: own.find(b => b.is_final) ?? null,
+      otherActiveCount: Math.max(0, activeIds.size - 1),
+    };
+  }, [bulletins, activeTyphoons]);
 
-  const statCards: {
-    label: string; value: string | number; sub: string; icon: React.ReactNode;
-    color: string; bg: string; border: string; alert: string | null;
-  }[] = [
-    { label:"Active Typhoon",   value: activeTyphoonNames || "N/A", sub:"From PAGASA status page", icon:<Zap size={18} />,        color:"#ef4444", bg:"bg-red-50 dark:bg-red-950/30",     border:"border-red-200 dark:border-red-900", alert: null },
+  const statCards = [
+    { label:"Active Typhoon",       value: activeTyphoonNames || "N/A", sub:"From PAGASA status page", icon:<Zap size={14} />,        color:"#ef4444", bg:"bg-red-50 dark:bg-red-950/30",     border:"border-red-200 dark:border-red-900" },
     {
       label:"TCBs Downloaded",
-      value: primaryTyphoonBulletinCount,
-      sub: primaryTyphoonName ? `for ${primaryTyphoonName}` : "No tracked typhoon yet",
-      icon: typhoonDoneCollecting ? <AlertTriangle size={18} /> : <Download size={18} />,
-      color: typhoonDoneCollecting ? "#d97706" : "#1e3a5f",
-      bg: typhoonDoneCollecting ? "bg-amber-50 dark:bg-amber-950/30" : "bg-blue-50 dark:bg-blue-950/30",
-      border: typhoonDoneCollecting ? "border-amber-300 dark:border-amber-700" : "border-blue-200 dark:border-blue-900",
-      alert: typhoonDoneCollecting ? "Ready for assessment" : null,
+      value: trackedTyphoon ? trackedTyphoon.count : "—",
+      sub: trackedTyphoon
+        ? `${trackedTyphoon.name}${trackedTyphoon.otherActiveCount > 0 ? ` (+${trackedTyphoon.otherActiveCount} active)` : ""}`
+        : "No active typhoon",
+      notice: trackedTyphoon?.finalBulletin
+        ? `Final TCB No. ${trackedTyphoon.finalBulletin.bulletin_count} received — ready for assessment`
+        : null,
+      icon:<Download size={18} />, color:"#1e3a5f", bg:"bg-blue-50 dark:bg-blue-950/30", border:"border-blue-200 dark:border-blue-900",
     },
-    { label:"Affected Farms",   value:`${affectedFarms}/${totalFarms}`,  sub:`${totalArea.toFixed(1)} ha`,icon:<Activity size={18} />, color:"#166534", bg:"bg-green-50 dark:bg-green-950/30", border:"border-green-200 dark:border-green-900", alert: null },
-    { label:"Active Insurance", value: insuranceSummary ? `${insuranceSummary.active_count}/${insuranceSummary.total_count}` : "—", sub:"Within coverage window", icon:<ShieldCheck size={18} />, color:"#7c3aed", bg:"bg-purple-50 dark:bg-purple-950/30", border:"border-purple-200 dark:border-purple-900", alert: null },
+    { label:"Affected Farms",       value:`${affectedFarms}/${totalFarms}`,  sub:`${totalArea.toFixed(1)} ha`,icon:<Activity size={18} />, color:"#166534", bg:"bg-green-50 dark:bg-green-950/30", border:"border-green-200 dark:border-green-900" },
+    { label:"Active Insurance",     value: insuranceSummary ? `${insuranceSummary.active_count}/${insuranceSummary.total_count}` : "—", sub:"Within coverage window", icon:<ShieldCheck size={18} />, color:"#7c3aed", bg:"bg-purple-50 dark:bg-purple-950/30", border:"border-purple-200 dark:border-purple-900" },
   ];
 
   return (
@@ -601,28 +612,25 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
         />
       )}
 
-      {/* Stat Cards -- Est. Total Indemnity and Growth Stage/TCB Timeline
-          charts removed per Fabio's redesign; TCBs Downloaded brought back
-          but rescoped to one typhoon with a "done collecting" alert. */}
-      <div className="grid grid-cols-4 gap-4 shrink-0">
+      {/* Stat Cards */}
+      <div className="grid grid-cols-4 gap-3 shrink-0">
         {statCards.map((c, i) => (
-          <div key={i} className={`bg-card border rounded-xl p-5 transition-shadow hover:shadow-md ${c.border}`}>
-            <div className="flex items-center justify-between">
+          <div key={i} className={`bg-card border rounded-xl p-4 transition-shadow hover:shadow-md ${c.border}`}>
+            <div className="flex items-start justify-between">
               <div>
-                <p className="text-[12px] text-muted-foreground uppercase tracking-wide">{c.label}</p>
-                <p className="text-3xl font-bold mt-1" style={{ color: c.color }}>{c.value}</p>
-                <p className="text-[11px] text-muted-foreground mt-1">{c.sub}</p>
+                <p className="text-[11px] text-muted-foreground uppercase tracking-wide">{c.label}</p>
+                <p className="text-2xl font-bold mt-0.5" style={{ color: c.color }}>{c.value}</p>
+                <p className="text-[10px] text-muted-foreground mt-0.5">{c.sub}</p>
+                {c.notice && (
+                  <p className="mt-1.5 inline-flex items-center gap-1 rounded-md bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
+                    <CheckCircle2 size={11} className="shrink-0" /> {c.notice}
+                  </p>
+                )}
               </div>
-              <div className="w-14 h-14 rounded-xl flex items-center justify-center" style={{ backgroundColor: c.color + "20", color: c.color }}>
+              <div className="w-10 h-10 rounded-lg flex items-center justify-center" style={{ backgroundColor: c.color + "20", color: c.color }}>
                 {c.icon}
               </div>
             </div>
-            {c.alert && (
-              <div className="mt-3 flex items-center gap-1.5 px-2 py-1.5 rounded-lg bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300">
-                <AlertTriangle size={12} className="shrink-0" />
-                <span className="text-[10px] font-medium leading-tight">{c.alert}</span>
-              </div>
-            )}
           </div>
         ))}
       </div>
@@ -735,20 +743,19 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
           )}
         </div>
 
-        {/* Right Panel -- Farms by Signal Number now sits beside the
-            Bulletins list (previously a separate bottom row alongside the
-            now-removed TCB Download Timeline); System Status moved to
-            Calibration & Settings, Growth Stage Distribution removed. */}
-        <div className="flex flex-col gap-4">
-          <div className="bg-card border border-border rounded-xl p-4 flex-1 flex flex-col">
-            <div className="flex items-center gap-2 mb-3">
-              <BarChart2 size={14} className="text-[#1e3a5f]" />
-              <span className="text-xs font-semibold">Farms by Signal Number</span>
-            </div>
-            {signalChartData.length === 0 ? (
-              <p className="text-[11px] text-muted-foreground py-8 text-center">No assessed farms yet.</p>
-            ) : (
-              <ResponsiveContainer width="100%" height="100%" minHeight={180}>
+        {/* Right Panel -- Farms by Signal Number, side by side with the
+            bulletin list (Growth Stage Distribution and the TCB Download
+            Timeline were removed 2026-10-09 per Cristian). */}
+        <div className="bg-card border border-border rounded-xl p-4 flex flex-col min-h-0">
+          <div className="flex items-center gap-2 mb-3">
+            <BarChart2 size={14} className="text-[#1e3a5f]" />
+            <span className="text-xs font-semibold">Farms by Signal Number</span>
+          </div>
+          {signalChartData.length === 0 ? (
+            <p className="text-[11px] text-muted-foreground py-8 text-center">No assessed farms yet.</p>
+          ) : (
+            <div className="flex-1 min-h-0">
+              <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={signalChartData} barSize={28}>
                   <CartesianGrid strokeDasharray="3 3" stroke={darkMode ? "#1c2e1c" : "#e5e7eb"} />
                   <XAxis dataKey="signal" tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
@@ -761,10 +768,11 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
                   <Legend iconSize={10} iconType="square" wrapperStyle={{ fontSize: 10 }} />
                 </BarChart>
               </ResponsiveContainer>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       </div>
+
     </div>
   );
 }

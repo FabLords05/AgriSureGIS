@@ -647,6 +647,37 @@ class BulletinParserSaveToDbTests(unittest.TestCase):
         self.assertEqual(created_objects, [])
         mock_db.commit.assert_not_called()
 
+    def test_save_bulletin_to_db_stores_is_final_on_new_bulletin(self):
+        # 2026-10-09: is_final used to only gate the in-memory assessment
+        # trigger and was never stored, so the frontend couldn't tell which
+        # bulletin was a typhoon's last.
+        mock_db = self._build_mock_db(boundaries=[])
+
+        final = BulletinParserService.save_bulletin_to_db({**self._luzon_parsed_data(), "is_final": True}, mock_db)
+        not_final = BulletinParserService.save_bulletin_to_db(self._luzon_parsed_data(), mock_db)
+
+        self.assertTrue(final.is_final)
+        self.assertFalse(not_final.is_final)
+
+    def test_reparse_flags_existing_bulletin_as_final(self):
+        # A bulletin saved before is_final was stored gets flagged the next
+        # time its PDF is scraped/re-uploaded.
+        existing_bulletin = TropicalCycloneBulletin(title="Bulletin No. 11 for KIYAPO", bulletin_count=11)
+        existing_bulletin.tcb_id = 12
+        existing_bulletin.max_signal_level = 2
+        existing_bulletin.is_final = False
+        existing_typhoon = Typhoon(name="KIYAPO", year=2026, is_active=True)
+        existing_typhoon.typhoon_id = 4
+        mock_db = self._build_mock_db(
+            boundaries=[], existing_typhoon=existing_typhoon, existing_bulletin=existing_bulletin,
+        )
+
+        result = BulletinParserService.save_bulletin_to_db({**self._luzon_parsed_data(), "is_final": True}, mock_db)
+
+        self.assertIs(result, existing_bulletin)
+        self.assertTrue(result.is_final)
+        mock_db.commit.assert_called_once()
+
 
 class MatchTcwsCellTests(unittest.TestCase):
     BOUNDARIES = {

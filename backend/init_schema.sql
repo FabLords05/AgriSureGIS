@@ -247,7 +247,10 @@ CREATE TABLE tbl_tropical_cyclone_bulletins (
     center_geom GEOMETRY(Point, 4326),
     -- Raw PAGASA TCWS as parsed, unvalidated (see migrations/2026-09-30_tcb_raw_tcws.sql)
     max_signal_level INT,
-    tcws_areas JSONB
+    tcws_areas JSONB,
+    -- PAGASA's final-bulletin marker (trailing "F" on the number, or an LPA
+    -- bulletin) -- see migrations/2026-10-09_tcb_is_final.sql
+    is_final BOOLEAN NOT NULL DEFAULT FALSE
 );
 
 CREATE TABLE tbl_tcb_signals (
