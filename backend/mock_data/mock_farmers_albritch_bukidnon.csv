@@ -1,0 +1,11 @@
+Program Type,Product Name,Province,Municipality,Barangay,Policy No.,Effectivity Date,Expiry Date,Surname,Firstname,Middlename,AreaInsured,AmountofCover,Stage No.,FarmersID,RSBSA No.,FARMID,Georef ID,RiskExposureAmount,Stage,EstimatedDamage
+Rice Parametric,PCIC Rice Parametric,Bukidnon,Lantapan,Alanib,POL-MOCK-92001,06/01/2026,12/31/2026,Maagad,Karylle,A,1.50,30000,1,920001,99-99-99-999-920001,9210001,R10-BUK-LAN-92001,4500,Booting,4500
+Rice Parametric,PCIC Rice Parametric,Bukidnon,Lantapan,Baclayon,POL-MOCK-92002,06/01/2026,12/31/2026,Maagad,Karylle,A,2.00,40000,2,920001,99-99-99-999-920001,9210002,R10-BUK-LAN-92002,6000,Flowering,6000
+Rice Parametric,PCIC Rice Parametric,Bukidnon,Impasug-ong,Bontongon,POL-MOCK-92003,06/01/2026,12/31/2026,Tugonon,Fabio,L,1.80,36000,3,920002,99-99-99-999-920002,9210003,R10-BUK-IMP-92003,5400,Maturity,5400
+Rice Parametric,PCIC Rice Parametric,Bukidnon,Impasug-ong,Bulonay,POL-MOCK-92004,06/01/2026,12/31/2026,Tugonon,Fabio,L,2.50,50000,1,920002,99-99-99-999-920002,9210004,R10-BUK-IMP-92004,7500,Booting,7500
+Rice Parametric,PCIC Rice Parametric,Bukidnon,Impasug-ong,Capitan Bayong,POL-MOCK-92005,06/01/2026,12/31/2026,Tugonon,Fabio,L,1.20,24000,2,920002,99-99-99-999-920002,9210005,R10-BUK-IMP-92005,3600,Flowering,3600
+Rice Parametric,PCIC Rice Parametric,Bukidnon,City of Malaybalay,Aglayan,POL-MOCK-92006,06/01/2026,12/31/2026,Gayla,James,R,3.00,60000,3,920003,99-99-99-999-920003,9210006,R10-BUK-MLB-92006,9000,Maturity,9000
+Rice Parametric,PCIC Rice Parametric,Bukidnon,City of Malaybalay,Apo Macote,POL-MOCK-92007,06/01/2026,12/31/2026,Gayla,James,R,1.60,32000,1,920003,99-99-99-999-920003,9210007,R10-BUK-MLB-92007,4800,Booting,4800
+Rice Parametric,PCIC Rice Parametric,Bukidnon,Maramag,Anahawon,POL-MOCK-92008,06/01/2026,12/31/2026,Gayla,James,R,2.20,44000,2,920003,99-99-99-999-920003,9210008,R10-BUK-MAR-92008,6600,Flowering,6600
+Rice Parametric,PCIC Rice Parametric,Bukidnon,Maramag,Bagongsilang,POL-MOCK-92009,06/01/2026,12/31/2026,Gayla,James,R,1.90,38000,3,920003,99-99-99-999-920003,9210009,R10-BUK-MAR-92009,5700,Maturity,5700
+Rice Parametric,PCIC Rice Parametric,Bukidnon,Maramag,Base Camp,POL-MOCK-92010,06/01/2026,12/31/2026,Gayla,James,R,2.80,56000,1,920003,99-99-99-999-920003,9210010,R10-BUK-MAR-92010,8400,Booting,8400

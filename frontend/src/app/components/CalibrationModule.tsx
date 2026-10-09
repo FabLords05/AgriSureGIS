@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
-  Settings, Key, Database, Users, Shield, Save, AlertTriangle,
-  ChevronDown, ChevronRight, RefreshCw, Trash2, Plus, CheckCircle2,
-  Server, Bell, Clock, ToggleLeft, ToggleRight, Eye, EyeOff, DollarSign
+  Settings, Shield, Save, AlertTriangle,
+  ChevronDown, ChevronRight, CheckCircle2,
+  Clock, ToggleRight, DollarSign, Wifi
 } from "lucide-react";
 import { DAMAGE_FACTORS, GrowthStage } from "./mockData";
+import { getParserSettings } from "@/lib/api";
 
 interface SectionProps {
   title: string;
@@ -30,91 +31,36 @@ function Section({ title, icon, children, defaultOpen = true }: SectionProps) {
   );
 }
 
-interface ConfirmDialogProps {
-  message: string;
-  onConfirm: () => void;
-  onCancel: () => void;
-}
-
-function ConfirmDialog({ message, onConfirm, onCancel }: ConfirmDialogProps) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="bg-card border border-amber-300 rounded-xl shadow-2xl p-5 max-w-sm">
-        <div className="flex items-center gap-2 mb-3">
-          <AlertTriangle size={18} className="text-amber-500" />
-          <span className="text-sm font-semibold">Confirm Action</span>
-        </div>
-        <p className="text-xs text-muted-foreground mb-4">{message}</p>
-        <div className="flex gap-2">
-          <button onClick={onCancel} className="flex-1 py-1.5 rounded-lg border border-border text-xs hover:bg-muted transition-colors">Cancel</button>
-          <button onClick={onConfirm} className="flex-1 py-1.5 rounded-lg bg-amber-500 text-white text-xs font-semibold hover:bg-amber-600 transition-colors">Confirm</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 interface CalibrationModuleProps {
   coverageRatePerHa: number;
   onCoverageRateChange: (rate: number) => void;
 }
 
-type UserEntry = { id: number; name: string; role: string; email: string; active: boolean };
-
 export function CalibrationModule({ coverageRatePerHa, onCoverageRateChange }: CalibrationModuleProps) {
   const [damageFactor, setDamageFactor] = useState<Record<GrowthStage, Record<number, number>>>(
     JSON.parse(JSON.stringify(DAMAGE_FACTORS))
   );
-  const [geeProjectId, setGeeProjectId] = useState("pcic-bicol-gee-2024");
-  const [geeApiKey, setGeeApiKey]       = useState("AIzaSyPCIC-BICOL-GEE-2024-DEMO-KEY");
-  const [showGeeKey, setShowGeeKey]     = useState(false);
   const [sessionTimeout, setSessionTimeout] = useState(5);
-  const [autoBackup, setAutoBackup]     = useState(true);
-  const [emailAlerts, setEmailAlerts]   = useState(true);
-  const [parserInterval, setParserInterval] = useState(3);
   const [savedSuccess, setSavedSuccess] = useState(false);
-  const [confirm, setConfirm]           = useState<{ msg: string; fn: () => void } | null>(null);
-  const [backupRunning, setBackupRunning] = useState(false);
-  const [users, setUsers] = useState<UserEntry[]>([
-    { id:1, name:"Ana L. Reyes",    role:"GIS Specialist",      email:"a.reyes@pcic.gov.ph",   active:true  },
-    { id:2, name:"Ramon B. Santos", role:"System Administrator", email:"r.santos@pcic.gov.ph",  active:true  },
-    { id:3, name:"Liza M. Cruz",    role:"GIS Specialist",      email:"l.cruz@pcic.gov.ph",    active:false },
-  ]);
 
-  // User management modals
-  const [editingUser, setEditingUser] = useState<UserEntry | null>(null);
-  const [addingUser, setAddingUser]   = useState(false);
-  const [newUser, setNewUser]         = useState({ name:"", role:"GIS Specialist", email:"", password:"" });
+  // Backend API status -- real, not mock. Reuses the existing GET
+  // /api/bulletins/settings call purely as a connectivity ping now that the
+  // TCB polling interval it used to also surface is fixed backend-side (see
+  // build_scheduler's hardcoded 15min in scheduler.py) instead of admin-
+  // configurable here.
+  const [backendOk, setBackendOk] = useState<boolean | null>(null);
+  const [lastCheck, setLastCheck] = useState<string | null>(null);
+
+  useEffect(() => {
+    getParserSettings()
+      .then(() => setBackendOk(true))
+      .catch(() => setBackendOk(false))
+      .finally(() => setLastCheck(new Date().toLocaleTimeString()));
+  }, []);
 
   const handleSave = () => {
     setSavedSuccess(true);
     setTimeout(() => setSavedSuccess(false), 2500);
-  };
-
-  const handleBackup = () => {
-    setBackupRunning(true);
-    setTimeout(() => setBackupRunning(false), 3000);
-  };
-
-  const handleDeleteUser = (id: number) => {
-    setConfirm({
-      msg: "Are you sure you want to deactivate this user account? This action can be reversed by an administrator.",
-      fn: () => { setUsers(u => u.map(x => x.id === id ? { ...x, active:false } : x)); setConfirm(null); },
-    });
-  };
-
-  const handleSaveEditUser = () => {
-    if (!editingUser) return;
-    setUsers(u => u.map(x => x.id === editingUser.id ? editingUser : x));
-    setEditingUser(null);
-  };
-
-  const handleAddUser = () => {
-    if (!newUser.name.trim() || !newUser.email.trim()) return;
-    const id = Math.max(...users.map(u => u.id)) + 1;
-    setUsers(u => [...u, { id, name: newUser.name, role: newUser.role, email: newUser.email, active: true }]);
-    setNewUser({ name:"", role:"GIS Specialist", email:"", password:"" });
-    setAddingUser(false);
   };
 
   const stages: GrowthStage[] = ["Seedling","Vegetative","Reproductive","Ripening"];
@@ -122,115 +68,6 @@ export function CalibrationModule({ coverageRatePerHa, onCoverageRateChange }: C
 
   return (
     <div className="h-full overflow-auto bg-background p-4">
-      {confirm && <ConfirmDialog message={confirm.msg} onConfirm={confirm.fn} onCancel={() => setConfirm(null)} />}
-
-      {/* Edit User Modal */}
-      {editingUser && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="bg-card border border-border rounded-2xl shadow-2xl w-[400px] overflow-hidden">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-              <p className="text-sm font-bold">Edit User Account</p>
-              <button onClick={() => setEditingUser(null)} className="text-muted-foreground hover:text-foreground">✕</button>
-            </div>
-            <div className="p-4 space-y-3">
-              {[
-                { label:"Full Name", key:"name" as const, type:"text" },
-                { label:"Email",     key:"email" as const, type:"email" },
-              ].map(f => (
-                <div key={f.key}>
-                  <label className="text-[11px] font-semibold block mb-1">{f.label}</label>
-                  <input
-                    type={f.type}
-                    value={editingUser[f.key]}
-                    onChange={e => setEditingUser({ ...editingUser, [f.key]: e.target.value })}
-                    className="w-full border border-border rounded-lg px-3 py-2 text-[11px] bg-background focus:outline-none focus:border-[#166534]"
-                  />
-                </div>
-              ))}
-              <div>
-                <label className="text-[11px] font-semibold block mb-1">Role</label>
-                <select
-                  value={editingUser.role}
-                  onChange={e => setEditingUser({ ...editingUser, role: e.target.value })}
-                  className="w-full border border-border rounded-lg px-3 py-2 text-[11px] bg-background focus:outline-none focus:border-[#166534]"
-                >
-                  <option>GIS Specialist</option>
-                  <option>System Administrator</option>
-                  <option>Data Analyst</option>
-                  <option>Field Supervisor</option>
-                </select>
-              </div>
-              <div className="flex items-center gap-2">
-                <input type="checkbox" id="activeToggle" checked={editingUser.active} onChange={e => setEditingUser({ ...editingUser, active: e.target.checked })} className="accent-[#166534]" />
-                <label htmlFor="activeToggle" className="text-[11px]">Account Active</label>
-              </div>
-            </div>
-            <div className="flex gap-2 px-4 py-3 border-t border-border justify-end">
-              <button onClick={() => setEditingUser(null)} className="px-3 py-1.5 rounded-lg border border-border text-xs hover:bg-muted transition-colors">Cancel</button>
-              <button onClick={handleSaveEditUser} className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-[#166534] text-white text-xs font-semibold hover:bg-[#14532d] transition-colors">
-                <Save size={11} /> Save Changes
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Add User Modal */}
-      {addingUser && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="bg-card border border-border rounded-2xl shadow-2xl w-[400px] overflow-hidden">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-              <p className="text-sm font-bold">Add New User Account</p>
-              <button onClick={() => setAddingUser(false)} className="text-muted-foreground hover:text-foreground">✕</button>
-            </div>
-            <div className="p-4 space-y-3">
-              {[
-                { label:"Full Name",        key:"name" as const,     type:"text"     },
-                { label:"Email Address",    key:"email" as const,    type:"email"    },
-                { label:"Temp. Password",   key:"password" as const, type:"password" },
-              ].map(f => (
-                <div key={f.key}>
-                  <label className="text-[11px] font-semibold block mb-1">{f.label}</label>
-                  <input
-                    type={f.type}
-                    value={newUser[f.key]}
-                    onChange={e => setNewUser({ ...newUser, [f.key]: e.target.value })}
-                    placeholder={f.label}
-                    className="w-full border border-border rounded-lg px-3 py-2 text-[11px] bg-background focus:outline-none focus:border-[#166534]"
-                  />
-                </div>
-              ))}
-              <div>
-                <label className="text-[11px] font-semibold block mb-1">Role</label>
-                <select
-                  value={newUser.role}
-                  onChange={e => setNewUser({ ...newUser, role: e.target.value })}
-                  className="w-full border border-border rounded-lg px-3 py-2 text-[11px] bg-background focus:outline-none focus:border-[#166534]"
-                >
-                  <option>GIS Specialist</option>
-                  <option>System Administrator</option>
-                  <option>Data Analyst</option>
-                  <option>Field Supervisor</option>
-                </select>
-              </div>
-              {(!newUser.name.trim() || !newUser.email.trim()) && (
-                <p className="text-[10px] text-amber-600">Name and email are required.</p>
-              )}
-            </div>
-            <div className="flex gap-2 px-4 py-3 border-t border-border justify-end">
-              <button onClick={() => setAddingUser(false)} className="px-3 py-1.5 rounded-lg border border-border text-xs hover:bg-muted transition-colors">Cancel</button>
-              <button
-                onClick={handleAddUser}
-                disabled={!newUser.name.trim() || !newUser.email.trim()}
-                className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-[#166534] text-white text-xs font-semibold hover:bg-[#14532d] disabled:opacity-50 transition-colors"
-              >
-                <Plus size={11} /> Create Account
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {savedSuccess && (
         <div className="fixed top-16 right-4 z-50 flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-50 border border-emerald-200 shadow-xl">
           <CheckCircle2 size={14} className="text-emerald-600" />
@@ -254,6 +91,26 @@ export function CalibrationModule({ coverageRatePerHa, onCoverageRateChange }: C
             <Save size={13} /> Save All Settings
           </button>
         </div>
+
+        {/* System Status -- moved here from Monitoring & Extraction */}
+        <Section title="System Status" icon={<Wifi size={15} />}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              {backendOk
+                ? <CheckCircle2 size={12} className="text-emerald-500 shrink-0" />
+                : <AlertTriangle size={12} className="text-amber-500 shrink-0" />
+              }
+              <span className="text-[11px]">Backend API</span>
+            </div>
+            <span className="text-[10px] text-muted-foreground">
+              {backendOk === null ? "Checking…" : backendOk ? "Connected" : "Unreachable"}
+            </span>
+          </div>
+          <div className="mt-3 pt-2 border-t border-border flex items-center gap-1.5">
+            <Clock size={10} className="text-muted-foreground" />
+            <span className="text-[10px] text-muted-foreground">Last check: {lastCheck ?? "—"}</span>
+          </div>
+        </Section>
 
         {/* Coverage Parameters */}
         <Section title="RSBSA Coverage Rate (Sum Insured)" icon={<DollarSign size={15} />}>
@@ -353,97 +210,6 @@ export function CalibrationModule({ coverageRatePerHa, onCoverageRateChange }: C
           </p>
         </Section>
 
-        {/* GEE Credentials */}
-        <Section title="Google Earth Engine Credentials" icon={<Key size={15} />}>
-          <p className="text-[11px] text-muted-foreground mb-3">
-            Configure Google Cloud Project credentials for SAR (Synthetic Aperture Radar) imagery analysis via Google Earth Engine.
-          </p>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="text-[11px] font-medium block mb-1">GCP Project ID</label>
-              <input
-                value={geeProjectId}
-                onChange={e => setGeeProjectId(e.target.value)}
-                className="w-full border border-border rounded-lg px-3 py-2 text-[11px] bg-background focus:outline-none focus:border-[#166534]"
-                placeholder="your-gcp-project-id"
-              />
-            </div>
-            <div>
-              <label className="text-[11px] font-medium block mb-1">EEC Capacity Allocated</label>
-              <input
-                defaultValue="1000"
-                className="w-full border border-border rounded-lg px-3 py-2 text-[11px] bg-background focus:outline-none focus:border-[#166534]"
-                placeholder="e.g. 1000"
-              />
-              <p className="text-[9px] text-muted-foreground mt-1">Earth Engine Compute Units (EEC) quota</p>
-            </div>
-            <div className="col-span-2">
-              <label className="text-[11px] font-medium block mb-1">Service Account API Key</label>
-              <div className="relative">
-                <input
-                  type={showGeeKey ? "text" : "password"}
-                  value={geeApiKey}
-                  onChange={e => setGeeApiKey(e.target.value)}
-                  className="w-full border border-border rounded-lg px-3 py-2 pr-10 text-[11px] bg-background focus:outline-none focus:border-[#166534] font-mono"
-                />
-                <button
-                  onClick={() => setShowGeeKey(v => !v)}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                >
-                  {showGeeKey ? <EyeOff size={13} /> : <Eye size={13} />}
-                </button>
-              </div>
-              <p className="text-[9px] text-muted-foreground mt-1">Used to authenticate SAR imagery requests for crop area analysis within farm polygons.</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2 mt-3 p-2.5 rounded-lg bg-blue-50 dark:bg-blue-950/30 border border-blue-200">
-            <Server size={12} className="text-blue-600 shrink-0" />
-            <p className="text-[10px] text-blue-700">Connection status: <span className="font-bold text-emerald-600">Active</span> — Last SAR query: 01 Nov 2024, 08:30 PHT</p>
-          </div>
-        </Section>
-
-        {/* PAGASA Parser Settings */}
-        <Section title="PAGASA Parser & Notification Settings" icon={<Bell size={15} />}>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="text-[11px] font-medium block mb-1">TCB Polling Interval (hours)</label>
-              <input
-                type="number" min={1} max={24}
-                value={parserInterval}
-                onChange={e => setParserInterval(Number(e.target.value))}
-                className="w-full border border-border rounded-lg px-3 py-2 text-[11px] bg-background focus:outline-none focus:border-[#166534]"
-              />
-              <p className="text-[9px] text-muted-foreground mt-1">How often to check the PAGASA website for new bulletins during an active typhoon.</p>
-            </div>
-            <div>
-              <label className="text-[11px] font-medium block mb-1">Alert Email Recipients</label>
-              <input
-                defaultValue="a.reyes@pcic.gov.ph, gis-team@pcic.gov.ph"
-                className="w-full border border-border rounded-lg px-3 py-2 text-[11px] bg-background focus:outline-none focus:border-[#166534]"
-              />
-              <p className="text-[9px] text-muted-foreground mt-1">Comma-separated email addresses notified when a new TCB is parsed.</p>
-            </div>
-            <div className="flex items-center justify-between p-3 rounded-lg border border-border">
-              <div>
-                <p className="text-[11px] font-medium">Email Alerts</p>
-                <p className="text-[9px] text-muted-foreground">Send email when new TCB is downloaded</p>
-              </div>
-              <button onClick={() => setEmailAlerts(v => !v)} className={emailAlerts ? "text-[#166534]" : "text-muted-foreground"}>
-                {emailAlerts ? <ToggleRight size={24} /> : <ToggleLeft size={24} />}
-              </button>
-            </div>
-            <div className="flex items-center justify-between p-3 rounded-lg border border-border">
-              <div>
-                <p className="text-[11px] font-medium">On-Screen Pop-up Alerts</p>
-                <p className="text-[9px] text-muted-foreground">Show in-app notification on new bulletin</p>
-              </div>
-              <button className="text-[#166534]">
-                <ToggleRight size={24} />
-              </button>
-            </div>
-          </div>
-        </Section>
-
         {/* Session & Security */}
         <Section title="Session & Security Settings" icon={<Shield size={15} />}>
           <div className="grid grid-cols-2 gap-4">
@@ -468,111 +234,6 @@ export function CalibrationModule({ coverageRatePerHa, onCoverageRateChange }: C
               </button>
             </div>
           </div>
-        </Section>
-
-        {/* Database Backup */}
-        <Section title="Database Backup & Restore" icon={<Database size={15} />} defaultOpen={false}>
-          <div className="grid grid-cols-3 gap-3 mb-3">
-            {[
-              { label:"Last Backup",    value:"30 Oct 2024",   ok:false },
-              { label:"Backup Size",    value:"124 MB",        ok:true  },
-              { label:"Stored Backups", value:"14 versions",   ok:true  },
-            ].map((s,i) => (
-              <div key={i} className="bg-muted/40 rounded-lg p-3 border border-border">
-                <p className="text-[10px] text-muted-foreground">{s.label}</p>
-                <p className={`text-sm font-bold mt-0.5 ${s.ok?"text-foreground":"text-amber-600"}`}>{s.value}</p>
-              </div>
-            ))}
-          </div>
-          <div className="flex gap-2">
-            <button
-              onClick={() => {
-                setConfirm({
-                  msg: "This will create a full backup of all farmer records, TCB bulletins, and system settings. Continue?",
-                  fn: () => { handleBackup(); setConfirm(null); },
-                });
-              }}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[#1e3a5f] text-white text-[11px] font-medium hover:bg-[#172f4d] transition-colors"
-            >
-              {backupRunning
-                ? <><RefreshCw size={12} className="animate-spin" />Backing up…</>
-                : <><Database size={12} />Run Backup Now</>
-              }
-            </button>
-            <button
-              onClick={() => setConfirm({
-                msg: "This will overwrite all current data with the selected backup. This action cannot be undone. Are you sure?",
-                fn: () => setConfirm(null),
-              })}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border text-[11px] hover:bg-muted transition-colors text-destructive"
-            >
-              <RefreshCw size={12} /> Restore from Backup
-            </button>
-          </div>
-          <div className="flex items-center gap-2 mt-3">
-            <label className="flex items-center gap-1.5 text-[11px] cursor-pointer">
-              <input type="checkbox" checked={autoBackup} onChange={e=>setAutoBackup(e.target.checked)} className="accent-[#166534]" />
-              Automatic daily backup at 23:00 PHT
-            </label>
-          </div>
-        </Section>
-
-        {/* User Management */}
-        <Section title="User Account Management" icon={<Users size={15} />} defaultOpen={false}>
-          <div className="mb-3 flex items-center justify-between">
-            <p className="text-[11px] text-muted-foreground">Manage system access for GIS specialists and administrators.</p>
-            <button
-              onClick={() => setAddingUser(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#166534] text-white text-[11px] hover:bg-[#14532d] transition-colors"
-            >
-              <Plus size={11} /> Add User
-            </button>
-          </div>
-          <table className="w-full text-[11px]">
-            <thead>
-              <tr className="bg-muted/60 text-muted-foreground">
-                <th className="px-3 py-2 text-left font-semibold">Name</th>
-                <th className="px-3 py-2 text-left font-semibold">Role</th>
-                <th className="px-3 py-2 text-left font-semibold">Email</th>
-                <th className="px-3 py-2 text-left font-semibold">Status</th>
-                <th className="px-3 py-2 text-left font-semibold">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {users.map(u => (
-                <tr key={u.id} className="border-t border-border">
-                  <td className="px-3 py-2.5 font-medium">{u.name}</td>
-                  <td className="px-3 py-2.5 text-muted-foreground">{u.role}</td>
-                  <td className="px-3 py-2.5 text-muted-foreground font-mono text-[10px]">{u.email}</td>
-                  <td className="px-3 py-2.5">
-                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${u.active?"bg-emerald-100 text-emerald-700":"bg-gray-100 text-gray-500"}`}>
-                      {u.active ? "Active" : "Inactive"}
-                    </span>
-                  </td>
-                  <td className="px-3 py-2.5">
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => setEditingUser(u)}
-                        className="p-1 hover:bg-muted rounded text-[#1e3a5f]"
-                        title="Edit"
-                      >
-                        <Settings size={11} />
-                      </button>
-                      {u.active && (
-                        <button
-                          className="p-1 hover:bg-muted rounded text-destructive"
-                          title="Deactivate"
-                          onClick={() => handleDeleteUser(u.id)}
-                        >
-                          <Trash2 size={11} />
-                        </button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
         </Section>
 
         <div className="pb-6" />

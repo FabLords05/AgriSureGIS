@@ -7,6 +7,7 @@ This repository contains the frontend and backend components used to ingest farm
 
 - Backend: See [backend/README.md](backend/README.md) for detailed setup, database initialization, and API info.
 - Frontend: See [frontend/README.md](frontend/README.md) for the Vite + React frontend and developer instructions.
+- Windows: See [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md) for a full Windows-specific walkthrough (PostgreSQL/PostGIS, backend, frontend, and optional GeoServer setup).
 
 ## Quickstart
 

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="AgriSureGIS-mock-data" xmlns="http://www.topografix.com/GPX/1/1">
+  <trk>
+    <name>MOCK FARM BOUNDARY - 900011/9100011 - City of Gingoog, Misamis Oriental</name>
+    <trkseg>
+      <trkpt lat="8.7035" lon="125.0710"/>
+      <trkpt lat="8.7035" lon="125.0722"/>
+      <trkpt lat="8.7049" lon="125.0723"/>
+      <trkpt lat="8.7047" lon="125.0713"/>
+      <trkpt lat="8.7035" lon="125.0710"/>
+    </trkseg>
+  </trk>
+</gpx>
