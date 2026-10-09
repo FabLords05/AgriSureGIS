@@ -33,13 +33,41 @@ def _part(farmer: Any, attribute: str) -> str:
 
 
 def format_given_first(farmer: Any) -> str | None:
-    """'ALFONSO ABANES' -- the form the Farm Records table and map popup use.
+    """'ALFONSO ABANES' -- the form the farmer search suggestions use.
     None if neither part is on file.
     """
     if farmer is None:
         return None
     full = f"{_part(farmer, 'first_name')} {_part(farmer, 'last_name')}".strip()
     return full or None
+
+
+def format_pcic(farmer: Any) -> str | None:
+    """'MANTE, DIOSDADO JR. T.' -- the PCIC CSV's own FARMER NAME layout
+    (SURNAME, FIRSTNAME [EXTENSION] M.), used by the Spatial Analysis & Data
+    Import Farm Records table and the map popup. None if neither part is on file.
+
+    No separate handling for the name extension (JR./SR./II...) is needed: the
+    PCIC CSV places it between the first name and the middle initial, and
+    parse_farmer_name() keeps it attached to first_name, so it lands in the same
+    position here. The legacy export's full Middlename ('FERNANDEZ') is reduced to
+    its initial, matching what the PCIC CSV carries.
+    """
+    if farmer is None:
+        return None
+
+    last = _part(farmer, "last_name")
+    first = _part(farmer, "first_name")
+    if not last and not first:
+        return None
+
+    middle = _part(farmer, "middle_name")
+    given = " ".join(p for p in (first, f"{middle[0]}." if middle else "") if p)
+    if not last:
+        return given
+    if not given:
+        return last
+    return f"{last}, {given}"
 
 
 def format_surname_first(farmer: Any, *, with_middle_initial: bool = False) -> str | None:

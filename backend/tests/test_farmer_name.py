@@ -1,7 +1,7 @@
 import unittest
 from types import SimpleNamespace
 
-from app.core.farmer_name import format_given_first, format_surname_first
+from app.core.farmer_name import format_given_first, format_pcic, format_surname_first
 
 
 def _farmer(last_name=None, first_name=None, middle_name=None):
@@ -9,8 +9,8 @@ def _farmer(last_name=None, first_name=None, middle_name=None):
 
 
 class FormatGivenFirstTests(unittest.TestCase):
-    """'First Last' -- the form GET /farms/ returns as farmer_name for the Farm
-    Records table and the map popup."""
+    """'First Last' -- the form GET /farms/farmers returns for the farmer
+    search suggestions."""
 
     def test_both_parts(self):
         self.assertEqual(format_given_first(_farmer("ABANES", "ALFONSO")), "ALFONSO ABANES")
@@ -41,6 +41,35 @@ class FormatGivenFirstTests(unittest.TestCase):
         # object passed in has no middle_name attribute at all.
         row = SimpleNamespace(farmer_id=1, first_name="ALFONSO", last_name="ABANES")
         self.assertEqual(format_given_first(row), "ALFONSO ABANES")
+
+
+class FormatPcicTests(unittest.TestCase):
+    """'SURNAME, FIRSTNAME [EXT] M.' -- the PCIC CSV's FARMER NAME layout, which
+    GET /farms/ returns as farmer_name for the Farm Records table and map popup."""
+
+    def test_full_name_with_middle_initial(self):
+        self.assertEqual(format_pcic(_farmer("AGCOL", "ELIZABETH", "M")), "AGCOL, ELIZABETH M.")
+
+    def test_extension_sits_between_first_name_and_middle_initial(self):
+        # parse_farmer_name("MANTE, DIOSDADO JR. T.") stores first_name="DIOSDADO JR.",
+        # so the extension lands exactly where the PCIC CSV puts it.
+        self.assertEqual(format_pcic(_farmer("MANTE", "DIOSDADO JR.", "T")), "MANTE, DIOSDADO JR. T.")
+        self.assertEqual(format_pcic(_farmer("CRUZ", "JUAN II", "S")), "CRUZ, JUAN II S.")
+
+    def test_full_legacy_middle_name_is_reduced_to_its_initial(self):
+        self.assertEqual(format_pcic(_farmer("ABANES", "ALFONSO", "FERNANDEZ")), "ABANES, ALFONSO F.")
+
+    def test_no_middle_name(self):
+        self.assertEqual(format_pcic(_farmer("ABANES", "ALFONSO")), "ABANES, ALFONSO")
+        self.assertEqual(format_pcic(_farmer("ABANES", "ALFONSO", "  ")), "ABANES, ALFONSO")
+
+    def test_blank_strings_give_none(self):
+        self.assertIsNone(format_pcic(_farmer("", "", "")))
+        self.assertIsNone(format_pcic(None))
+
+    def test_one_part_missing_leaves_no_stray_separator(self):
+        self.assertEqual(format_pcic(_farmer("ABANES", "")), "ABANES")
+        self.assertEqual(format_pcic(_farmer("", "ALFONSO", "F")), "ALFONSO F.")
 
 
 class FormatSurnameFirstTests(unittest.TestCase):

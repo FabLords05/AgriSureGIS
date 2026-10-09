@@ -4,6 +4,33 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-09] - Farm Records Show Farmer Names in PCIC CSV Format (branch: develop)
+
+Spatial Analysis & Data Import listed farmers first-name-first
+("ELIZABETH AGCOL"). They now follow the PCIC CSV's `FARMER NAME` layout:
+**SURNAME, FIRSTNAME [EXTENSION] M.**, e.g. `AGCOL, ELIZABETH M.`,
+`MANTE, DIOSDADO JR. T.`.
+
+### 1. File: `backend/app/core/farmer_name.py`
+* **`format_pcic()`** (new): builds `SURNAME, FIRSTNAME M.`. A full
+  legacy `Middlename` is reduced to its initial. No separate extension handling
+  is needed: `parse_farmer_name()` already keeps JR./SR./II... attached to
+  `first_name`, which is exactly where the PCIC CSV places it (before the
+  middle initial). Returns `None` (never `''`) when no name is on file.
+* **`format_given_first()`**: docstring only. It now serves just the farmer
+  search suggestions.
+
+### 2. File: `backend/app/api/farms.py`
+* **`list_farms()`**: `farmer_name` now uses `format_pcic()`. This affects the
+  Farm Records table and the map popup, which share this field. The
+  Farmer-column sort now orders by surname.
+
+### 3. File: `backend/tests/test_farmer_name.py`
+* New **`FormatPcicTests`**: middle initial, extension placement, legacy full
+  middle name, missing parts, blank or `None` handling.
+
+---
+
 ## [2026-10-09] - Persist Final-TCB Marker (`is_final`) + "Ready for Assessment" Notice; Farm Records Pinned Column (branch: develop, direct push per Cristian)
 
 By Cristian. `bulletin_parser.py` already detected a typhoon's final bulletin

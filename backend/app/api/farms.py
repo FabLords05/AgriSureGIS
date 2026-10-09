@@ -7,7 +7,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
-from app.core.farmer_name import format_given_first
+from app.core.farmer_name import format_given_first, format_pcic
 from app.core.farms_cache import cache_farms_page, get_cached_farms_page
 from app.core.farms_view import fetch_latest_insurance_from_view, materialized_view_available
 from app.core.security import get_current_user
@@ -205,7 +205,7 @@ def list_farms(
                 # None (not "") when no name is on file, so the frontend's
                 # `farmer_name ?? "—"` fallback actually fires -- see
                 # app/core/farmer_name.py.
-                "farmer_name": format_given_first(farm.farmer),
+                "farmer_name": format_pcic(farm.farmer),
                 "province": farm.boundary.province if farm.boundary else None,
                 "municipality": farm.boundary.municipality if farm.boundary else None,
                 "barangay": farm.boundary.barangay if farm.boundary else None,
