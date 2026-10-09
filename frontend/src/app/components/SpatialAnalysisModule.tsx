@@ -536,7 +536,12 @@ export function SpatialAnalysisModule({
                     className={`border-t border-border cursor-pointer transition-colors hover:bg-muted/50 ${f.farm_id === selectedFarmId ? "bg-[#166534]/10 border-l-2 border-l-[#166534]" : ""}`}
                   >
                     <td className="px-2.5 py-2 font-mono text-[#166534]">#{f.farm_id}</td>
-                    <td className="px-2.5 py-2 font-medium whitespace-nowrap">{f.farmer_name ?? "—"}</td>
+                    {/* `||` not `??` -- a farmer with no name on file can reach
+                        the client as "" (tbl_farmers_profile.last_name/first_name
+                        are NOT NULL, so ingestion can store blanks), and `??`
+                        only substitutes on null/undefined, which rendered the
+                        cell visually empty instead of showing the dash. */}
+                    <td className="px-2.5 py-2 font-medium whitespace-nowrap">{f.farmer_name || "—"}</td>
                     <td className="px-2.5 py-2">{f.municipality ?? "—"}</td>
                     <td className="px-2.5 py-2 text-muted-foreground">{f.barangay ?? "—"}</td>
                     <td className="px-2.5 py-2 text-right">{f.area_size != null ? f.area_size.toFixed(2) : "—"}</td>

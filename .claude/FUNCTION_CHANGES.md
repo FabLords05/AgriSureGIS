@@ -4,6 +4,153 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-09] - Sprint 3: Blank Farmer Names in Spatial Analysis — Ingest Idempotency Fix
+
+Reported by Fabio: after ingesting `PCIC10 GPX 11-05-2025 WITH EXISTING IC
+AFFECTED BY TY.csv`, the upload reported success but the **Farmer column in
+Spatial Analysis → Farm Records was empty** for every row from that file.
+
+**The parser was not at fault.** Replaying the name logic from
+`prepare_row_payload()` and `GpxFarmerMatcherService.parse_farmer_name()`
+against the real CSV gives **0 blank names out of 1,114 rows**; all 952
+distinct `FARMERSID` values split correctly. Root cause was a three-link
+chain:
+
+1. **The pre-fix upload wrote a shadow dataset.** The file was uploaded once
+   *before* `9547564`, when `prepare_row_payload()` had no `FARMER NAME` /
+   `CIC NO` / `AREA` aliases. Because `tbl_farmers_profile.last_name` and
+   `first_name` are `NOT NULL`, the `or ""` fallback stored **empty strings**
+   instead of failing — nothing errored. The same missing aliases stored
+   `policy_no = ''`, `area_size = 0`, `amount_cover = 0`.
+2. **Ingestion was not idempotent.** `_ingest_row()` resolved an existing
+   farmer/farm purely as a lookup and discarded the payload, so re-uploading
+   the corrected file matched the broken rows by `farmers_id` and changed
+   nothing. **Re-uploading could never have fixed it** — this is the real
+   defect, and what this entry fixes.
+3. **The API returned `""`, not `null`.** `list_farms()` built
+   `f"{first} {last}".strip()` → `""`, and the frontend's `farmer_name ?? "—"`
+   only substitutes on null/undefined, so the cell rendered visually blank
+   rather than showing a dash. That is why this stayed invisible.
+
+Side effect of the double upload: the duplicate guard is
+`(policy_no, farm_id)`. The pre-fix rows hold `policy_no = ''` while the
+re-upload supplied the real `CIC NO`, so the guard did not match and a
+**second `InsuranceRecord` was inserted per farm**, each with its own
+`tbl_risk_assessment` seed. Cleaned up by the migration below.
+
+### 1. File: `backend/app/api/upload.py`
+* **`_is_blank()`** (new): treats `None` and whitespace-only strings as blank.
+  Documents why blank (not null) is the state these NOT NULL columns reach.
+* **`_backfill_blank_fields()`** (new): copies payload values onto an
+  already-persistent instance for **only** the fields currently blank on it.
+  Returns the field names changed, for logging. No `db.add()` — the instance
+  is already persistent, so the UPDATE rides the caller's existing per-row
+  `SAVEPOINT`, leaving failure isolation and progress reporting untouched.
+  Blank-only rather than "CSV always wins" (Fabio's call, 2026-10-09): the
+  newer export derives the farmer from one combined `FARMER NAME` field, so
+  letting it overwrite would let a split value clobber the legacy export's
+  three discrete columns. Repairing a blank cannot lose information.
+* **`_ingest_row()`**: on the existing-farmer branch, backfills
+  `last_name`/`first_name`/`middle_name` and logs what was filled. On the
+  existing-farm branch, backfills `area_size` when the stored value is
+  `0`/`None` — not routed through `_backfill_blank_fields()` because "blank"
+  there is `0` (the create path coerces an unreadable `AREA` column to `0`,
+  and a real farm is never 0 ha).
+
+### 2. File: `backend/app/core/farmer_name.py` (new)
+* **`format_given_first()`** — `'ALFONSO ABANES'`, returns `None` (never `''`)
+  when nothing is on file, so the frontend's `?? "—"` fallback actually fires.
+* **`format_surname_first(with_middle_initial=False)`** — `'ABANES, ALFONSO'`,
+  and `'ABANES, ALFONSO. F.'` for the payout export. Reproduces the export's
+  existing shape exactly, trailing period included — that quirk predates this
+  helper and the column format is PCIC-facing, so it is preserved deliberately.
+* A blank part no longer leaves its separator behind (previously `", "` and
+  `", ."`). Centralized rather than inlined because four endpoints each had
+  their own f-string and all four degraded differently on blanks.
+
+### 3. Files: `backend/app/api/farms.py`, `insurance.py`, `assessments.py`
+* `list_farms()` and `search_farmers()` → `format_given_first()`.
+* `get_insurance_usage()` → `format_surname_first()`.
+* `export_assessments_csv()` → `format_surname_first(with_middle_initial=True)`.
+* `search_farmers()` keeps `name` a non-empty string (the suggestion list
+  renders it as the clickable label, so null would be an invisible,
+  unselectable row) — a nameless farmer is labelled `(unnamed farmer #<id>)`
+  so the gap is visible and still pickable.
+
+### 4. File: `backend/migrations/2026-10-09_prefix_ingest_cleanup.sql` (new)
+* Deletes `tbl_insurance_records WHERE policy_no = ''` — the ~1,100 shadow
+  records from the pre-fix upload. `tbl_risk_assessment` and
+  `tbl_insurance_usage` both cascade off that FK, so one statement suffices.
+* **Diagnostic-first**: leading read-only `SELECT`s report every affected count
+  (including the good records that must *not* change) before anything is
+  deleted, then a verify pass afterwards. Safe to re-run.
+* `policy_no = ''` is a precise fingerprint: `seed_database.py` writes real
+  numbers, `seed_active_insurance.py` prefixes `POL-SEED-`, and `upload.py`
+  only produces `''` when the CSV had no recognizable policy column at all.
+* Deliberately does **not** delete the farmers or farms — their blank names and
+  zero areas are repaired in place by item 1 on the next upload. Deleting them
+  would cascade into the *good* insurance records and the `location_geom`
+  already loaded from the `.gpkg`.
+
+### 5. Files: `frontend/src/app/components/SpatialAnalysisModule.tsx`, `GISLeafletMap.tsx`
+* Farmer name fallback `??` → `||`, so a blank-but-not-null name can never
+  render as an empty cell again regardless of what the API sends.
+
+### 6. Files: `backend/tests/test_upload_csv_ingestion.py`, `tests/test_farmer_name.py` (new)
+* New **`ExistingRowBackfillTests`** (6 tests): blank names backfilled;
+  whitespace-only treated as blank; **real names not overwritten**; partially
+  blank fills only the gap; `area_size = 0` backfilled; real `area_size` not
+  overwritten. Uses the existing `_build_mock_db()` / `_run_ingestion()`
+  harness, pre-seeding via `mock_db.add()`.
+* New `test_farmer_name.py` (14 tests) covering both formatters, the
+  blank/null/whitespace cases, and the unchanged export shape.
+
+### 7. File: `.claude/HANDOFF_2026-10-09_FARMER_NAME_BACKFILL.md` (new)
+* Runbook for the remaining database/UI verification (steps 2–5): diagnostic
+  counts with a decision gate (including when NOT to run the delete), the
+  cleanup migration, the re-upload that does the actual repair, and the SQL/UI
+  checks. Also records the gotchas most likely to waste time — chiefly that
+  "Active Insurance Only" hides every farm from this CSV (its policies expired
+  `02/28/2026`), and that `backend/.env` may not exist. No secrets or real
+  farmer data in the file.
+
+### Status / Next Steps
+* **Test suite run by Fabio, 2026-10-09: PASSED.** All 20 new tests green
+  (`ExistingRowBackfillTests` 6, `test_farmer_name.py` 14). The only failures
+  are the 10 pre-existing `test_farms_api.py` ones noted below, unchanged in
+  count and all the same `_ChainableQuery`/`.join` harness error.
+* Required a throwaway `JWT_SECRET_KEY` on the command line —
+  `backend/.env` does not exist on Fabio's laptop, and `app/core/security.py:28`
+  hard-fails without it, which collected-errored every test module that imports
+  an API router. `DATABASE_URL` has a fallback (`app/core/database.py:15`) and
+  the suite is fully mocked, so no database was needed:
+  `JWT_SECRET_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(48))") python -m pytest tests/ -v`
+* Also verified without touching the venv/DB: the name logic replayed against
+  the real CSV with stdlib only (0/1,114 blank);
+  `_is_blank()`/`_backfill_blank_fields()` exercised as extracted source (8/8
+  logic cases); `py_compile` clean on all edited Python.
+* Remaining run order for Fabio: (2) the migration's
+  diagnostic half, confirming the counts; (3) the delete; (4) **re-upload the
+  CSV** — this is what repairs the blank names and zero areas; (5) confirm
+  `SELECT COUNT(*) FROM tbl_farmers_profile WHERE COALESCE(TRIM(last_name),'')=''
+  AND COALESCE(TRIM(first_name),'')='';` returns 0.
+* Note when checking the UI: this CSV's policies expired `02/28/2026`, so with
+  **Active Insurance Only** on these farms do not appear at all. Search a
+  municipality (e.g. `MAINIT`) and turn that toggle off.
+* Not changed: `nullable=False` on `last_name`/`first_name`. Making them
+  nullable would surface this bug class earlier but affects every consumer —
+  its own task if wanted. `/gpkg` is untouched (it only ever updates
+  `location_geom` and never creates or renames a farmer).
+* Pre-existing, still not fixed here: the 10 `test_farms_api.py` failures noted
+  in the entry below. `_fake_farm()`'s farmer fixture yields the same string
+  through `format_given_first()`, so item 3 neither fixes nor worsens them.
+  **Worth knowing:** because those 10 never execute, `list_farms()`'s response
+  shape — including item 3's `farmer_name` change — currently has no automated
+  coverage. The cause is a one-line harness gap (`list_farms()` is called
+  without `municipality`/`farmer_id`, so FastAPI's truthy `Query(None)` default
+  reaches the `.join()` branch, which `_ChainableQuery` doesn't implement).
+  Fixing it is a small, self-contained follow-up.
+
 ## [2026-10-09] - Sprint 3: CSV Ingest Reuses Preloaded Boundaries + Ingestion Test Harness Fix
 
 Verification of the crop-stage branch below on Cristian's PC. The first run

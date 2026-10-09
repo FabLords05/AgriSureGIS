@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
+from app.core.farmer_name import format_surname_first
 from app.core.security import get_current_user
 from app.models.models import InsuranceRecord
 from app.models.models import FarmerProfile, InsuranceRecord, InsuranceUsage
@@ -72,7 +73,7 @@ def get_insurance_usage(
                 "typhoon_id": u.typhoon_id,
                 "policy_no": insurance.policy_no if insurance else None,
                 "farmer_id": farmer.farmer_id if farmer else None,
-                "farmer_name": f"{farmer.last_name}, {farmer.first_name}" if farmer else None,
+                "farmer_name": format_surname_first(farmer),
                 "is_used": u.is_used,
                 "assessment_id": u.assessment_id,
                 "marked_at": u.marked_at,

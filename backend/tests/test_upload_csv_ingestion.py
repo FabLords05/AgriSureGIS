@@ -628,6 +628,128 @@ class CropStageTranslationTests(unittest.TestCase):
         self.assertEqual(farmer.first_name, "ALFONSO")
 
 
+class ExistingRowBackfillTests(unittest.TestCase):
+    """Re-ingesting a file must REPAIR rows this same ingest created earlier under a
+    CSV layout whose columns the parser didn't recognize yet -- not preserve the
+    damage forever.
+
+    This is the root cause of blank farmer names in Spatial Analysis (2026-10-09).
+    The newer PABS export was uploaded once before `FARMER NAME`/`AREA` aliases
+    existed; because tbl_farmers_profile.last_name/first_name are NOT NULL, the
+    `or ""` fallback stored empty strings rather than failing, and AreaInsured's
+    absence stored area_size = 0. _ingest_row() then resolved those rows purely as
+    lookups and discarded the payload, so re-uploading the corrected file matched
+    them by farmers_id and changed nothing at all.
+
+    The rule is blank-only (Fabio's call, 2026-10-09): fill a gap, never overwrite
+    a value that's really there -- the newer export derives the farmer from one
+    combined 'FARMER NAME' field, so letting it win outright would let a split
+    value clobber the legacy export's three discrete columns.
+    """
+
+    # The newer PABS/GPX layout -- combined FARMER NAME, CIC NO, AREA.
+    _NEW_HEADER = (
+        "PROVINCE,MUNICIPALITY,BARANGAY,CIC NO,FARMERSID,FARMER NAME,FARMID,"
+        "AREA,AMOUNT OF COVER,Stage of Crop,EFFECTIVITY DATE,EXPIRY DATE"
+    )
+
+    def setUp(self):
+        patcher = patch("app.api.upload._load_psgc_lookup", return_value=_FAKE_PSGC_LOOKUP)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _new_layout_csv(self, *, farmers_id="29136", farmid="365827", area="1.5"):
+        return self._NEW_HEADER + "\n" + (
+            f"Bukidnon,Malaybalay,Casisang,1742153,{farmers_id},\"ABANES, ALFONSO F.\",{farmid},"
+            f"{area},\"20,000.00\",Dough Stage,08/15/2025,02/28/2026"
+        ) + "\n"
+
+    def test_blank_names_on_existing_farmer_are_backfilled(self):
+        mock_db = _build_mock_db()
+        # Exactly what the pre-alias ingest left behind: identified, but nameless.
+        existing = models.FarmerProfile(farmers_id="29136", last_name="", first_name="", middle_name=None)
+        mock_db.add(existing)
+
+        result = _run_ingestion(self._new_layout_csv(), mock_db)
+
+        self.assertEqual(result["rows_failed"], 0)
+        # Repaired in place -- no second profile created for the same farmers_id.
+        self.assertEqual(len(mock_db.tables[models.FarmerProfile].rows), 1)
+        self.assertEqual(existing.last_name, "ABANES")
+        self.assertEqual(existing.first_name, "ALFONSO")
+        self.assertEqual(existing.middle_name, "F")
+
+    def test_whitespace_only_names_are_treated_as_blank(self):
+        mock_db = _build_mock_db()
+        existing = models.FarmerProfile(farmers_id="29136", last_name="   ", first_name="\t", middle_name="  ")
+        mock_db.add(existing)
+
+        _run_ingestion(self._new_layout_csv(), mock_db)
+
+        self.assertEqual(existing.last_name, "ABANES")
+        self.assertEqual(existing.first_name, "ALFONSO")
+        self.assertEqual(existing.middle_name, "F")
+
+    def test_real_names_on_existing_farmer_are_not_overwritten(self):
+        # The conservative half of the rule: a farmer already carrying a real name
+        # (e.g. from the legacy export's three discrete columns) keeps it, even
+        # though this CSV disagrees.
+        mock_db = _build_mock_db()
+        existing = models.FarmerProfile(
+            farmers_id="29136", last_name="ABANES-LEGACY", first_name="ALFONSO JOSE", middle_name="FERNANDEZ"
+        )
+        mock_db.add(existing)
+
+        _run_ingestion(self._new_layout_csv(), mock_db)
+
+        self.assertEqual(existing.last_name, "ABANES-LEGACY")
+        self.assertEqual(existing.first_name, "ALFONSO JOSE")
+        self.assertEqual(existing.middle_name, "FERNANDEZ")
+
+    def test_partially_blank_existing_farmer_only_fills_the_gap(self):
+        mock_db = _build_mock_db()
+        existing = models.FarmerProfile(farmers_id="29136", last_name="ABANES-LEGACY", first_name="", middle_name=None)
+        mock_db.add(existing)
+
+        _run_ingestion(self._new_layout_csv(), mock_db)
+
+        self.assertEqual(existing.last_name, "ABANES-LEGACY")  # kept
+        self.assertEqual(existing.first_name, "ALFONSO")       # filled
+        self.assertEqual(existing.middle_name, "F")            # filled
+
+    def test_zero_area_size_on_existing_farm_is_backfilled(self):
+        # area_size is NOT NULL and the create path coerces an unreadable
+        # AreaInsured/AREA column to 0, so 0 is this column's "never actually read"
+        # marker -- a real farm is never 0 ha.
+        mock_db = _build_mock_db()
+        farmer = models.FarmerProfile(farmers_id="29136", last_name="ABANES", first_name="ALFONSO")
+        mock_db.add(farmer)
+        existing_farm = models.Farm(
+            farmer_id=farmer.farmer_id, boundary_id=1, csv_farm_reference="365827",
+            georef_id=None, area_size=Decimal("0"), location_geom=None,
+        )
+        mock_db.add(existing_farm)
+
+        result = _run_ingestion(self._new_layout_csv(area="1.5"), mock_db)
+
+        self.assertEqual(result["rows_failed"], 0)
+        self.assertEqual(len(mock_db.tables[models.Farm].rows), 1)
+        self.assertEqual(existing_farm.area_size, Decimal("1.5"))
+
+    def test_real_area_size_on_existing_farm_is_not_overwritten(self):
+        mock_db = _build_mock_db()
+        farmer = models.FarmerProfile(farmers_id="29136", last_name="ABANES", first_name="ALFONSO")
+        mock_db.add(farmer)
+        existing_farm = models.Farm(
+            farmer_id=farmer.farmer_id, boundary_id=1, csv_farm_reference="365827",
+            georef_id=None, area_size=Decimal("2.25"), location_geom=None,
+        )
+        mock_db.add(existing_farm)
+
+        _run_ingestion(self._new_layout_csv(area="1.5"), mock_db)
+
+        self.assertEqual(existing_farm.area_size, Decimal("2.25"))
+
 
 if __name__ == "__main__":
     unittest.main()
