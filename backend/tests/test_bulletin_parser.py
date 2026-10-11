@@ -7,7 +7,19 @@ from unittest.mock import patch, AsyncMock, MagicMock
 from app.services.bulletin_parser import PHT, BulletinParserService, PagasaScrapeError, match_tcws_cell
 from app.models.models import Typhoon, TropicalCycloneBulletin, TcbSignal, AdminBoundary
 
-REAL_SAMPLE_PDF = os.path.join(os.path.dirname(__file__), "..", "..", "docs", "TCB#11_kiyapo.pdf")
+# Real-PDF regression fixture. `docs/TCB#11_kiyapo.pdf` was deleted from the repo on
+# 2026-10-12 during the docs cleanup, so the end-to-end test below is skipped rather
+# than failing. Drop that exact bulletin back into `docs/` -- or point
+# AGRISURE_SAMPLE_TCB_PDF at a local copy -- and it re-enables itself.
+#
+# It must be KIYAPO Bulletin NR. 11 specifically: the assertions check that bulletin's
+# real values (KIYAPO/NOUL, NR. 11, its winds and coordinates), so any other PAGASA PDF
+# will run but fail. Real samples live in the gitignored `USTP CAPSTONE-*/TCB/` folder;
+# using one of those means rewriting the assertions to match it.
+REAL_SAMPLE_PDF = os.environ.get(
+    "AGRISURE_SAMPLE_TCB_PDF",
+    os.path.join(os.path.dirname(__file__), "..", "..", "docs", "TCB#11_kiyapo.pdf"),
+)
 
 
 def _mock_pdf(text, tables=None):
@@ -308,6 +320,10 @@ class BulletinParserTests(unittest.TestCase):
 
         self.assertEqual(result["signals"], {})
 
+    @unittest.skipUnless(
+        os.path.exists(REAL_SAMPLE_PDF),
+        f"real sample bulletin PDF not present at {REAL_SAMPLE_PDF} (see REAL_SAMPLE_PDF above)",
+    )
     def test_parse_bulletin_text_against_real_sample_pdf(self):
         # End-to-end regression test against a real PAGASA bulletin (Tropical
         # Storm KIYAPO, Bulletin NR. 11) provided by Fabio. KIYAPO only

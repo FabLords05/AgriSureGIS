@@ -25,7 +25,7 @@ Priority Order:
 1. Use Case Diagram
 2. UI Prototype Screens
 3. Entity-Relationship Diagram (ERD)
-4. Capstone Manuscript ([docs/Revised AgriSureGIS Manuscript.pdf](docs/Revised%20AgriSureGIS%20Manuscript.pdf))
+4. Capstone Manuscript — **kept outside the repo** (removed from `docs/` on 2026-10-12). Ask Fabio for the current PDF; do not treat its absence as permission to assume. An older, shorter revision sits at `ui-prototype/src/imports/Revised_AgriSureGIS_Manuscript.pdf` — it is *not* the current manuscript (it predates the indemnity-formula section) and must not be cited as authoritative.
 5. Development Plan
 
 If documentation conflicts:
