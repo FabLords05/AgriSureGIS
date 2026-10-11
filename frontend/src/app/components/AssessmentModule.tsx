@@ -6,7 +6,7 @@ import {
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip as RTooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import {
-  getAssessmentsPabsSummary, getAssessmentsExportPabsUrl, getBulletins, getTyphoonSummary, calculateAssessments,
+  getAssessmentsPabsSummary, downloadAssessmentsPabsCsv, getBulletins, getTyphoonSummary, calculateAssessments,
   getBulletinSignals,
   PabsAssessmentRow, Bulletin, TyphoonSummary, TyphoonSummaryArea, TcbSignal,
 } from "@/lib/api";
@@ -111,7 +111,7 @@ function CSVPreviewModal({ rows, onClose }: { rows: PabsAssessmentRow[]; onClose
           <div className="flex items-center gap-2">
             <button onClick={onClose} className="px-3 py-1.5 rounded-lg border border-border text-xs hover:bg-muted transition-colors">Cancel</button>
             <button
-              onClick={() => window.open(getAssessmentsExportPabsUrl(), "_blank")}
+              onClick={() => downloadAssessmentsPabsCsv().catch(e => toast.error(e.message))}
               className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-[#166534] text-white text-xs font-semibold hover:bg-[#14532d] transition-colors"
             >
               <Download size={12} /> Download CSV

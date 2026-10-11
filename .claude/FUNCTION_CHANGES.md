@@ -4,6 +4,31 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-11] - PABS "Download CSV" Sends the Auth Token (branch: develop)
+
+Clicking **Download CSV** in the Assessment module's "Review CSV / PABS
+Indemnity" modal opened a tab showing `{"detail":"Not authenticated."}`
+instead of saving a file. The assessments router is gated by
+`Depends(get_current_user)`, which requires an `Authorization: Bearer` header,
+but the button used `window.open()` -- a plain navigation that sends no
+header. The JWT is only attached by `api.ts`'s `request()` wrapper.
+
+### 1. File: `frontend/src/lib/api.ts`
+* **`downloadCsv()`** (new, private): fetches a path with the persisted Bearer
+  token, then saves the response Blob via a synthetic `<a download>`. A 401
+  logs the user out the same way `request()` does. Filenames are hardcoded
+  client-side because `Content-Disposition` is not readable cross-origin
+  without `expose_headers` on the CORS middleware.
+* **`downloadAssessmentsCsv()`** / **`downloadAssessmentsPabsCsv()`** (new):
+  replace `getAssessmentsExportUrl()` / `getAssessmentsExportPabsUrl()`
+  (removed), which returned bare URLs and had the same missing-header flaw.
+
+### 2. File: `frontend/src/app/components/AssessmentModule.tsx`
+* **PABS modal "Download CSV" button**: calls `downloadAssessmentsPabsCsv()`
+  and shows a toast on failure, instead of `window.open()`.
+
+---
+
 ## [2026-10-09] - Farm Records Show Farmer Names in PCIC CSV Format (branch: develop)
 
 Spatial Analysis & Data Import listed farmers first-name-first

@@ -469,15 +469,49 @@ export function calculateAssessments(typhoonId: number, bulletinId: number): Pro
   });
 }
 
-export function getAssessmentsExportUrl(typhoonId: number): string {
-  return `${API_BASE_URL}/api/assessments/export?typhoon_id=${typhoonId}`;
+// Authenticated downloads (2026-10-11) -- the export routes sit on the
+// assessments router, which is gated by Depends(get_current_user) (see
+// backend/app/api/assessments.py:25), so they need the same Bearer header
+// every other call carries. window.open()/<a href> is a plain top-level
+// navigation: the browser sends no Authorization header, so the export tab
+// rendered {"detail":"Not authenticated."} instead of saving a file.
+// Fetching as a Blob and clicking a synthetic <a download> keeps the header
+// and gives the same save-file behaviour.
+async function downloadCsv(path: string, filename: string): Promise<void> {
+  const token = loadPersistedToken();
+  const headers = new Headers();
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+
+  const response = await fetch(`${API_BASE_URL}${path}`, { headers });
+  if (!response.ok) {
+    if (response.status === 401) {
+      clearPersistedUser();
+      notifySessionExpired();
+    }
+    const body = await response.json().catch(() => null);
+    throw new Error(body?.detail ?? `Download failed with status ${response.status}`);
+  }
+
+  const objectUrl = URL.createObjectURL(await response.blob());
+  const anchor = document.createElement('a');
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(objectUrl);
+}
+
+export function downloadAssessmentsCsv(typhoonId: number): Promise<void> {
+  return downloadCsv(`/api/assessments/export?typhoon_id=${typhoonId}`,
+                     `assessments_typhoon_${typhoonId}.csv`);
 }
 
 // Combined export across every typhoon (not scoped to one bulletin/typhoon
 // folder), in the PABS-required column format. IRID/P/S columns come back
 // blank -- no definition for them was available; see the backend docstring.
-export function getAssessmentsExportPabsUrl(): string {
-  return `${API_BASE_URL}/api/assessments/export-pabs`;
+export function downloadAssessmentsPabsCsv(): Promise<void> {
+  return downloadCsv('/api/assessments/export-pabs', 'pabs_indemnity_export.csv');
 }
 
 export interface PabsAssessmentRow {
