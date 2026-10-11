@@ -270,6 +270,43 @@ class BulletinParserTests(unittest.TestCase):
         self.assertNotIn(1, result["signals"][2])  # Visayas cell was "-"
         self.assertIn("Some Luzon area", result["signals"][1][0])
         self.assertNotIn(2, result["signals"][1])  # Signal 1's Mindanao cell was "-"
+        self.assertNotIn("Warning lead time", result["signals"][2][0])  # not an area
+
+    def test_parse_bulletin_text_reads_signal_row_from_headerless_continuation_table(self):
+        # OPONG TCB#16 (2026-10-11): pdfplumber split the TCWS table at page
+        # breaks, and the Signal No. 2 page came back as its own table with
+        # the section title but no `TCWS No. | Luzon | Visayas | Mindanao`
+        # header row -- that whole table used to be skipped.
+        title = ["TROPICAL CYCLONE WIND SIGNALS (TCWS) IN EFFECT", "", "", ""]
+        header = ["TCWS No.", "Luzon", "Visayas", "Mindanao"]
+        page2 = [title, header, ["3\nWind threat:\nStorm-force\nwinds", "Sorsogon", "Northern Samar", "-"]]
+        page3 = [title, ["2\nWind threat:\nGale-force\nwinds", "Catanduanes, Metro Manila", "The rest of Northern Samar", "-"],
+                 ["", "Warning lead time: 24 hours", "", ""]]
+        page4 = [title, header, ["1\nWind threat:\nStrong\nwinds", "Quirino", "Samar", "Dinagat\nIslands"]]
+        text = "Tropical Cyclone Bulletin No. 16\nSEVERE TROPICAL STORM OPONG (BUALOI)\n"
+        with patch("pdfplumber.open") as mock_pdf_open:
+            mock_pdf_open.return_value.__enter__.return_value = _mock_pdf(text, tables=[page2, page3, page4])
+            result = BulletinParserService.parse_bulletin_text("dummy_path.pdf")
+
+        self.assertEqual(set(result["signals"].keys()), {1, 2, 3})
+        self.assertEqual(result["signals"][2], {0: "Catanduanes, Metro Manila", 1: "The rest of Northern Samar"})
+        self.assertEqual(result["signals"][1][2], "Dinagat\nIslands")
+
+    def test_parse_bulletin_text_ignores_track_forecast_table_mentioning_mindanao(self):
+        # OPONG TCB#1-4: the forecast table's location column says "980 km
+        # East of Northeastern Mindanao", which used to pass as the TCWS
+        # header, turning "12-Hour Forecast".."96-Hour Forecast" into signals.
+        forecast = [
+            ["Date and Time", "Center Position", "", "Location"],
+            ["12-Hour Forecast\n2:00 AM", "9.7", "134.4", "980 km East of Northeastern Mindanao"],
+            ["72-Hour Forecast\n2:00 PM", "13.6", "122.8", "Over the coastal waters of Libmanan, Camarines Sur"],
+        ]
+        text = "Tropical Cyclone Bulletin No. 1\nTROPICAL DEPRESSION OPONG\n"
+        with patch("pdfplumber.open") as mock_pdf_open:
+            mock_pdf_open.return_value.__enter__.return_value = _mock_pdf(text, tables=[forecast])
+            result = BulletinParserService.parse_bulletin_text("dummy_path.pdf")
+
+        self.assertEqual(result["signals"], {})
 
     def test_parse_bulletin_text_against_real_sample_pdf(self):
         # End-to-end regression test against a real PAGASA bulletin (Tropical
@@ -365,7 +402,9 @@ class BulletinParserSaveToDbTests(unittest.TestCase):
             "longitude": 123.5,
             "issued_at": None,
             "signals": {
-                2: {2: "SIGNAL NO. 2\nMindanao:\nThe northern portion of Misamis Oriental (Claveria)"},
+                # Real TCWS cell phrasing (the old prose-scan "SIGNAL NO. 2\nMindanao:"
+                # prefix no longer reaches the matcher since table extraction).
+                2: {2: "The northern portion of Misamis Oriental (Claveria)"},
             },
             "raw_text": "",
         }
@@ -598,6 +637,41 @@ class BulletinParserSaveToDbTests(unittest.TestCase):
             (2, "Cagayan", "Santa Ana"), (2, "Cagayan", "Gonzaga"),  # only the listed towns -- not Aparri
         })
 
+    def test_rest_of_province_leaves_out_lgus_already_under_a_higher_signal(self):
+        # Real OPONG TCB#13 Mindanao cells. "The rest of Surigao del Norte" at
+        # Signal 1 means the LGUs NOT already under Signal 2 (Cristian's decision,
+        # 2026-10-11) -- each LGU gets one row, at its highest signal.
+        mock_db = self._build_mock_db(boundaries=[
+            ("Surigao del Norte", "Dapa"), ("Surigao del Norte", "General Luna"),
+            ("Surigao del Norte", "Socorro"), ("Surigao del Norte", "Mainit"),
+            ("Dinagat Islands", "Basilisa"),
+        ])
+        created_objects = []
+        mock_db.add.side_effect = created_objects.append
+        parsed_data = {**self._luzon_parsed_data(), "signals": {
+            2: {2: "Dinagat\nIslands,\nSiargao\nIslands,\nand Bucas\nGrande\nIslands"},
+            1: {2: "The rest of\nSurigao del\nNorte"},
+        }}
+
+        BulletinParserService.save_bulletin_to_db(parsed_data, mock_db)
+
+        rows = {(o.signal_level, o.province, o.area_name) for o in created_objects if isinstance(o, TcbSignal)}
+        self.assertEqual(rows, {
+            (2, "Dinagat Islands", "Basilisa"),
+            (2, "Surigao del Norte", "Dapa"), (2, "Surigao del Norte", "General Luna"),  # Siargao
+            (2, "Surigao del Norte", "Socorro"),  # Bucas Grande
+            (1, "Surigao del Norte", "Mainit"),  # the rest
+        })
+
+    def test_unresolved_tcws_text_is_logged_not_dropped_silently(self):
+        mock_db = self._build_mock_db(boundaries=[("Batanes", "Basco")])
+        parsed_data = {**self._luzon_parsed_data(), "signals": {2: {0: "Batanes, Atlantis Islands"}}}
+
+        with self.assertLogs("app.services.bulletin_parser", level="WARNING") as logs:
+            BulletinParserService.save_bulletin_to_db(parsed_data, mock_db)
+
+        self.assertIn("Atlantis Islands", logs.output[0])
+
     def test_backfills_existing_bulletin_saved_before_raw_tcws_columns(self):
         existing_bulletin = TropicalCycloneBulletin(title="Bulletin No. 11 for KIYAPO", bulletin_count=11)
         existing_bulletin.tcb_id = 12
@@ -715,6 +789,115 @@ class MatchTcwsCellTests(unittest.TestCase):
             "Batanes, the northern portion of Cagayan (Santa Ana, Gonzaga)", {"Batanes": {"Basco", "Itbayat"}},
         )
         self.assertEqual(result, [("Batanes", "Basco"), ("Batanes", "Itbayat")])
+
+    # The cases below are real PAGASA phrasings from OPONG / MAYMAY 2026
+    # bulletins that the previous whole-cell name search got wrong
+    # (audited clause by clause on 2026-10-11).
+
+    def test_line_break_inside_a_name_still_matches(self):
+        # pdfplumber keeps PAGASA's line wraps; "Ilocos\nSur" dropped all 34
+        # Ilocos Sur LGUs from MAYMAY TCB#7 Signal No. 2.
+        boundaries = {"Ilocos Sur": {"Bantay", "Santa Lucia"}, "Eastern Samar": {"Can-Avid"}}
+        self.assertEqual(
+            sorted(match_tcws_cell("Ilocos\nSur, the northern portion of Eastern Samar (Can-\nAvid)", boundaries)),
+            [("Eastern Samar", "Can-Avid"), ("Ilocos Sur", "Bantay"), ("Ilocos Sur", "Santa Lucia")],
+        )
+
+    def test_listed_town_does_not_pull_in_a_same_named_city_elsewhere(self):
+        # "San Juan" under La Union matched City of San Juan (NCR); "Isabela"
+        # under Negros Occidental matched City of Isabela (Basilan).
+        boundaries = {
+            "La Union": {"San Juan", "Bauang"},
+            "City of San Juan": {"City of San Juan"},
+            "Negros Occidental": {"Isabela", "Hinigaran"},
+            "City of Isabela": {"City of Isabela"},
+        }
+        result = match_tcws_cell(
+            "the northern portion of La Union (San Juan), the central portion of Negros Occidental (Isabela)", boundaries,
+        )
+        self.assertEqual(result, [("La Union", "San Juan"), ("Negros Occidental", "Isabela")])
+
+    def test_rest_of_province_excludes_the_higher_signal_pairs(self):
+        boundaries = {"Abra": {"Bangued", "Bucay", "Tineg"}}
+        higher = frozenset({("Abra", "Bangued"), ("Abra", "Bucay")})
+        self.assertEqual(match_tcws_cell("the rest of Abra", boundaries, higher), [("Abra", "Tineg")])
+        self.assertEqual(len(match_tcws_cell("Abra", boundaries, higher)), 3)  # a plain mention is the whole province
+
+    def test_mainland_leaves_out_the_provinces_island_lgus(self):
+        boundaries = {"Cagayan": {"Aparri", "Calayan", "Tuao"}}
+        self.assertEqual(match_tcws_cell("mainland Cagayan", boundaries), [("Cagayan", "Aparri"), ("Cagayan", "Tuao")])
+        self.assertEqual(
+            match_tcws_cell("the southern portion of Babuyan Islands (Calayan Is., Dalupiri Is, Fuga Is.)", boundaries),
+            [("Cagayan", "Calayan")],
+        )
+
+    def test_island_groups_and_metro_manila_resolve_to_their_lgus(self):
+        boundaries = {
+            "Palawan": {"Busuanga", "Coron", "Culion", "Linapacan", "El Nido"},
+            "Masbate": {"Monreal", "San Jacinto", "San Fernando", "Batuan", "Mobo"},
+            "Quezon City": {"Quezon City"},
+            "City of Manila": {"City of Manila"},
+            "Pateros": {"Pateros"},
+        }
+        result = set(match_tcws_cell("Metro Manila, Masbate (Mobo) including Ticao Island, and Calamian Islands", boundaries))
+        self.assertEqual(result, {
+            ("Quezon City", "Quezon City"), ("City of Manila", "City of Manila"), ("Pateros", "Pateros"),
+            ("Masbate", "Mobo"),
+            ("Masbate", "Monreal"), ("Masbate", "San Jacinto"), ("Masbate", "San Fernando"), ("Masbate", "Batuan"),
+            ("Palawan", "Busuanga"), ("Palawan", "Coron"), ("Palawan", "Culion"), ("Palawan", "Linapacan"),
+        })
+
+    def test_list_after_including_islands_belongs_to_the_portion(self):
+        # OPONG TCB#20: "the northern portion of Palawan including Cuyo
+        # Islands (Dumaran, ..., El Nido)" -- not the whole of Palawan.
+        boundaries = {"Palawan": {"El Nido", "Taytay", "Narra", "Cuyo", "Agutaya", "Magsaysay"}}
+        result = set(match_tcws_cell("the northern portion of Palawan including Cuyo Islands (El Nido, Taytay)", boundaries))
+        self.assertEqual(result, {
+            ("Palawan", "El Nido"), ("Palawan", "Taytay"),
+            ("Palawan", "Cuyo"), ("Palawan", "Agutaya"), ("Palawan", "Magsaysay"),
+        })
+
+    def test_pagasa_and_psgc_spelling_differences_match(self):
+        boundaries = {
+            "Cagayan": {"Sanchez Mira"},
+            "Nueva Vizcaya": {"Alfonso Castaneda"},
+            "Batangas": {"City of Sto. Tomas"},
+            "Cebu": {"Pinamungajan"},
+            "Dinagat Islands": {"Basilisa"},
+        }
+        result = set(match_tcws_cell(
+            "the western portion of Cagayan (Sanchez-Mira), the eastern portion of Nueva Vizcaya (Alfonso Castañeda), "
+            "the southern portion of Batangas (Santo Tomas), the central portion of Cebu (Pinamungahan), and Dinagat Isl.",
+            boundaries,
+        ))
+        self.assertEqual(result, {
+            ("Cagayan", "Sanchez Mira"), ("Nueva Vizcaya", "Alfonso Castaneda"),
+            ("Batangas", "City of Sto. Tomas"), ("Cebu", "Pinamungajan"), ("Dinagat Islands", "Basilisa"),
+        })
+
+    def test_same_province_stored_in_two_spellings_is_merged(self):
+        # tbl_admin_boundaries holds "SURIGAO DEL NORTE" (3 towns) next to
+        # "Surigao del Norte" (21 towns); the caps variant used to shadow the
+        # real one, so OPONG TCB#12 resolved to 3 of Surigao del Norte's LGUs.
+        boundaries = {
+            "Surigao del Norte": {"Alegria", "Dapa", "Mainit"},
+            "SURIGAO DEL NORTE": {"ALEGRIA"},
+        }
+        self.assertEqual(
+            sorted(match_tcws_cell("Surigao del Norte", boundaries)),
+            [("Surigao del Norte", "Alegria"), ("Surigao del Norte", "Dapa"), ("Surigao del Norte", "Mainit")],
+        )
+
+    def test_northern_and_central_portions_is_one_clause(self):
+        boundaries = {"La Union": {"Luna", "Caba", "Agoo"}}
+        result = match_tcws_cell("the northern and central portions of La Union (Luna, Caba)", boundaries)
+        self.assertEqual(result, [("La Union", "Luna"), ("La Union", "Caba")])
+
+    def test_unresolved_names_are_reported(self):
+        unresolved = []
+        match_tcws_cell("Batanes, Atlantis, the northern portion of Batanes (Basco, Nowhere)",
+                        {"Batanes": {"Basco", "Itbayat"}}, unresolved=unresolved)
+        self.assertEqual(unresolved, ["Atlantis", "Nowhere (Batanes)"])
 
 
 class ScrapeAndSaveAllTests(unittest.IsolatedAsyncioTestCase):

@@ -1,8 +1,8 @@
 import re
 import asyncio
-import functools
 import logging
 import os
+import unicodedata
 import httpx
 from urllib.parse import unquote
 from bs4 import BeautifulSoup
@@ -40,6 +40,20 @@ PDF_DOWNLOAD_RETRY_DELAY_SECONDS = 2.0
 PHT = timezone(timedelta(hours=8))
 
 logger = logging.getLogger(__name__)
+
+# TCWS table parsing (see parse_bulletin_text step 5). A signal cell reads
+# "2\nWind threat:\nGale-force\nwinds"; the (?!\d) keeps "12-Hour Forecast"
+# out, and a bare "2" (older layout) is still accepted.
+_TCWS_SIGNAL_CELL_RE = re.compile(r"^([1-5])(?!\d)(?:\s*$|\D.*?(?:winds?|hours\)))", re.IGNORECASE | re.DOTALL)
+_LEAD_TIME_RE = re.compile(r"Warning\s+lead\s+time\b", re.IGNORECASE)
+_DEFAULT_TCWS_COLUMNS = {0: 1, 1: 2, 2: 3}  # island_group -> column, when no header row was seen
+
+
+def _tcws_header_columns(cells: list[str]) -> dict[int, int] | None:
+    lowered = [cell.lower() for cell in cells]
+    if not all(name in lowered for name in ("luzon", "visayas", "mindanao")):
+        return None
+    return {group: lowered.index(name) for name, group in (("luzon", 0), ("visayas", 1), ("mindanao", 2))}
 
 
 class PagasaScrapeError(Exception):
@@ -229,53 +243,47 @@ class BulletinParserService:
             except ValueError:
                 issued_at = None
 
-        # 5. Extract wind-signal areas from PAGASA's actual TCWS table (per
-        # signal level, ALL THREE island columns — Luzon, Visayas, Mindanao).
-        # Only Mindanao is matched against AdminBoundary / feeds exposure and
-        # indemnity calculations (this project's insured farms are all PCIC
-        # Region X per PROJECT_CONTEXT.md); Luzon/Visayas are captured too, for
-        # a GIS specialist to see a typhoon's full national footprint, even
-        # though they're outside the insured area. This replaces the old
-        # approach of regex-scanning the flattened prose for "Signal No. X"
-        # markers, which had no way to distinguish the real TCWS table from a
-        # narrative sentence merely *mentioning* a signal number (e.g. "The
-        # hoisting of Wind Signal No. 3 is not ruled out should KIYAPO
-        # intensify...") — confirmed against docs/TCB#11_kiyapo.pdf, whose real
-        # TCWS table is `TCWS No. | Luzon | Visayas | Mindanao`, one row per
-        # signal level, with "-" in a column when no areas apply there.
+        # 5. Extract wind-signal areas from PAGASA's TCWS table
+        # (`TCWS No. | Luzon | Visayas | Mindanao`, one row per signal level,
+        # "-" where no areas apply) -- confirmed against docs/TCB#11_kiyapo.pdf.
+        # Rows are found by their signal cell ("2 / Wind threat: / Gale-force
+        # winds"), the way @pagasa-parser/source-pdf does, NOT by requiring a
+        # header row in the same table: pdfplumber splits the table at page
+        # breaks, and a continuation table with no header row used to be
+        # skipped whole (OPONG TCB#13-16 lost their entire Signal No. 2 row).
+        # Requiring all three island names as header cells also stops the
+        # track-forecast table ("980 km East of Northeastern Mindanao") from
+        # being read as signals 1-9 (OPONG TCB#1-4). Verified 2026-10-11 on
+        # OPONG TCB#1-23, MAYMAY TCB#1-17 and KIYAPO TCB#11.
         # signals_data: level -> {island_group: cell_text}, island_group
         # 0=Luzon, 1=Visayas, 2=Mindanao (PAGASA's fixed column order).
         signals_data: dict[int, dict[int, str]] = {}
+        island_cols = dict(_DEFAULT_TCWS_COLUMNS)
         for table in tables:
-            header_row_idx = None
-            island_cols: dict[int, int] = {}  # island_group -> column index
-            for row_idx, row in enumerate(table[:3]):  # header is within the first couple of rows
-                cells = [(cell or "").strip().lower() for cell in row]
-                if any("mindanao" in cell for cell in cells):
-                    header_row_idx = row_idx
-                    for name, group in (("luzon", 0), ("visayas", 1), ("mindanao", 2)):
-                        for i, cell in enumerate(cells):
-                            if name in cell:
-                                island_cols[group] = i
-                                break
-                    break
-            if header_row_idx is None:
-                continue  # not the TCWS table
-
             current_level = None
-            for row in table[header_row_idx + 1:]:
+            for row in table:
                 if not row:
                     continue
-                first_cell = (row[0] or "").strip()
-                level_match = re.match(r"(\d)", first_cell)
-                if level_match:
-                    current_level = int(level_match.group(1))
+                cells = [(cell or "").strip() for cell in row]
+                header_cols = _tcws_header_columns(cells)
+                if header_cols:
+                    island_cols = header_cols
+                    current_level = None
+                    continue
+                signal_match = _TCWS_SIGNAL_CELL_RE.match(cells[0])
+                if signal_match:
+                    current_level = int(signal_match.group(1))
+                elif cells[0]:
+                    current_level = None  # some other row/table, not a signal level
                 if current_level is None:
                     continue
                 for group, col in island_cols.items():
-                    if col >= len(row):
+                    if col >= len(cells):
                         continue
-                    cell_text = (row[col] or "").strip()
+                    # The "Warning lead time / Range of wind speeds / Potential
+                    # impacts" lines share the cell (or the row under it) and
+                    # are not areas.
+                    cell_text = _LEAD_TIME_RE.split(cells[col])[0].strip()
                     if not cell_text or cell_text == "-":
                         continue
                     level_signals = signals_data.setdefault(current_level, {})
@@ -472,6 +480,12 @@ class BulletinParserService:
         Loads distinct (province, municipality) pairs only -- not
         db.query(AdminBoundary).all(), which at nationwide scale is ~42k
         barangay rows (with geometry) per bulletin just to derive ~1.6k pairs.
+
+        Levels are matched highest first, and an LGU is only ever added at
+        the highest signal it appears under: "the rest of Abra" at Signal 1
+        means the Abra LGUs NOT already under Signal 2 (Cristian's decision,
+        2026-10-11). Text that resolves to no boundary is logged, never
+        dropped silently.
         """
         if not signals:
             return
@@ -480,21 +494,45 @@ class BulletinParserService:
         for province, municipality in pairs:
             municipalities_by_province.setdefault(province, set()).add(municipality)
 
-        for level, island_texts in signals.items():
-            for group, cell_text in island_texts.items():
-                if not cell_text:
-                    continue
-                # match_tcws_cell already dedupes on (province, municipality)
-                # -- province included, so same-named towns in different
-                # provinces (e.g. multiple "Santa Cruz") are both kept.
-                for province, municipality in match_tcws_cell(cell_text, municipalities_by_province):
-                    db.add(TcbSignal(
-                        tcb_id=bulletin.tcb_id,
-                        signal_level=level,
-                        island_group=group,
-                        area_name=municipality,
-                        province=province,
-                    ))
+        for level, group, province, municipality in resolve_tcws_signals(
+            signals, municipalities_by_province, log_label=f"TCB {bulletin.tcb_id}",
+        ):
+            db.add(TcbSignal(
+                tcb_id=bulletin.tcb_id,
+                signal_level=level,
+                island_group=group,
+                area_name=municipality,
+                province=province,
+            ))
+
+
+def resolve_tcws_signals(
+    signals: dict, municipalities_by_province: dict[str, set[str]], log_label: str = "TCB",
+) -> list[tuple[int, int, str, str]]:
+    """parse_bulletin_text()'s {level: {island_group: text}} ->
+    [(signal_level, island_group, province, municipality), ...], one per LGU at
+    the highest signal it appears under (see _seed_tcb_signals). Keys may be
+    ints or the str keys stored in tcws_areas."""
+    rows: list[tuple[int, int, str, str]] = []
+    assigned: set[tuple[str, str]] = set()
+    for level in sorted(signals, key=int, reverse=True):
+        higher = frozenset(assigned)
+        for group, cell_text in sorted(signals[level].items(), key=lambda item: int(item[0])):
+            if not cell_text:
+                continue
+            unresolved: list[str] = []
+            # Pairs keep their province, so same-named towns in different
+            # provinces (e.g. multiple "Santa Cruz") are both kept.
+            for pair in match_tcws_cell(cell_text, municipalities_by_province, higher, unresolved):
+                if pair not in assigned:
+                    assigned.add(pair)
+                    rows.append((int(level), int(group), *pair))
+            if unresolved:
+                logger.warning(
+                    "%s Signal No. %s (island group %s): PAGASA text not resolved to a boundary: %s",
+                    log_label, level, group, "; ".join(unresolved),
+                )
+    return rows
 
 
 def _raw_tcws_columns(signals: dict, no_signal_hoisted: bool = False) -> tuple[int | None, dict | None]:
@@ -511,94 +549,321 @@ def _raw_tcws_columns(signals: dict, no_signal_hoisted: bool = False) -> tuple[i
     return max(signals), tcws_areas
 
 
-_PAREN_RE = re.compile(r"\(([^()]*)\)")
+# ── TCWS area text -> AdminBoundary (province, municipality) ────────────────
+# Two steps, after @pagasa-parser/pagasa-parser's AreaExtractor: a cell is
+# first split into clauses ("the rest of Abra", "the northern portion of
+# Zambales (Candelaria, Masinloc)", "mainland Cagayan", "Masbate including
+# Ticao Island"), then each clause's head name is resolved as a province,
+# island group or city, and its parenthetical towns only within that
+# province. The previous matcher searched the whole cell for every boundary
+# name in the country, so "San Juan" listed under La Union also matched City
+# of San Juan (NCR), "Isabela" under Negros Occidental matched City of Isabela
+# (Basilan), and "the rest of" / "mainland" / island names had no meaning.
+# Measured 2026-10-11 against a clause-by-clause reading of OPONG TCB#1-23 and
+# MAYMAY TCB#1-17.
 
 
-@functools.lru_cache(maxsize=8192)
-def _name_re(name: str) -> re.Pattern:
-    # Whole-name match, not substring -- nationwide, plain `in` checks give
-    # false hits ("Cagayan" in "Cagayan de Oro", "Samar" in "Northern Samar",
-    # "Bay" in "Bayombong").
-    return re.compile(r"(?<!\w)" + re.escape(name) + r"(?!\w)", re.IGNORECASE)
+def _pairs(province: str, *municipalities: str) -> tuple[tuple[str, str], ...]:
+    return tuple((province, municipality) for municipality in municipalities)
+
+
+# Island groups PAGASA names that are not PSGC provinces, keyed by _fold()ed
+# word ("Siargao Island", "Siargao Islands" and "Siargao Isl." all hit
+# "siargao"). Their LGUs are also what "mainland {province}" leaves out.
+_ISLAND_GROUPS: dict[str, tuple[tuple[str, str], ...]] = {
+    "babuyan": _pairs("Cagayan", "Calayan"),
+    "calamian": _pairs("Palawan", "Busuanga", "Coron", "Culion", "Linapacan"),
+    "cuyo": _pairs("Palawan", "Cuyo", "Agutaya", "Magsaysay"),
+    "kalayaan": _pairs("Palawan", "Kalayaan"),
+    "lubang": _pairs("Occidental Mindoro", "Lubang", "Looc"),
+    "ticao": _pairs("Masbate", "Monreal", "San Jacinto", "San Fernando", "Batuan"),
+    "burias": _pairs("Masbate", "San Pascual", "Claveria"),
+    "caluya": _pairs("Antique", "Caluya"),
+    "polillo": _pairs("Quezon", "Polillo", "Burdeos", "Panukulan", "Patnanungan", "Jomalig"),
+    "alabat": _pairs("Quezon", "Alabat", "Perez", "Quezon"),
+    "camotes": _pairs("Cebu", "Pilar", "Poro", "San Francisco", "Tudela"),
+    "bantayan": _pairs("Cebu", "Bantayan", "Madridejos", "Santa Fe"),
+    "mactan": _pairs("Cebu", "Cordova") + _pairs("City of Lapu-Lapu", "City of Lapu-Lapu"),
+    "siargao": _pairs(
+        "Surigao del Norte", "Burgos", "Dapa", "Del Carmen", "General Luna",
+        "Pilar", "San Benito", "San Isidro", "Santa Monica",
+    ),
+    "bucas grande": _pairs("Surigao del Norte", "Socorro"),
+}
+
+# Other PAGASA area names that are not PSGC provinces. NCR LGUs are stored
+# with province == municipality (scripts/convert_psgc_publication.py).
+_NCR = tuple((lgu, lgu) for lgu in (
+    "City of Caloocan", "City of Las Piñas", "City of Makati", "City of Malabon",
+    "City of Mandaluyong", "City of Manila", "City of Marikina", "City of Muntinlupa",
+    "City of Navotas", "City of Parañaque", "Pasay City", "City of Pasig", "Pateros",
+    "Quezon City", "City of San Juan", "City of Taguig", "City of Valenzuela",
+))
+_NAMED_AREAS: dict[str, tuple[tuple[str, str], ...]] = {
+    "metro manila": _NCR,
+    "national capital region": _NCR,
+    "ncr": _NCR,
+    "corregidor": _pairs("Cavite", "City of Cavite"),
+}
+
+# PAGASA spellings that differ from PSGC beyond case/accents/hyphens
+# (_fold()ed PAGASA name -> PSGC municipality). Seen in OPONG/MAYMAY 2026.
+_PAGASA_SPELLINGS = {
+    "pinamungahan": "Pinamungajan",
+    "pres carlos p garcia": "President Carlos P. Garcia",
+    "baliuag": "City of Baliwag",
+    "pio v corpuz": "Pio V. Corpus",
+}
+
+_DIRECTION = r"(?:(?:extreme|far)\s+)?(?:(?:north|south|east|west){1,2}ern|central)"
+_DIRECTION_ONLY_RE = re.compile(rf"^(?:the\s+)?{_DIRECTION}(?:\s*(?:,|and|&)?\s*{_DIRECTION})*$", re.IGNORECASE)
+_CLAUSE_RE = re.compile(
+    r"^(?:the\s+)?"
+    r"(?P<rest>(?:rest|remaining\s+(?:parts?|portions?))\s+of\s+(?:the\s+)?)?"
+    # "the northern portion of X"; also "northern mainland Palawan" (OPONG TCB#12)
+    rf"(?:(?P<section>{_DIRECTION}(?:\s*(?:,|and|&)?\s*{_DIRECTION})*)\s+(?:(?:portions?|parts?|regions?|sections?)\s+of\s+(?:the\s+)?|(?=mainland\s)))?"
+    r"(?P<mainland>mainland\s+)?"
+    r"(?P<name>[^()]*?)\s*(?:\((?P<listed>.*)\))?\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
+_COMMA_RE = re.compile(r"[,;]")
+_AND_RE = re.compile(r"\s+(?:and|&)\s+", re.IGNORECASE)
+_INCLUDING_RE = re.compile(r"\s+including\s+", re.IGNORECASE)
+_ISLAND_SUFFIX_RE = re.compile(r"\s+(?:is|isl|islands?)\.?$", re.IGNORECASE)
+
+
+def _fold(name: str) -> str:
+    """Comparison key: case, accents (Castañeda/Castaneda), hyphens
+    (Sanchez-Mira/Sanchez Mira), periods (Pres./Pres) and PSGC's "Sto."/"Sta."
+    (PSGC "City of Sto. Tomas", PAGASA "Santo Tomas") don't matter."""
+    name = unicodedata.normalize("NFKD", name)
+    name = "".join(ch for ch in name if not unicodedata.combining(ch)).lower().replace(".", "")
+    name = re.sub(r"\bsto\b", "santo", re.sub(r"\bsta\b", "santa", name))
+    return re.sub(r"[\s\-]+", " ", name).strip()
+
+
+def _repair_tcws_text(text: str) -> str:
+    # pdfplumber keeps PAGASA's line wraps: "Dinagat\nIslands", "Can-\nAvid".
+    text = re.sub(r"-\s*\n\s*", "-", text)
+    return re.sub(r"\s+", " ", text).strip().rstrip(".")
+
+
+def _split_outside_parens(text: str, separator: re.Pattern) -> list[str]:
+    depth_at, depth = [], 0
+    for ch in text:
+        depth_at.append(depth)
+        depth = depth + 1 if ch == "(" else max(depth - 1, 0) if ch == ")" else depth
+    parts, start = [], 0
+    for m in separator.finditer(text):
+        if depth_at[m.start()] == 0:
+            parts.append(text[start:m.start()])
+            start = m.end()
+    parts.append(text[start:])
+    return [part.strip() for part in parts if part.strip()]
+
+
+def _merge_dangling_directions(parts: list[str], joiner: str) -> list[str]:
+    # "the northern and central portions of X" / "the northern, central and
+    # southern portions of X" must not split at the "and" / commas.
+    merged: list[str] = []
+    for part in parts:
+        if merged and _DIRECTION_ONLY_RE.match(merged[-1]):
+            merged[-1] = f"{merged[-1]}{joiner}{part}"
+        else:
+            merged.append(part)
+    return merged
+
+
+def _clauses(cell_text: str) -> list[str]:
+    clauses = []
+    for item in _merge_dangling_directions(_split_outside_parens(cell_text, _COMMA_RE), ", "):
+        item = re.sub(r"^(?:and|&)(?:\s+|$)", "", item, flags=re.IGNORECASE)  # also a stray "and , and" (OPONG TCB#15)
+        for part in _merge_dangling_directions(_split_outside_parens(item, _AND_RE), " and "):
+            # "Masbate including Ticao Island" -> "Masbate", "Ticao Island"
+            head, *included = _split_outside_parens(part, _INCLUDING_RE)
+            # "the northern portion of Palawan including Cuyo Islands (Dumaran,
+            # ..., El Nido)" (OPONG TCB#20): the list is the portion's, not
+            # the islands'.
+            moved = re.search(r"\s*(\([^()]*\))$", included[-1]) if included else None
+            if moved and "(" not in head and _CLAUSE_RE.match(head).group("section"):
+                head = f"{head} {moved.group(1)}"
+                included[-1] = included[-1][:moved.start()]
+            clauses.extend([head, *included])
+    return clauses
 
 
 def _municipality_aliases(municipality: str) -> list[str]:
-    # PSGC spells cities "City of Gingoog"; PAGASA writes "Gingoog City" or
-    # just "Gingoog".
+    # PSGC spells cities "City of Gingoog" (sometimes "Tuguegarao City");
+    # PAGASA writes either form, or just "Gingoog".
     aliases = [municipality]
-    city_match = re.match(r"City of (.+)$", municipality, re.IGNORECASE)
-    if city_match:
-        base = city_match.group(1)
-        aliases += [f"{base} City", base]
+    city_of = re.search(r"\bCity of (.+)$", municipality, re.IGNORECASE)
+    city_suffix = re.match(r"(.+) City$", municipality, re.IGNORECASE)
+    if city_of:
+        aliases += [f"{city_of.group(1)} City", city_of.group(1)]
+    elif city_suffix:
+        aliases += [f"City of {city_suffix.group(1)}", city_suffix.group(1)]
     return aliases
 
 
-def _mentions(text: str, name: str) -> bool:
-    return any(_name_re(alias).search(text) for alias in _municipality_aliases(name))
+class _BoundaryIndex:
+    """_fold()ed lookups over one bulletin's (province, municipality) universe."""
+
+    def __init__(self, municipalities_by_province: dict[str, set[str]]):
+        # tbl_admin_boundaries can hold one province under two spellings
+        # (seen 2026-10-11: "SURIGAO DEL NORTE" / "ALEGRIA" next to "Surigao
+        # del Norte" / "Alegria"). Merge them under one spelling, preferring
+        # the non-all-caps one -- otherwise the 3-town variant shadowed the
+        # 21-town one. exposure_calculator matches case-insensitively, so
+        # either spelling reaches the same boundary.
+        merged: dict[str, dict[str, str]] = {}  # fold(province) -> fold(municipality) -> municipality
+        spelling: dict[str, str] = {}  # fold(province) -> province
+        for province in sorted(municipalities_by_province, key=str.isupper):
+            key = _fold(province)
+            spelling.setdefault(key, province)
+            for municipality in sorted(municipalities_by_province[province], key=str.isupper):
+                merged.setdefault(key, {}).setdefault(_fold(municipality), municipality)
+        self.municipalities_by_province = {spelling[key]: set(muns.values()) for key, muns in merged.items()}
+
+        self.provinces = {_fold(p): p for p in self.municipalities_by_province}
+        for province in self.municipalities_by_province:  # "Dinagat Isl." -> Dinagat Islands
+            self.provinces.setdefault(_fold(_ISLAND_SUFFIX_RE.sub("", province)), province)
+        self.exact: dict[str, dict[str, str]] = {}  # province -> fold(name) -> municipality
+        self.alias: dict[str, dict[str, str]] = {}  # province -> fold(alias) -> municipality
+        self.cities: dict[str, list[str]] = {}  # fold(alias) -> province==municipality LGUs (HUCs, NCR)
+        for province, municipalities in self.municipalities_by_province.items():
+            for municipality in municipalities:
+                self.exact.setdefault(province, {})[_fold(municipality)] = municipality
+                for alias in _municipality_aliases(municipality)[1:]:
+                    self.alias.setdefault(province, {}).setdefault(_fold(alias), municipality)
+            if municipalities == {province}:
+                for alias in _municipality_aliases(province):
+                    self.cities.setdefault(_fold(alias), []).append(province)
+
+    def known(self, pairs) -> set[tuple[str, str]]:
+        return {(p, m) for p, m in pairs if m in self.municipalities_by_province.get(p, ())}
+
+    def municipality(self, province: str, name: str) -> str | None:
+        key = _fold(_ISLAND_SUFFIX_RE.sub("", name))
+        key = _fold(_PAGASA_SPELLINGS.get(key, key))
+        return self.exact.get(province, {}).get(key) or self.alias.get(province, {}).get(key)
+
+    def city(self, name: str) -> list[str]:
+        return self.cities.get(_fold(name), [])
+
+    def area_group(self, name: str) -> set[tuple[str, str]] | None:
+        key = _fold(name)
+        named = _NAMED_AREAS.get(key) or _NAMED_AREAS.get(_fold(_ISLAND_SUFFIX_RE.sub("", name)))
+        if named:
+            return self.known(named)
+        hits = [pairs for word, pairs in _ISLAND_GROUPS.items() if re.search(rf"\b{word}\b", key)]
+        if not hits:
+            return None
+        return self.known(pair for pairs in hits for pair in pairs)
+
+    def island_lgus(self, province: str) -> set[tuple[str, str]]:
+        return {pair for pairs in _ISLAND_GROUPS.values() for pair in pairs if pair[0] == province}
 
 
-def match_tcws_cell(cell_text: str, municipalities_by_province: dict[str, set[str]]) -> list[tuple[str, str]]:
+def _listed_names(listed: str) -> list[str]:
+    names = []
+    for item in _split_outside_parens(listed, _COMMA_RE):
+        item = re.sub(r"^(?:and|&)\s+", "", item, flags=re.IGNORECASE)
+        names.extend(_split_outside_parens(item, _AND_RE))
+    return names
+
+
+def _resolve_clause(clause: str, index: _BoundaryIndex, higher: frozenset, unresolved: list[str]) -> list[tuple[str, str]]:
+    m = _CLAUSE_RE.match(clause)
+    name = (m.group("name") if m else "").strip()
+    if not m or not name:
+        unresolved.append(clause)
+        return []
+    listed = _listed_names(m.group("listed")) if m.group("listed") else []
+
+    province = index.provinces.get(_fold(name)) or index.provinces.get(_fold(_ISLAND_SUFFIX_RE.sub("", name)))
+    if province is not None:
+        if listed:
+            found = []
+            for item in listed:
+                municipality = index.municipality(province, item)
+                if municipality:
+                    found.append((province, municipality))
+                elif index.city(item):
+                    # An HUC listed under its geographic province, e.g.
+                    # "Misamis Oriental (Cagayan de Oro City)" -- PSGC stores
+                    # it as its own province.
+                    found.extend((city, city) for city in index.city(item))
+                elif index.area_group(item):
+                    # "Cavite (Corregidor Island, Ternate, ...)" (OPONG TCB#22)
+                    found.extend(sorted(index.area_group(item)))
+                else:
+                    unresolved.append(f"{item} ({province})")
+            return found
+        pairs = {(province, mun) for mun in index.municipalities_by_province[province]}
+        if m.group("mainland"):
+            pairs -= index.island_lgus(province)
+        if m.group("rest"):
+            pairs -= higher
+        return sorted(pairs)
+
+    group = index.area_group(name)
+    if group is not None:
+        if not group:
+            unresolved.append(clause)
+        elif listed and len({mun for _, mun in group}) > 1:
+            # "the southern portion of Siargao Island (Dapa, General Luna)"
+            found = []
+            for item in listed:
+                hit = [(p, mun) for p, mun in group if index.municipality(p, item) == mun]
+                if hit:
+                    found.extend(hit)
+                else:
+                    unresolved.append(f"{item} ({name})")
+            return found
+        # A one-LGU group: every listed island ("Calayan Is., Fuga Is.") is in it.
+        return sorted(group - higher if m.group("rest") else group)
+
+    cities = index.city(name)
+    if cities:
+        return [(city, city) for city in cities]
+
+    unresolved.append(clause)
+    return []
+
+
+def match_tcws_cell(
+    cell_text: str,
+    municipalities_by_province: dict[str, set[str]],
+    higher: frozenset = frozenset(),
+    unresolved: list[str] | None = None,
+) -> list[tuple[str, str]]:
     """
     Resolves one TCWS table cell to AdminBoundary (province, municipality)
-    pairs. PAGASA's cell phrasing is a comma-separated list of provinces,
-    where a partially-affected province is followed by a parenthetical list
-    of its municipalities, e.g.:
+    pairs. PAGASA's cell phrasing is a comma-separated list of clauses:
 
-        "Batanes, the northern portion of Cagayan (Santa Ana, Gonzaga)"
+    - "Batanes" -> ALL of the province's municipalities.
+    - "the northern portion of Cagayan (Santa Ana, Gonzaga)" -> only the
+      listed municipalities, looked up within that province only (an HUC
+      listed there, e.g. "Cagayan de Oro City" under Misamis Oriental, is
+      matched as its own province-level city).
+    - "the rest of Abra" -> Abra minus `higher` (the pairs already under a
+      higher signal in the same bulletin).
+    - "mainland Cagayan" -> Cagayan minus its island LGUs (_ISLAND_GROUPS).
+    - "Calamian Islands", "Metro Manila", "Masbate including Ticao Island"
+      -> the LGUs in _ISLAND_GROUPS / _NAMED_AREAS.
+    - "Bacolod City" -> an independent city stored with province ==
+      municipality (see scripts/convert_psgc_publication.py).
 
-    - Province followed by a "( ... )" list -> only the listed municipalities.
-    - Province named with no list ("Batanes") -> ALL of its municipalities
-      (the whole province is under the signal). Previously this matched
-      nothing, since no municipality name appeared in the text.
-    - Province names appearing *inside* a parenthetical are ignored as
-      province mentions (e.g. "Misamis Oriental (Cagayan de Oro City)" must
-      not also count as the province "Cagayan").
-    - Independent/highly urbanized cities are stored with province ==
-      municipality (see scripts/convert_psgc_publication.py). They are
-      matched by name anywhere in the cell, including inside a parenthetical,
-      since PAGASA lists them under their geographic province.
+    Anything that resolves to no boundary is appended to `unresolved` (if
+    given) instead of disappearing silently.
     """
-    paren_spans = [(m.start(), m.end()) for m in _PAREN_RE.finditer(cell_text)]
-
-    def in_paren(pos: int) -> bool:
-        return any(start <= pos < end for start, end in paren_spans)
-
-    # Longest names first, so "Northern Samar" claims its span before "Samar".
-    claimed: list[tuple[int, int, str]] = []
-    for province in sorted(municipalities_by_province, key=len, reverse=True):
-        for m in _name_re(province).finditer(cell_text):
-            if in_paren(m.start()):
-                continue
-            if any(m.start() < end and start < m.end() for start, end, _ in claimed):
-                continue
-            claimed.append((m.start(), m.end(), province))
-    claimed.sort()
-
+    index = _BoundaryIndex(municipalities_by_province)
+    unresolved = unresolved if unresolved is not None else []
     results: list[tuple[str, str]] = []
     seen: set[tuple[str, str]] = set()
-
-    def add(province: str, municipality: str) -> None:
-        if (province, municipality) not in seen:
-            seen.add((province, municipality))
-            results.append((province, municipality))
-
-    for i, (_, end, province) in enumerate(claimed):
-        # A province's own "( ... )" list sits between its name and the next
-        # province mention or top-level comma/semicolon -- stopping only at
-        # the next province would let "Batanes" borrow "Cagayan (Santa Ana)"'s
-        # list whenever Cagayan itself isn't a loaded boundary.
-        segment_end = claimed[i + 1][0] if i + 1 < len(claimed) else len(cell_text)
-        for pos in range(end, segment_end):
-            if cell_text[pos] in ",;" and not in_paren(pos):
-                segment_end = pos
-                break
-        listed = ", ".join(_PAREN_RE.findall(cell_text[end:segment_end]))
-        for municipality in sorted(municipalities_by_province[province]):
-            if not listed or _mentions(listed, municipality):
-                add(province, municipality)
-
-    for province, municipalities in municipalities_by_province.items():
-        if municipalities == {province} and _mentions(cell_text, province):
-            add(province, province)
-
+    for clause in _clauses(_repair_tcws_text(cell_text)):
+        for pair in _resolve_clause(clause, index, higher, unresolved):
+            if pair not in seen:
+                seen.add(pair)
+                results.append(pair)
     return results

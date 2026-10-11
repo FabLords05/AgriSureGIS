@@ -4,6 +4,118 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-11] - TCWS Parsing: Missing / Wrong Wind-Signal Areas (Sprint 3, branch: develop)
+
+By Cristian.
+
+The TCB viewer was missing municipalities PAGASA put under a signal, and
+listing some it didn't (seen on OPONG TCB No. 16). Anything not matched to a
+boundary also gets no `tbl_tcb_signals` row, so no exposure and no indemnity.
+Investigated against the stored `tcws_areas` of tcb_id 432, the 23 original
+OPONG PDFs, all 17 MAYMAY bulletins from PAGASA and KIYAPO TCB#11, then
+audited clause by clause. Approach modelled on
+github.com/pagasa-parser (`source-pdf` table reading, `AreaExtractor` clause
+grammar), re-implemented in Python; resolving names to PSGC LGUs is ours.
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* **`parse_bulletin_text()` step 5**: wind-signal rows are now found by their
+  signal cell (`_TCWS_SIGNAL_CELL_RE`, "2 / Wind threat: / Gale-force
+  winds"), not by a "Mindanao" header row in the same table.
+  * Fixes OPONG TCB#13-16. pdfplumber split the table at a page break, the
+    Signal No. 2 part had no header row, and the whole row was skipped.
+  * Fixes OPONG TCB#1-4. The track-forecast table ("980 km East of
+    Northeastern Mindanao") passed as the header, so "12-Hour".."96-Hour
+    Forecast" became bogus Signals 1-9.
+  * A header row now needs all three of Luzon/Visayas/Mindanao as cells
+    (**`_tcws_header_columns()`**). Columns default to 1/2/3 when a table
+    has none (**`_DEFAULT_TCWS_COLUMNS`**).
+  * "Warning lead time / Range of wind speeds / Potential impacts" text is
+    no longer stored as area text (**`_LEAD_TIME_RE`**).
+* **`match_tcws_cell()`**: rewritten. It used to search the whole cell for
+  every boundary name in the country. Now the cell is split into clauses
+  (**`_clauses()`**) and each clause is resolved (**`_resolve_clause()`**):
+  * Whole province: all its LGUs.
+  * "portion of X (list)": only the listed towns, looked up inside X only.
+    An HUC listed under its geographic province (e.g. "Cagayan de Oro
+    City") is still matched as its own province-level city.
+  * "the rest of X": X minus the LGUs already under a higher signal. New
+    `higher` parameter (Cristian's decision, Q1).
+  * "mainland X": X minus its island LGUs.
+  * Island groups and Metro Manila: **`_ISLAND_GROUPS`**, **`_NAMED_AREAS`**
+    (Calamian, Cuyo, Babuyan, Siargao, Bucas Grande, Ticao, Burias, Camotes,
+    Bantayan, Lubang, Caluya, Polillo, ...; the 17 NCR LGUs; Corregidor).
+    These are constants in this file (Q2).
+  * "X including Y Island" adds Y. A list written after the island ("the
+    northern portion of Palawan including Cuyo Islands (El Nido, ...)")
+    belongs to the portion.
+  * Fixes the false matches: "San Juan" under La Union no longer adds City
+    of San Juan (NCR), and "Isabela" under Negros Occidental no longer adds
+    City of Isabela (Basilan).
+  * New `unresolved` parameter collects text that matches no boundary.
+* **`_repair_tcws_text()`**: joins PAGASA's line wraps ("Ilocos\nSur",
+  "Can-\nAvid"). This alone dropped all 34 Ilocos Sur LGUs from MAYMAY
+  TCB#7 Signal No. 2, and all of Dinagat / Surigao del Norte from OPONG.
+* **`_fold()`**: name comparisons ignore case, accents (Castañeda), hyphens
+  (Sanchez-Mira), periods, and "Sto."/"Sta." vs "Santo"/"Santa" (PSGC "City of
+  Sto. Tomas"). **`_PAGASA_SPELLINGS`** covers the rest (Pinamungahan,
+  Pres. Carlos P. Garcia, Baliuag, Pio V. Corpuz).
+* **`_municipality_aliases()`**: also handles PSGC's "Tuguegarao City" style
+  (adds "City of Tuguegarao", "Tuguegarao").
+* **`_BoundaryIndex`**: merges a province stored under two spellings. In
+  `tbl_admin_boundaries`, "SURIGAO DEL NORTE" (ALEGRIA, SAN ISIDRO, SISON) sits
+  next to "Surigao del Norte" (21 towns); "SURIGAO DEL SUR" is the same. It
+  prefers the non-all-caps name. Found by the OPONG dry run: without the
+  merge, the caps variant shadowed the real one, and "Surigao del Norte"
+  resolved to 3 towns. The duplicate boundary rows themselves are a data
+  issue for the DB admin; this change does not touch them.
+* **`_seed_tcb_signals()`**: rows come from the new
+  **`resolve_tcws_signals()`** (also used by the re-parse script). It works
+  through levels highest first and adds each LGU once, at its highest
+  signal. Text that matches no boundary is logged as a warning instead of
+  disappearing silently (Q4: no screen change).
+* Removed `_PAREN_RE`, `_name_re()`, `_mentions()` and the `functools`
+  import.
+* Result: across OPONG + MAYMAY + KIYAPO (16,946 bulletin/signal/LGU
+  entries), every remaining difference from the clause-by-clause reference
+  was checked by hand and the parser is right. Before the fix, MAYMAY alone
+  had 188 missing and 547 extra. The only text still logged as unresolved is
+  PAGASA's own typo "Estanciap" (OPONG TCB#8).
+
+### 2. File: `backend/reparse_opong_bulletins.py` (new)
+* Re-parses OPONG's saved bulletins from the original PDFs (OPONG only, Q3),
+  because signals are only seeded on a bulletin's first insert.
+* Dry run by default: per bulletin, prints the stored signal rows next to
+  what the PDF now resolves to.
+* `--apply` does the following:
+  * Rewrites `tcws_areas`, `max_signal_level` and `tbl_tcb_signals`.
+  * Recomputes OPONG's exposure summaries.
+  * Deletes OPONG summaries for boundaries no bulletin covers any more, if
+    nothing references them.
+  * Refuses to run while OPONG has computed assessments or insurance-usage
+    rows (run `seed_opong_assessment_test.py --reset` first).
+  * Removes the seeder's TEST-ONLY Surigao del Norte override. The real
+    PDFs put Siargao, Bucas Grande and Dinagat at Signal 2 in TCB#13-14 only.
+
+### 3. File: `backend/tests/test_bulletin_parser.py`
+* New tests:
+  * Header-less continuation table.
+  * Forecast table ignored.
+  * Lead-time text dropped.
+  * "The rest of" across signal levels (real OPONG TCB#13 Mindanao text).
+  * Unresolved text logged.
+  * Line breaks inside names.
+  * Same-named towns/cities.
+  * Mainland.
+  * Island groups / Metro Manila.
+  * List after "including".
+  * Spelling differences.
+  * "northern and central portions".
+  * Unresolved names reported.
+* `test_save_bulletin_to_db_creates_bulletin_and_signals` now uses a real
+  cell text instead of the old "SIGNAL NO. 2\nMindanao:" prose prefix.
+
+---
+
 ## [2026-10-11] - Header Brand Logo/Badge; Farm Records Column Alignment (branch: develop)
 
 UI polish per Cristian, reviewed in the browser.
