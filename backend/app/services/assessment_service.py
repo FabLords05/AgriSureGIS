@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.indemnity_calc import ParametricAssessment
@@ -57,6 +58,14 @@ class AssessmentService:
         as_of = bulletin.issued_at.date()
         results: list[RiskAssessment] = []
 
+        # Policies locked by a final PABS export (see finalize_exported_usage)
+        # are left out for every typhoon: a new typhoon can't reuse them, and
+        # recalculating the exported typhoon leaves its exported results frozen.
+        locked_insurance_ids = select(InsuranceUsage.insurance_records_id).where(
+            InsuranceUsage.is_used.is_(True),
+            InsuranceUsage.finalized_at.isnot(None),
+        )
+
         for summary in eligible_summaries:
             # Matched on the summary's (province, municipality), not its
             # boundary_id: a farm's boundary is its barangay, and the summary's
@@ -72,6 +81,7 @@ class AssessmentService:
                     AdminBoundary.municipality == summary.municipality,
                     InsuranceRecord.effectivity_date <= as_of,
                     InsuranceRecord.expiry_date >= as_of,
+                    InsuranceRecord.insurance_records_id.not_in(locked_insurance_ids),
                 )
                 .all()
             )
@@ -205,3 +215,57 @@ class AssessmentService:
         # Session, where the relationship resolves to None) -- avoid a no-op commit.
         if touched:
             db.commit()
+
+    @classmethod
+    def finalize_exported_usage(cls, exported: list[tuple[int, int, int]], db: Session) -> int:
+        """
+        Locks the policies on a final PABS CSV export as used. `exported` holds
+        one (insurance_records_id, typhoon_id, assessment_id) per exported row
+        with a payout above zero.
+
+        Unlike _sync_insurance_usage's provisional calculate-time mark, this sets
+        tbl_insurance_usage.finalized_at, which calculate_for_bulletin treats as
+        a permanent lock. Rows already locked are left as they were, so
+        re-exporting is harmless. Returns how many rows were newly locked.
+        """
+        if not exported:
+            return 0
+
+        now = datetime.now(timezone.utc)
+        insurance_ids = {insurance_records_id for insurance_records_id, _, _ in exported}
+        usages = {
+            (u.insurance_records_id, u.typhoon_id): u
+            for u in db.query(InsuranceUsage)
+            .filter(InsuranceUsage.insurance_records_id.in_(insurance_ids))
+            .all()
+        }
+        records = {
+            r.insurance_records_id: r
+            for r in db.query(InsuranceRecord)
+            .filter(InsuranceRecord.insurance_records_id.in_(insurance_ids))
+            .all()
+        }
+
+        newly_locked = 0
+        for insurance_records_id, typhoon_id, assessment_id in exported:
+            usage = usages.get((insurance_records_id, typhoon_id))
+            if usage is None:
+                usage = InsuranceUsage(insurance_records_id=insurance_records_id, typhoon_id=typhoon_id)
+                db.add(usage)
+                usages[(insurance_records_id, typhoon_id)] = usage
+            elif usage.is_used and usage.finalized_at is not None:
+                continue
+
+            usage.is_used = True
+            usage.assessment_id = assessment_id
+            usage.finalized_at = now
+            newly_locked += 1
+
+            insurance = records.get(insurance_records_id)
+            if insurance is not None:
+                insurance.is_used = True
+                insurance.used_for_typhoon_id = typhoon_id
+                insurance.used_at = now
+
+        db.commit()
+        return newly_locked

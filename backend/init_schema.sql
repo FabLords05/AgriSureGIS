@@ -231,6 +231,9 @@ CREATE TABLE tbl_insurance_usage (
     assessment_id INT REFERENCES tbl_risk_assessment(assessment_id) ON DELETE SET NULL,
     is_used BOOLEAN NOT NULL DEFAULT TRUE,
     marked_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    -- Set when the final PABS CSV export locks this usage (see
+    -- migrations/2026-10-11_insurance_usage_finalized_at.sql). NULL = provisional.
+    finalized_at TIMESTAMPTZ,
     CONSTRAINT uq_insurance_usage_insurance_typhoon UNIQUE (insurance_records_id, typhoon_id)
 );
 

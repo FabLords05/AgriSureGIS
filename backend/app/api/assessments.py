@@ -400,6 +400,10 @@ def _build_pabs_rows(db: Session) -> list[dict]:
                 # (not written to the CSV export).
                 "municipality": farm.boundary.municipality if farm and farm.boundary else None,
                 "province": farm.boundary.province if farm and farm.boundary else None,
+                # Used by export_assessments_pabs_csv to lock exported policies.
+                "insurance_records_id": a.insurance_records_id,
+                "typhoon_id": summary.typhoon_id if summary else None,
+                "final_indemnity_payment": float(a.final_indemnity_payment) if a.final_indemnity_payment is not None else None,
             }
         )
     return rows
@@ -411,10 +415,25 @@ def get_assessments_pabs_summary(db: Session = Depends(get_db)):
     return {"status": "success", "data": _build_pabs_rows(db)}
 
 
-@router.get("/export-pabs")
+@router.post("/export-pabs")
 def export_assessments_pabs_csv(db: Session = Depends(get_db)):
-    """Downloads the same combined PABS-format summary as a CSV file."""
+    """
+    Downloads the same combined PABS-format summary as a CSV file, and locks
+    every exported policy with a payout as used (see
+    AssessmentService.finalize_exported_usage) so no later typhoon can reuse
+    it. POST rather than GET because exporting now changes data.
+    """
     rows = _build_pabs_rows(db)
+    AssessmentService.finalize_exported_usage(
+        [
+            (row["insurance_records_id"], row["typhoon_id"], row["assessment_id"])
+            for row in rows
+            if row["insurance_records_id"] is not None
+            and row["typhoon_id"] is not None
+            and (row["final_indemnity_payment"] or 0) > 0
+        ],
+        db,
+    )
     pabs_columns = [
         "FARMER_NAME", "FARMERID", "FARMID", "IRID", "AREA", "TYPHOON_NAME",
         "PERIOD_OF_EXPOSURE", "WIND_VELOCITY", "DATE_FILED", "DATE_OF_OCCURRENCE",

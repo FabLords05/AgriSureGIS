@@ -111,7 +111,14 @@ function CSVPreviewModal({ rows, onClose }: { rows: PabsAssessmentRow[]; onClose
           <div className="flex items-center gap-2">
             <button onClick={onClose} className="px-3 py-1.5 rounded-lg border border-border text-xs hover:bg-muted transition-colors">Cancel</button>
             <button
-              onClick={() => downloadAssessmentsPabsCsv().catch(e => toast.error(e.message))}
+              onClick={() => {
+                // Exporting locks every policy with a payout as used -- it
+                // can't be assessed again for any later typhoon.
+                if (!window.confirm("Exporting the final CSV marks every policy with a payout as used. Those policies can't be used again for a new typhoon. Continue?")) return;
+                downloadAssessmentsPabsCsv()
+                  .then(() => toast.success("CSV exported. Policies with a payout are now marked as used."))
+                  .catch(e => toast.error(e.message));
+              }}
               className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-[#166534] text-white text-xs font-semibold hover:bg-[#14532d] transition-colors"
             >
               <Download size={12} /> Download CSV

@@ -77,6 +77,8 @@ def get_insurance_usage(
                 "is_used": u.is_used,
                 "assessment_id": u.assessment_id,
                 "marked_at": u.marked_at,
+                # Set once the final PABS CSV export locks this usage.
+                "finalized_at": u.finalized_at,
             }
         )
 

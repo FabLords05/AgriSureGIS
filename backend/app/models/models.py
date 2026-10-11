@@ -226,6 +226,11 @@ class InsuranceUsage(Base):
     payouts for a typhoon: is_used=True when final_indemnity_payment > 0 for that
     (insurance, typhoon) pair, flipped back to False if a later recompute for the
     same typhoon drops the payout back to zero.
+
+    finalized_at is set by AssessmentService.finalize_exported_usage when the
+    final PABS CSV is exported. A finalized, used row is a permanent lock:
+    calculate_for_bulletin skips that policy for every typhoon from then on
+    (new typhoons can't reuse it; the exported typhoon's results stay frozen).
     """
 
     __tablename__ = "tbl_insurance_usage"
@@ -239,6 +244,7 @@ class InsuranceUsage(Base):
     assessment_id = Column(Integer, ForeignKey("tbl_risk_assessment.assessment_id", ondelete="SET NULL"))
     is_used = Column(Boolean, nullable=False, default=True)
     marked_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    finalized_at = Column(DateTime)
 
     insurance_record = relationship("InsuranceRecord", foreign_keys=[insurance_records_id])
     typhoon = relationship("Typhoon", foreign_keys=[typhoon_id])

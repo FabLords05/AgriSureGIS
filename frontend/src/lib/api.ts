@@ -477,12 +477,12 @@ export function calculateAssessments(typhoonId: number, bulletinId: number): Pro
 // rendered {"detail":"Not authenticated."} instead of saving a file.
 // Fetching as a Blob and clicking a synthetic <a download> keeps the header
 // and gives the same save-file behaviour.
-async function downloadCsv(path: string, filename: string): Promise<void> {
+async function downloadCsv(path: string, filename: string, method: 'GET' | 'POST' = 'GET'): Promise<void> {
   const token = loadPersistedToken();
   const headers = new Headers();
   if (token) headers.set('Authorization', `Bearer ${token}`);
 
-  const response = await fetch(`${API_BASE_URL}${path}`, { headers });
+  const response = await fetch(`${API_BASE_URL}${path}`, { method, headers });
   if (!response.ok) {
     if (response.status === 401) {
       clearPersistedUser();
@@ -510,8 +510,10 @@ export function downloadAssessmentsCsv(typhoonId: number): Promise<void> {
 // Combined export across every typhoon (not scoped to one bulletin/typhoon
 // folder), in the PABS-required column format. IRID/P/S columns come back
 // blank -- no definition for them was available; see the backend docstring.
+// POST: the backend locks every exported policy with a payout as used, so it
+// can't be assessed again for a later typhoon.
 export function downloadAssessmentsPabsCsv(): Promise<void> {
-  return downloadCsv('/api/assessments/export-pabs', 'pabs_indemnity_export.csv');
+  return downloadCsv('/api/assessments/export-pabs', 'pabs_indemnity_export.csv', 'POST');
 }
 
 export interface PabsAssessmentRow {

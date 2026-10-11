@@ -3,7 +3,16 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
 
-from app.models.models import IndemnityFactorMatrix, InsuranceRecord, RecsapMatrix, RiskAssessment, TropicalCycloneBulletin
+from sqlalchemy.sql import operators
+
+from app.models.models import (
+    IndemnityFactorMatrix,
+    InsuranceRecord,
+    InsuranceUsage,
+    RecsapMatrix,
+    RiskAssessment,
+    TropicalCycloneBulletin,
+)
 from app.services.assessment_service import AssessmentService
 
 
@@ -149,6 +158,29 @@ class AssessmentServiceTests(unittest.TestCase):
             "boundary_id",
             {criterion.left.name for criterion in filter_call.args if criterion.left.table.name == "tbl_farms"},
         )
+
+    @patch("app.services.assessment_service.ExposureCalculatorService.compute_for_typhoon")
+    def test_policies_locked_by_a_final_export_are_excluded(self, mock_compute):
+        # Once the final PABS CSV is exported, a policy can't be assessed again
+        # for any typhoon -- the lookup must exclude finalized usage rows.
+        bulletin = self._bulletin()
+        mock_compute.return_value = [self._summary()]
+        mock_db = self._build_mock_db(bulletin, [], prior_assessment=None, yield_loss_rule=None)
+
+        AssessmentService.calculate_for_bulletin(1, 12, mock_db)
+
+        filter_call = mock_db.insurance_query.join.return_value.join.return_value.filter.call_args
+        lock_criteria = [
+            criterion
+            for criterion in filter_call.args
+            if criterion.operator is operators.not_in_op
+            and criterion.left.table.name == "tbl_insurance_records"
+            and criterion.left.name == "insurance_records_id"
+        ]
+        self.assertEqual(len(lock_criteria), 1)
+        locked_subquery_sql = str(lock_criteria[0].right)
+        self.assertIn("tbl_insurance_usage.finalized_at IS NOT NULL", locked_subquery_sql)
+        self.assertIn("tbl_insurance_usage.is_used IS true", locked_subquery_sql)
 
     @patch("app.services.assessment_service.ExposureCalculatorService.compute_for_typhoon")
     def test_calculate_for_bulletin_skips_ineligible_crop_stage(self, mock_compute):
@@ -297,6 +329,75 @@ class InsuranceUsageSyncTests(unittest.TestCase):
 
         AssessmentService._sync_insurance_usage(1, [result], mock_db)
 
+        mock_db.commit.assert_not_called()
+
+
+class FinalizeExportedUsageTests(unittest.TestCase):
+    """finalize_exported_usage(): the lock applied when the final PABS CSV is exported."""
+
+    def _mock_db(self, usages, records):
+        mock_db = MagicMock()
+        usage_query = MagicMock()
+        usage_query.filter.return_value.all.return_value = usages
+        record_query = MagicMock()
+        record_query.filter.return_value.all.return_value = records
+
+        def query_side_effect(model):
+            if model is InsuranceUsage:
+                return usage_query
+            if model is InsuranceRecord:
+                return record_query
+            raise AssertionError(f"Unexpected model queried in test: {model}")
+
+        mock_db.query.side_effect = query_side_effect
+        return mock_db
+
+    def test_locks_provisional_usage_and_updates_mirror(self):
+        usage = MagicMock(insurance_records_id=7, typhoon_id=1, is_used=True, finalized_at=None)
+        insurance = MagicMock(spec=InsuranceRecord, insurance_records_id=7, is_used=False, used_for_typhoon_id=None)
+        mock_db = self._mock_db([usage], [insurance])
+
+        locked = AssessmentService.finalize_exported_usage([(7, 1, 42)], mock_db)
+
+        self.assertEqual(locked, 1)
+        self.assertIsNotNone(usage.finalized_at)
+        self.assertTrue(usage.is_used)
+        self.assertEqual(usage.assessment_id, 42)
+        self.assertTrue(insurance.is_used)
+        self.assertEqual(insurance.used_for_typhoon_id, 1)
+        mock_db.add.assert_not_called()
+        mock_db.commit.assert_called_once()
+
+    def test_creates_usage_row_when_none_exists(self):
+        insurance = MagicMock(spec=InsuranceRecord, insurance_records_id=7)
+        mock_db = self._mock_db([], [insurance])
+
+        locked = AssessmentService.finalize_exported_usage([(7, 1, 42)], mock_db)
+
+        self.assertEqual(locked, 1)
+        mock_db.add.assert_called_once()
+        added = mock_db.add.call_args.args[0]
+        self.assertIsInstance(added, InsuranceUsage)
+        self.assertEqual((added.insurance_records_id, added.typhoon_id), (7, 1))
+        self.assertIsNotNone(added.finalized_at)
+
+    def test_re_export_leaves_an_already_locked_row_untouched(self):
+        first_locked_at = datetime(2026, 10, 1, tzinfo=timezone.utc)
+        usage = MagicMock(insurance_records_id=7, typhoon_id=1, is_used=True, finalized_at=first_locked_at, assessment_id=42)
+        mock_db = self._mock_db([usage], [])
+
+        locked = AssessmentService.finalize_exported_usage([(7, 1, 99)], mock_db)
+
+        self.assertEqual(locked, 0)
+        self.assertEqual(usage.finalized_at, first_locked_at)
+        self.assertEqual(usage.assessment_id, 42)
+
+    def test_nothing_to_export_skips_the_database(self):
+        mock_db = MagicMock()
+
+        self.assertEqual(AssessmentService.finalize_exported_usage([], mock_db), 0)
+
+        mock_db.query.assert_not_called()
         mock_db.commit.assert_not_called()
 
 

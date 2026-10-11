@@ -4,6 +4,57 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-11] - Final PABS Export Locks Policies as Used (branch: develop)
+
+After a specialist exports the final PABS CSV, every policy on it with a
+payout is locked as used and can't be assessed again for a new typhoon.
+Until now, usage was only marked provisionally at calculation time, and
+nothing read it back: a policy paid for one typhoon was still assessed and
+paid for the next. The calculation-time mark is kept as a provisional
+"pending" mark; the export adds a permanent lock on top of it.
+
+### 1. File: `backend/app/models/models.py` / `backend/init_schema.sql`
+* **`InsuranceUsage.finalized_at`** (new column, `TIMESTAMPTZ`, nullable):
+  NULL = provisional calculate-time mark only; set = locked by an export.
+* New migration `backend/migrations/2026-10-11_insurance_usage_finalized_at.sql`
+  (re-runnable `ADD COLUMN IF NOT EXISTS`) for already-provisioned databases.
+
+### 2. File: `backend/app/services/assessment_service.py`
+* **`AssessmentService.calculate_for_bulletin()`**: the policy lookup now
+  excludes any policy with a used, finalized `tbl_insurance_usage` row, for
+  every typhoon. A new typhoon can't reuse it, and recalculating the exported
+  typhoon leaves its exported results frozen (policies exported with a ₱0
+  payout are not locked and can still be recalculated).
+* **`AssessmentService.finalize_exported_usage()`** (new): given
+  (insurance, typhoon, assessment) for each exported row with a payout, sets
+  `is_used`/`finalized_at` on the usage row (creating it if missing) and the
+  `tbl_insurance_records` mirror. Rows already locked are skipped, so
+  re-exporting is harmless. Returns the number newly locked.
+
+### 3. File: `backend/app/api/assessments.py`
+* **`export_assessments_pabs_csv()`**: now `POST /assessments/export-pabs`
+  (was `GET`), because exporting changes data. Locks the exported policies via
+  `finalize_exported_usage()` before returning the CSV.
+* **`_build_pabs_rows()`**: rows also carry `insurance_records_id`,
+  `typhoon_id` and `final_indemnity_payment` (not written to the CSV).
+
+### 4. File: `backend/app/api/insurance.py`
+* **`get_insurance_usage()`**: returns `finalized_at` per usage row.
+
+### 5. Files: `frontend/src/lib/api.ts`, `frontend/src/app/components/AssessmentModule.tsx`
+* **`downloadCsv()`**: takes an optional HTTP method;
+  **`downloadAssessmentsPabsCsv()`** sends `POST`.
+* **PABS modal "Download CSV" button**: asks for confirmation first (the lock
+  can't be undone from the UI), then shows a success toast.
+
+### 6. File: `backend/tests/test_assessment_service.py`
+* **`test_policies_locked_by_a_final_export_are_excluded`** (new).
+* New **`FinalizeExportedUsageTests`**: locks a provisional row and updates the
+  mirror, creates a missing usage row, leaves an already-locked row untouched on
+  re-export, and makes no DB calls for an empty export.
+
+---
+
 ## [2026-10-11] - PABS "Download CSV" Sends the Auth Token (branch: develop)
 
 Clicking **Download CSV** in the Assessment module's "Review CSV / PABS
