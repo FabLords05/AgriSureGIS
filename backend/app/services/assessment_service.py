@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from app.core.indemnity_calc import ParametricAssessment
 from app.models.models import (
+    AdminBoundary,
     Farm,
     InsuranceRecord,
     InsuranceUsage,
@@ -57,11 +58,18 @@ class AssessmentService:
         results: list[RiskAssessment] = []
 
         for summary in eligible_summaries:
+            # Matched on the summary's (province, municipality), not its
+            # boundary_id: a farm's boundary is its barangay, and the summary's
+            # boundary_id is just one barangay row ExposureCalculatorService
+            # picked to stand for the whole municipality -- matching on it
+            # skipped every farm in that municipality's other barangays.
             insurance_records = (
                 db.query(InsuranceRecord)
                 .join(Farm, InsuranceRecord.farm_id == Farm.farm_id)
+                .join(AdminBoundary, Farm.boundary_id == AdminBoundary.boundary_id)
                 .filter(
-                    Farm.boundary_id == summary.boundary_id,
+                    AdminBoundary.province == summary.province,
+                    AdminBoundary.municipality == summary.municipality,
                     InsuranceRecord.effectivity_date <= as_of,
                     InsuranceRecord.expiry_date >= as_of,
                 )

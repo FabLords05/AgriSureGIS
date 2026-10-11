@@ -56,6 +56,69 @@ Spatial Analysis & Data Import listed farmers first-name-first
 
 ---
 
+## [2026-10-09] - Assessment Matches Farms by Municipality; OPONG Assessment Test Seeder (branch: develop)
+
+Testing the Assessment module end-to-end against Typhoon OPONG (BUALOI) and
+the USTP CAPSTONE insurance records surfaced a matching bug that skipped
+most farms in every signalled municipality.
+
+### 1. File: `backend/app/services/assessment_service.py`
+* **`AssessmentService.calculate_for_bulletin()`**: policies are now matched
+  on the exposure summary's **(province, municipality)** via a join to
+  `tbl_admin_boundaries`, instead of `Farm.boundary_id == summary.boundary_id`.
+  Farms reference their **barangay** boundary, while
+  `ExposureCalculatorService` keys exposure by municipality and stores just
+  one (arbitrary, last-loaded) barangay row as the summary's `boundary_id` —
+  so only farms in that single barangay were ever assessed.
+
+### 2. File: `backend/app/api/bulletins.py`
+* **`get_typhoon_summary()`**: `people_hit` counts farmers by the summaries'
+  (province, municipality) for the same reason; it previously counted only
+  the one stand-in barangay per municipality.
+
+### 3. File: `backend/tests/test_assessment_service.py`
+* Mock chain updated for the extra `AdminBoundary` join; summaries now carry
+  `province`/`municipality`.
+* New **`test_policies_matched_by_municipality_not_the_summarys_single_barangay`**
+  asserts the policy lookup filters on province + municipality, not the
+  farm's `boundary_id`.
+
+### 4. File: `backend/seed_opong_assessment_test.py` (new, one-off)
+* Ingests the 23 real OPONG PDFs (`USTP CAPSTONE/TCB/`) through
+  `BulletinParserService`, content unchanged, with every `issued_at` shifted
+  by one whole-day offset so NR. 23F lands on the run date and OPONG is the
+  latest TCB.
+* Rebuilds each OPONG bulletin's `tbl_tcb_signals` rows from its PDF on every
+  run (delete, then `BulletinParserService._seed_tcb_signals()`).
+  `save_bulletin_to_db()` only seeds them on first insert, and the saved OPONG
+  bulletins had 0 Surigao del Norte rows. Prints per-bulletin row counts.
+* **Test-only override** (`override_signal()`): guarantees a TCWS 2
+  `tbl_tcb_signals` row for every Surigao del Norte municipality in NR. 12–16,
+  the bulletins where PAGASA hoisted the province. Existing rows are raised to
+  2 and missing ones added. At Signal 2 / 12h only Booting, Flowering and
+  Milking pay; Maturity gives 10% yield loss, below the lowest indemnity
+  bracket (>10%), so the ranking prefers paying stages. OPONG never put Mindanao above Signal 1 (Surigao del
+  Norte: Signal 1, NR. 12–16, 12h), so no farm there could otherwise qualify.
+  The bulletins' raw PAGASA text (`tcws_areas`) is left as issued.
+* Selects the 20 **existing** insurance records on Surigao del Norte farms
+  most likely to pay out (same signal / hours / crop-stage / RECSAP-rule
+  checks as `AssessmentService`) and sets their coverage to span OPONG's
+  shifted dates (30 days before the first bulletin, 1-year term). Original
+  dates are written to `backend/opong_test_original_dates.json` (gitignored)
+  before the commit. Does not run the assessment. Re-runnable.
+* **`--restore`** (`restore_records()`): puts those records' original dates
+  back and deletes the backup file.
+* `undo_ustp_activation()`: an earlier draft activated USTP CSV records
+  instead, so any USTP record whose dates differ from the CSV is put back.
+* **`--reset`** (`reset_assessment()`): clears OPONG's assessment results so
+  the demo can be repeated. It deletes the computed `tbl_risk_assessment` rows
+  (`matrix_id IS NOT NULL`) for OPONG's exposure summaries and OPONG's
+  `tbl_insurance_usage` rows, and clears the `is_used` / `used_for_typhoon_id` /
+  `used_at` mirror where it points at OPONG. Crop-stage seed rows, bulletins,
+  the signal override and the 20 active records are kept.
+
+---
+
 ## [2026-10-09] - Persist Final-TCB Marker (`is_final`) + "Ready for Assessment" Notice; Farm Records Pinned Column (branch: develop, direct push per Cristian)
 
 By Cristian. `bulletin_parser.py` already detected a typhoon's final bulletin

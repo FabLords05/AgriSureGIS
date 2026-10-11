@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from geoalchemy2.shape import to_shape
 from pydantic import BaseModel, Field
-from sqlalchemy import func
+from sqlalchemy import func, tuple_
 from sqlalchemy.orm import Session
 import os
 import shutil
@@ -14,6 +14,7 @@ from app.services.email_alert_service import send_new_bulletin_alerts
 from app.services.exposure_calculator import ExposureCalculatorService
 from app.services.pagasa_status_scraper import PagasaStatusService
 from app.models.models import (
+    AdminBoundary,
     AreaExposureSummary,
     Farm,
     ParserSettings,
@@ -271,14 +272,16 @@ def get_typhoon_summary(typhoon_id: int, db: Session = Depends(get_db)):
             "people_hit": 0,
         }
 
-    boundary_ids = {s.boundary_id for s in summaries if s.boundary_id is not None}
-    people_hit = 0
-    if boundary_ids:
-        people_hit = (
-            db.query(func.count(func.distinct(Farm.farmer_id)))
-            .filter(Farm.boundary_id.in_(boundary_ids))
-            .scalar()
-        )
+    # By (province, municipality), not summary.boundary_id -- that is one
+    # barangay row standing in for the whole municipality, so matching on it
+    # only counted farmers in that one barangay (same fix as AssessmentService).
+    areas = {(s.province, s.municipality) for s in summaries}
+    people_hit = (
+        db.query(func.count(func.distinct(Farm.farmer_id)))
+        .join(AdminBoundary, Farm.boundary_id == AdminBoundary.boundary_id)
+        .filter(tuple_(AdminBoundary.province, AdminBoundary.municipality).in_(areas))
+        .scalar()
+    )
 
     overall_start = min(s.start_time for s in summaries)
     overall_end = max(s.end_time for s in summaries)

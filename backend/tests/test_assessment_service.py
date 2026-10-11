@@ -20,6 +20,8 @@ class AssessmentServiceTests(unittest.TestCase):
         return MagicMock(
             summary_id=99,
             boundary_id=boundary_id,
+            province="Surigao del Norte",
+            municipality="Mainit",
             max_signal_level=max_signal_level,
             total_exposure_hours=total_exposure_hours,
         )
@@ -50,7 +52,9 @@ class AssessmentServiceTests(unittest.TestCase):
         bulletin_query.filter.return_value.first.return_value = bulletin
 
         insurance_query = MagicMock()
-        insurance_query.join.return_value.filter.return_value.all.return_value = insurance_records
+        # InsuranceRecord -> Farm -> AdminBoundary, then filtered by the
+        # summary's province/municipality.
+        insurance_query.join.return_value.join.return_value.filter.return_value.all.return_value = insurance_records
 
         # get_matrix_rule() does two chained lookups: RecsapMatrix (yield loss %)
         # then, only if that matched, IndemnityFactorMatrix (indemnity factor).
@@ -87,6 +91,7 @@ class AssessmentServiceTests(unittest.TestCase):
         # filtered on -- the mock returns the same rule regardless, so the filter
         # arguments are the only evidence the right bracket was chosen.
         mock_db.indemnity_query = indemnity_query
+        mock_db.insurance_query = insurance_query
         return mock_db
 
     @patch("app.services.assessment_service.ExposureCalculatorService.compute_for_typhoon")
@@ -120,6 +125,30 @@ class AssessmentServiceTests(unittest.TestCase):
         self.assertEqual(result.final_indemnity_payment, 16500.0)
         self.assertEqual(result.estimated_damage, 12500.0)  # 50000 * 25 / 100
         mock_db.commit.assert_called_once()
+
+    @patch("app.services.assessment_service.ExposureCalculatorService.compute_for_typhoon")
+    def test_policies_matched_by_municipality_not_the_summarys_single_barangay(self, mock_compute):
+        # A summary's boundary_id is one barangay row standing in for the whole
+        # municipality; farms reference their own barangay. Matching on
+        # boundary_id skipped every farm in the municipality's other barangays,
+        # so the policy lookup must filter on province + municipality instead.
+        bulletin = self._bulletin()
+        mock_compute.return_value = [self._summary()]
+        mock_db = self._build_mock_db(bulletin, [], prior_assessment=None, yield_loss_rule=None)
+
+        AssessmentService.calculate_for_bulletin(1, 12, mock_db)
+
+        filter_call = mock_db.insurance_query.join.return_value.join.return_value.filter.call_args
+        filtered = {
+            criterion.left.name: getattr(criterion.right, "value", None)
+            for criterion in filter_call.args
+            if criterion.left.table.name == "tbl_admin_boundaries"
+        }
+        self.assertEqual(filtered, {"province": "Surigao del Norte", "municipality": "Mainit"})
+        self.assertNotIn(
+            "boundary_id",
+            {criterion.left.name for criterion in filter_call.args if criterion.left.table.name == "tbl_farms"},
+        )
 
     @patch("app.services.assessment_service.ExposureCalculatorService.compute_for_typhoon")
     def test_calculate_for_bulletin_skips_ineligible_crop_stage(self, mock_compute):
