@@ -1,6 +1,11 @@
 # Proposal: Add Municipal Boundary Geometry + Signal-to-Boundary FK
 
-**Status:** Proposal for Fabio's review — nothing in this document has been applied to the schema. Per `CLAUDE.md`, any database structure modification must be proposed to Fabio and approved before implementation.
+**Status (updated 2026-10-12): PARTIALLY APPLIED — part 2 is still open.**
+
+* **Part 1 (boundary geometry column) — applied.** Live as `tbl_admin_boundaries.boundary_geom GEOMETRY(MultiPolygon, 4326)`, backfilled from `frontend/public/data/region10-boundaries.geojson` so GeoServer can publish boundaries as a WFS layer. Note it was added for that purpose, not this proposal's: the schema comment states it is *not* used in any exposure calculation.
+* **Part 2 (`tbl_tcb_signals.boundary_id` FK) — NOT applied.** A `province VARCHAR(100)` column was added instead (`backend/migrations/2026-08-20_tcb_signal_province.sql`), which mitigates municipality-name collisions by keying lookups on `(province, municipality)`. The free-text matching this proposal set out to replace is still in place in `bulletin_parser.py` and `exposure_calculator.py`, so the fragility described below remains real.
+
+This document is retained as the written record of that open item. The original header claimed nothing here had been applied, which stopped being true once part 1 shipped.
 
 ## Problem
 Two related gaps have been flagged since the original Sprint 3 backend work (see `.claude/FUNCTION_CHANGES.md`, "Sprint 3 Backend: GPX Parser & Exposure Calculation" entry) and are reconfirmed by `docs/ERD.drawio.png`, which already shows both fields in the intended design:

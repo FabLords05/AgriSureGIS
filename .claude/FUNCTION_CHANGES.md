@@ -86,6 +86,98 @@ is inside or outside PAR. Decisions:
 
 ---
 
+## [2026-10-12] - Docs Cleanup: Remove DFDs, Duplicate Flowchart, and Implemented Proposals (Sprint 3, branch: develop)
+
+By Fabio. `docs/` had accumulated diagrams and schema proposals that no longer
+describe the system. Each candidate was checked against the live schema before
+deletion rather than trusted from its own header — two proposals turned out to
+be fully implemented, one only half, and two flowchart exports turned out to be
+byte-identical. No backend or frontend behaviour changes in this entry.
+
+### 1. Deleted: data-flow diagrams (7 files)
+* `docs/DFD_Level1.drawio.png`, `docs/DFD_Level2_P1.drawio.png`,
+  `docs/DFD_Level2_P2_1-2_2.drawio.png`, `docs/DFD_Level2_P2_3-2_4.drawio.png`,
+  `docs/DFD_Level2_P3.drawio.png`, `docs/DFD_Level2_P4.drawio.png`,
+  `docs/ContextDiagram.drawio.png` (DFD Level 0 — removed with the rest per Fabio).
+* Nothing in the codebase referenced any of them, and `CLAUDE.md`'s documentation
+  priority order (Use Case → UI Prototype → ERD → Manuscript → Development Plan)
+  never cites DFDs, so the decision hierarchy is unaffected.
+
+### 2. Deleted: `docs/Flowchart.drawio.png` (duplicate)
+* Byte-identical to `docs/Parametric_Indemnity_Process_Flowchart.drawio.png`
+  (both md5 `3dba69191ca0010a825457381216e9c4`), despite this file's own earlier
+  changelog entry describing the latter as an *updated* export added alongside it.
+* The descriptively-named copy is kept; this generic one is removed.
+
+### 3. Deleted: `docs/PROPOSAL_farmers_id_column.md` (implemented)
+* `farmers_id VARCHAR(20) UNIQUE` is live in `backend/init_schema.sql`, and the
+  rationale that justified it (100% coverage in real PABS exports vs `rsbsa_no`'s
+  ~71%) is preserved in the column's own schema comment.
+
+### 4. Deleted: `docs/PROPOSAL_parser_settings_table.md` (implemented + stale)
+* `tbl_parser_settings` is live. The document had also gone factually wrong: it
+  specifies `polling_interval_hours`, but the column was renamed to
+  `polling_interval_minutes` by `backend/migrations/2026-08-10_polling_interval_minutes.sql`.
+
+### 5. Deleted: `docs/pending buhatonon sa agrisuregis system.txt`
+* Informal to-do note. Contents preserved verbatim here so the list is not lost:
+  * documentation sa mga passwords sa agrisuregis.
+  * indicator nga nigawas naba sa par ang typhoon.
+  * create and testing actual mock data.
+  * improving the frontend.
+
+### 6. File: `docs/PROPOSAL_boundary_geometry.md` (kept, header corrected)
+* **Not deleted** — unlike the other two proposals, only half of this one shipped,
+  so it remains the written record of an open item.
+  * Part 1 applied: `tbl_admin_boundaries.boundary_geom GEOMETRY(MultiPolygon, 4326)`
+    exists, though added to back GeoServer's WFS layer and explicitly *not* used in
+    any exposure calculation.
+  * Part 2 still open: the proposed `tbl_tcb_signals.boundary_id` FK was never added.
+    A `province VARCHAR(100)` column (`2026-08-20_tcb_signal_province.sql`) mitigates
+    municipality-name collisions instead, but `bulletin_parser.py` and
+    `exposure_calculator.py` still match on free text.
+* Replaced the **Status** header, which claimed nothing in the document had been
+  applied — untrue since part 1 shipped, and misleading to anyone reading it as a
+  pending proposal.
+
+### 7. File: `backend/init_schema.sql`
+* Reworded the `tbl_farmers_profile.farmers_id` comment to drop its
+  `(see docs/PROPOSAL_farmers_id_column.md)` pointer, which would otherwise dangle
+  at a deleted file. The empirical rationale in the comment is unchanged. This was
+  the only live code reference to any deleted file; remaining mentions elsewhere in
+  this changelog are historical record and are intentionally left as-is.
+
+### 8. Deleted: three PDFs Fabio removed manually
+* `docs/Revised AgriSureGIS Manuscript.pdf`, `docs/TCB#11_kiyapo.pdf`,
+  `docs/bulletin_francisco.pdf`. Removed from the working tree outside this
+  cleanup and folded into this commit at Fabio's instruction.
+* The manuscript and `bulletin_francisco.pdf` have no code references.
+  `TCB#11_kiyapo.pdf` did — see below.
+
+### 9. File: `backend/tests/test_bulletin_parser.py`
+* **`REAL_SAMPLE_PDF`** now resolves through `AGRISURE_SAMPLE_TCB_PDF` before
+  falling back to the (now deleted) `docs/TCB#11_kiyapo.pdf` path, so a local copy
+  can be pointed at without editing the test.
+* **`test_parse_bulletin_text_against_real_sample_pdf()`** gained a
+  `@unittest.skipUnless(os.path.exists(REAL_SAMPLE_PDF), ...)` guard. It opened the
+  PDF directly with no mock, so deleting the fixture would otherwise have left a test
+  that cannot pass. It now skips, and re-enables itself if the file returns.
+* The assertions are specific to KIYAPO Bulletin NR. 11 (name, international name,
+  bulletin number, winds, coordinates), so substituting a different PAGASA PDF makes
+  the test run and fail. Real bulletins are available locally in the gitignored
+  `USTP CAPSTONE-*/TCB/` folder (23 OPONG bulletins); using one means rewriting the
+  assertions to that bulletin's real values. Documented inline above `REAL_SAMPLE_PDF`.
+
+### 10. File: `.claude/CLAUDE.md`
+* Priority-order item 4 linked the deleted manuscript. Replaced the dead link with a
+  note that the PDF is kept outside the repo and must be requested from Fabio.
+* Also flags `ui-prototype/src/imports/Revised_AgriSureGIS_Manuscript.pdf` as a trap:
+  it is still tracked and looks like the same document, but it is an older, shorter
+  revision (3,722 vs 4,520 lines of extracted text) that predates the indemnity-formula
+  section, so it must not be cited as authoritative.
+
+---
+
 ## [2026-10-12] - Farm Records: Hide Used Policies; Filter by Typhoon Used (Sprint 3, branch: develop)
 
 By Cristian. Once a final PABS export locks a policy as used, that farm should
