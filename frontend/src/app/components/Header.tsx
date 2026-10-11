@@ -4,6 +4,7 @@ import {
   User, LogOut, Shield, RefreshCw, CheckCircle2, Users, Database, Activity, UserCog
 } from "lucide-react";
 import { AppNotification } from "./mockData";
+import { BrandLogo } from "./BrandLogo";
 import { HeaderHideMode } from "@/lib/headerHideModeStorage";
 
 export type ModuleId = "monitoring" | "spatial" | "assessment" | "calibration" | "users" | "backup" | "activity" | "account";
@@ -167,18 +168,27 @@ export function Header({ activeModule, onModuleChange, darkMode, onToggleDark, n
       style={{ background: darkMode ? "#0f1e0f" : "#166534" }}
     >
       {/* Logo / Brand */}
-      <div className="flex items-center gap-2.5 px-4 h-full border-r border-white/15 min-w-[200px]">
-        <div className="w-8 h-8 rounded-lg bg-white/15 flex items-center justify-center shrink-0">
-          <span className="text-white font-black text-sm">P</span>
-        </div>
-        <div>
-          <p className="text-white text-[11px] font-bold leading-tight tracking-wide">PCIC-GIS</p>
-          <p className="text-white/60 text-[9px] leading-tight">Risk Assessment System</p>
+      <div className="flex items-center px-3 h-full shrink-0">
+        {/* Badge: logo + name framed as one mark -- gold-tinted rounded edge,
+            a top-left sheen, a 1px top highlight, and a faint gold glow. */}
+        <div
+          className="flex items-center gap-3 pl-2 pr-4 py-1 rounded-xl border border-[#fbbf24]/45"
+          style={{
+            background: "linear-gradient(135deg, rgba(255,255,255,0.16) 0%, rgba(255,255,255,0.04) 55%, rgba(251,191,36,0.08) 100%)",
+            boxShadow: "inset 0 1px 0 rgba(255,255,255,0.22), 0 0 12px rgba(251,191,36,0.18), 0 2px 6px rgba(0,0,0,0.25)",
+          }}
+        >
+          <BrandLogo size={38} className="shrink-0 drop-shadow" />
+          <div>
+            <p className="text-white text-[14px] font-bold leading-tight tracking-wide">PCIC-GIS</p>
+            <p className="text-white/75 text-[11px] leading-tight whitespace-nowrap">Risk Assessment System</p>
+          </div>
         </div>
       </div>
 
-      {/* Module Tabs */}
-      <nav className="flex items-center h-full flex-1 px-1">
+      {/* Module Tabs -- no left padding: the brand block's own px-3 already
+          spaces the first tab from the badge (the divider line was removed). */}
+      <nav className="flex items-center h-full flex-1 pr-1">
         {modules.map((m, idx) => (
           <button
             key={m.id}

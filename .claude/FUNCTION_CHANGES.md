@@ -4,6 +4,33 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-11] - Header Brand Logo/Badge; Farm Records Column Alignment (branch: develop)
+
+UI polish per Cristian, reviewed in the browser.
+
+### 1. File: `frontend/src/app/components/BrandLogo.tsx` (new)
+* **`BrandLogo`**: inline-SVG logo mark. It replaces the placeholder "P"
+  box: a green shield (insurance) with a gold outline, a white rice stalk
+  (insured crop) and gold field furrows (mapped farm land). Gold matches the
+  active-tab underline (`#fbbf24`). A `useId()` gradient id keeps multiple
+  instances from colliding. Takes `size` and `className`.
+
+### 2. File: `frontend/src/app/components/Header.tsx`
+* Brand block: logo (38px) and name are framed as one badge, with a rounded
+  gold-tinted border, a top-left sheen, a 1px top highlight and a faint gold
+  glow. Text is larger: "PCIC-GIS" 11px to 14px, subtitle 9px to 11px.
+* Removed the divider line between the brand block and the module tabs, and
+  the fixed 200px brand width. The tab bar's left padding is gone, so the
+  active-tab highlight no longer leaves a 4px dark strip.
+
+### 3. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* Farm Records: **Area (ha)** (90px), **CIC No.** (130px) and **Exp (h)**
+  (80px) are now centered, header and values. Their values previously sat
+  against the neighbouring column because of mixed left/right alignment.
+  The table is now 1990px wide.
+
+---
+
 ## [2026-10-11] - Farm Records: New Column Order, Cover/CIC/Program Type/Used For Typhoon (branch: develop)
 
 Spatial Analysis & Data Import's Farm Records table, reordered per Cristian:
