@@ -4,7 +4,6 @@ import {
   Download, Eye, ChevronDown, ChevronUp, ArrowUpDown,
   FileSpreadsheet, RefreshCw, AlertCircle, Calculator, MapPin,
 } from "lucide-react";
-import { BarChart, Bar, XAxis, YAxis, Tooltip as RTooltip, ResponsiveContainer, CartesianGrid } from "recharts";
 import {
   getAssessmentsPabsSummary, downloadAssessmentsPabsCsv, getBulletins, getTyphoonSummary, calculateAssessments,
   getBulletinSignals,
@@ -21,20 +20,22 @@ function formatDateTime(iso: string | null): string {
 type SortField = "FARMER_NAME" | "municipality" | "TYPHOON_NAME" | "AREA" | "PERIOD_OF_EXPOSURE" | "WIND_VELOCITY" | "AC";
 type SortDir = "asc" | "desc";
 
-const PABS_HEADERS: { label: string; field: keyof PabsAssessmentRow }[] = [
+// `right` = numeric column, right-aligned in both header and cells. IRID was
+// dropped 2026-10-12 per Cristian.
+const PABS_HEADERS: { label: string; field: keyof PabsAssessmentRow; right?: boolean }[] = [
   { label: "Farmer Name", field: "FARMER_NAME" },
   { label: "Farmer ID", field: "FARMERID" },
   { label: "Farm ID", field: "FARMID" },
-  { label: "IRID", field: "IRID" },
-  { label: "Area", field: "AREA" },
+  { label: "Area", field: "AREA", right: true },
   { label: "Typhoon", field: "TYPHOON_NAME" },
-  { label: "Exposure (h)", field: "PERIOD_OF_EXPOSURE" },
-  { label: "Wind Velocity", field: "WIND_VELOCITY" },
+  { label: "Exposure (h)", field: "PERIOD_OF_EXPOSURE", right: true },
+  { label: "Wind Velocity", field: "WIND_VELOCITY", right: true },
   { label: "Date Filed", field: "DATE_FILED" },
   { label: "Date of Occurrence", field: "DATE_OF_OCCURRENCE" },
-  { label: "P", field: "P" },
-  { label: "S", field: "S" },
-  { label: "AC", field: "AC" },
+  { label: "P", field: "P", right: true },
+  { label: "S", field: "S", right: true },
+  { label: "AC", field: "AC", right: true },
+  { label: "Final Indemnity Payment", field: "FINAL_INDEMNITY_PAYMENT", right: true },
   { label: "Remarks", field: "REMARKS" },
 ];
 
@@ -77,7 +78,7 @@ function CSVPreviewModal({ rows, onClose }: { rows: PabsAssessmentRow[]; onClose
         <div className="flex items-center gap-2 px-5 py-2 bg-blue-50 dark:bg-blue-950/30 border-b border-blue-100 shrink-0">
           <AlertCircle size={11} className="text-blue-600 shrink-0" />
           <p className="text-[10px] text-blue-700 dark:text-blue-300">
-            These {rows.length} records are exactly what the downloaded CSV will contain. IRID, P, S, and Remarks are blank — no data source for those columns yet.
+            These {rows.length} records are exactly what the downloaded CSV will contain. P is PCIC's fixed 100% prevalence (1.0), S is the estimated yield loss as a fraction (30% = 0.3), and Remarks is PCIC's fixed remark. Final Indemnity Payment is blank until the revised payout calculation is in place.
           </p>
         </div>
 
@@ -86,7 +87,7 @@ function CSVPreviewModal({ rows, onClose }: { rows: PabsAssessmentRow[]; onClose
             <thead className="sticky top-0 z-10">
               <tr className="bg-[#166534] text-white">
                 {PABS_HEADERS.map(h => (
-                  <th key={h.field} className="px-2 py-1.5 text-left font-semibold whitespace-nowrap">{h.label}</th>
+                  <th key={h.field} className={`px-2 py-1.5 font-semibold whitespace-nowrap ${h.right ? "text-right" : "text-left"}`}>{h.label}</th>
                 ))}
               </tr>
             </thead>
@@ -94,7 +95,7 @@ function CSVPreviewModal({ rows, onClose }: { rows: PabsAssessmentRow[]; onClose
               {rows.map((r, i) => (
                 <tr key={r.assessment_id} className={`border-t border-border hover:bg-muted/30 ${i % 2 === 0 ? "bg-card" : "bg-muted/10"}`}>
                   {PABS_HEADERS.map(h => (
-                    <td key={h.field} className="px-2 py-1.5 whitespace-nowrap">{formatPabsCell(h.field, r[h.field])}</td>
+                    <td key={h.field} className={`px-2 py-1.5 whitespace-nowrap ${h.right ? "text-right tabular-nums" : ""}`}>{formatPabsCell(h.field, r[h.field])}</td>
                   ))}
                 </tr>
               ))}
@@ -277,7 +278,9 @@ interface AssessmentModuleProps {
   darkMode: boolean;
 }
 
-export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
+// darkMode is still accepted (App.tsx passes it) but no longer read -- the
+// AC by Municipality chart was its only use.
+export function AssessmentModule(_props: AssessmentModuleProps) {
   const [rows, setRows] = useState<PabsAssessmentRow[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -405,28 +408,20 @@ export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
   const totalArea = filtered.reduce((s, r) => s + (r.AREA ?? 0), 0);
   const totalAC = filtered.reduce((s, r) => s + (r.AC ?? 0), 0);
 
-  const muniChartData = useMemo(() => {
-    const totals = new Map<string, number>();
-    for (const r of filtered) {
-      const key = r.municipality ?? "Unknown";
-      totals.set(key, (totals.get(key) ?? 0) + (r.AC ?? 0));
-    }
-    return Array.from(totals.entries()).map(([name, ac]) => ({ name, ac: ac / 1000 }));
-  }, [filtered]);
-
   const SortIcon = ({ field }: { field: SortField }) =>
     sortField === field
       ? sortDir === "asc" ? <ChevronUp size={10} /> : <ChevronDown size={10} />
       : <ArrowUpDown size={10} className="opacity-30" />;
 
-  const sortableCols: { l: string; f: SortField }[] = [
+  // `right` = numeric column; its header is right-aligned to sit over its values.
+  const sortableCols: { l: string; f: SortField; right?: boolean }[] = [
     { l: "Farmer", f: "FARMER_NAME" },
     { l: "Municipality", f: "municipality" },
     { l: "Typhoon", f: "TYPHOON_NAME" },
-    { l: "Area", f: "AREA" },
-    { l: "Exp (h)", f: "PERIOD_OF_EXPOSURE" },
-    { l: "Wind", f: "WIND_VELOCITY" },
-    { l: "AC", f: "AC" },
+    { l: "Area", f: "AREA", right: true },
+    { l: "Exp (h)", f: "PERIOD_OF_EXPOSURE", right: true },
+    { l: "Wind", f: "WIND_VELOCITY", right: true },
+    { l: "AC", f: "AC", right: true },
   ];
 
   return (
@@ -436,10 +431,13 @@ export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
       )}
 
       {/* Left: Typhoons — click one to view its exposure summary */}
-      <div className="w-56 shrink-0 flex flex-col border-r border-border bg-card overflow-hidden">
-        <div className="px-3 py-2.5 border-b border-border">
-          <p className="text-[11px] font-bold">Typhoons</p>
-          <p className="text-[9px] text-muted-foreground mt-0.5">Click a typhoon to view its exposure summary</p>
+      <div className="w-60 shrink-0 flex flex-col border-r border-border bg-card overflow-hidden">
+        {/* min-h-16 matches the Top bar beside it so both bottom borders line
+            up. leading-tight + py-1.5 keep the two-line hint (about 59px total)
+            inside that 64px. */}
+        <div className="min-h-16 shrink-0 flex flex-col justify-center px-3 py-1.5 border-b border-border">
+          <p className="text-[14px] font-bold leading-tight">Typhoons</p>
+          <p className="text-[11px] text-foreground/70 mt-0.5 leading-tight">Click a typhoon to view its exposure summary</p>
         </div>
         <div className="flex-1 overflow-auto py-1 space-y-1 px-2">
           {typhoons.map(t => (
@@ -452,8 +450,8 @@ export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
                   : "bg-background border-border hover:bg-muted/50"
               }`}
             >
-              <p className="text-[10px] font-bold">Typhoon {t.typhoon_name}</p>
-              <p className="text-[9px] text-muted-foreground">{t.bulletin_count} bulletins (TCB 1-{t.bulletin_count})</p>
+              <p className="text-[13px] font-bold">Typhoon {t.typhoon_name}</p>
+              <p className="text-[12px] text-foreground/70">{t.bulletin_count} bulletins (TCB 1-{t.bulletin_count})</p>
             </button>
           ))}
         </div>
@@ -463,7 +461,7 @@ export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
       <div className="flex-1 flex flex-col overflow-hidden">
 
       {/* Top bar */}
-      <div className="flex items-center gap-3 px-4 py-2 bg-card border-b border-border shrink-0 flex-wrap gap-y-1">
+      <div className="min-h-16 flex items-center gap-3 px-4 py-2 bg-card border-b border-border shrink-0 flex-wrap gap-y-1">
         <div className="flex items-center gap-2">
           <FileSpreadsheet size={14} className="text-[#166534]" />
           <span className="text-sm font-semibold">Assessment & Reporting</span>
@@ -491,7 +489,7 @@ export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
             onChange={e => setFilterSignal(e.target.value)}
             className="text-[11px] border border-border rounded px-2 py-1 bg-background"
           >
-            {signals.map(s => <option key={s} value={s}>{s === "All" ? "All Wind Velocities" : `${s} km/h`}</option>)}
+            {signals.map(s => <option key={s} value={s}>{s === "All" ? "All Wind Velocities" : `Signal ${s}`}</option>)}
           </select>
           <button
             onClick={() => setShowCsvPreview(true)}
@@ -582,7 +580,7 @@ export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
             ))}
           </div>
 
-          {/* Table + Chart */}
+          {/* Table */}
           <div className="flex flex-1 overflow-hidden">
             <div className="flex-1 overflow-auto">
               <table className="w-full text-[10px]">
@@ -591,10 +589,10 @@ export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
                     {sortableCols.map(col => (
                       <th
                         key={col.f}
-                        className="px-2 py-1.5 text-left font-semibold cursor-pointer hover:bg-white/10 whitespace-nowrap"
+                        className={`px-2 py-1.5 font-semibold cursor-pointer hover:bg-white/10 whitespace-nowrap ${col.right ? "text-right" : "text-left"}`}
                         onClick={() => handleSort(col.f)}
                       >
-                        <span className="flex items-center gap-0.5">{col.l}<SortIcon field={col.f} /></span>
+                        <span className={`flex items-center gap-0.5 ${col.right ? "justify-end" : ""}`}>{col.l}<SortIcon field={col.f} /></span>
                       </th>
                     ))}
                     <th className="px-2 py-1.5 text-left font-semibold whitespace-nowrap">Farmer ID</th>
@@ -609,10 +607,11 @@ export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
                       <td className="px-2 py-1.5">{formatCell(r.TYPHOON_NAME)}</td>
                       <td className="px-2 py-1.5 text-right">{r.AREA != null ? r.AREA.toFixed(2) : "—"}</td>
                       <td className="px-2 py-1.5 text-right">{formatCell(r.PERIOD_OF_EXPOSURE)}</td>
-                      <td className="px-2 py-1.5 text-right">{r.WIND_VELOCITY != null ? `${r.WIND_VELOCITY} km/h` : "—"}</td>
-                      <td className="px-2 py-1.5 text-right font-bold text-[#166534]">{r.AC != null ? `₱${r.AC.toLocaleString()}` : "—"}</td>
+                      {/* WIND_VELOCITY holds the TCWS signal number, not a speed. */}
+                      <td className="px-2 py-1.5 text-right whitespace-nowrap">{r.WIND_VELOCITY != null ? `Signal ${r.WIND_VELOCITY}` : "—"}</td>
+                      <td className="px-2 py-1.5 text-right font-bold text-[#166534] dark:text-emerald-400">{r.AC != null ? `₱${r.AC.toLocaleString()}` : "—"}</td>
                       <td className="px-2 py-1.5 font-mono text-muted-foreground">{formatCell(r.FARMERID)}</td>
-                      <td className="px-2 py-1.5 font-mono text-[#166534]">#{formatCell(r.FARMID)}</td>
+                      <td className="px-2 py-1.5 font-mono text-[#166534] dark:text-emerald-400">#{formatCell(r.FARMID)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -627,28 +626,8 @@ export function AssessmentModule({ darkMode }: AssessmentModuleProps) {
                 </tfoot>
               </table>
             </div>
-
-            {/* Right: Chart */}
-            <div className="w-52 shrink-0 flex flex-col border-l border-border overflow-hidden">
-              <div className="px-3 py-2 border-b border-border bg-card shrink-0">
-                <p className="text-[11px] font-semibold">AC by Municipality</p>
-                <p className="text-[9px] text-muted-foreground">Current filter selection</p>
-              </div>
-              <div className="flex-1 overflow-auto p-2">
-                <ResponsiveContainer width="100%" height={190}>
-                  <BarChart data={muniChartData} layout="vertical" barSize={11}>
-                    <CartesianGrid strokeDasharray="3 3" stroke={darkMode ? "#1c2e1c" : "#e5e7eb"} horizontal={false} />
-                    <XAxis type="number" tick={{ fontSize: 9 }} axisLine={false} tickLine={false} tickFormatter={v => `₱${v.toFixed(0)}K`} />
-                    <YAxis type="category" dataKey="name" tick={{ fontSize: 9 }} axisLine={false} tickLine={false} width={46} />
-                    <RTooltip
-                      contentStyle={{ backgroundColor: darkMode ? "#111e11" : "#fff", border: "1px solid #ccc", borderRadius: 6, fontSize: 10 }}
-                      formatter={(v: number) => [`₱${v.toFixed(1)}K`, ""]}
-                    />
-                    <Bar dataKey="ac" name="AC (₱K)" fill="#ca8a04" radius={[0, 4, 4, 0]} />
-                  </BarChart>
-                </ResponsiveContainer>
-              </div>
-            </div>
+            {/* AC by Municipality chart removed 2026-10-11 per Cristian --
+                the table takes the full width now. */}
           </div>
         </>
       )}

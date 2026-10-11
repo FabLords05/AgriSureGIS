@@ -33,6 +33,12 @@
 * **POST `/api/bulletins/parse`**
   - **Description:** Trigger scraper to check PAGASA portal, download PDF, and parse details.
   - **Response:** `{ "status": "success", "bulletin_id": 12, "typhoon_name": "Leon" }`
+* **GET `/api/typhoons/{typhoon_id}/progress`**
+  - **Description:** Where one typhoon is in the workflow, for the Monitoring dashboard's progress strip. Read-only counts; triggers no compute. `in_par` is `Typhoon.is_active` (still listed on PAGASA's status page).
+  - **Response:** `{ "status": "success", "typhoon_id": 7, "typhoon_name": "OPONG", "in_par": false, "bulletin_count": 23, "final_bulletin": { "bulletin_count": 23, "issued_at": "..." }, "exposure_areas": 5, "assessed_farms": 20, "exported_policies": 0, "exported_at": null }`
+* **GET `/api/system/status`**
+  - **Description:** For the Monitoring dashboard's System Status panel: the PAGASA polling job's last/next run (last run is in memory, `null` until the first run after a restart), the newest bulletin, and whether SMTP email alerts are configured.
+  - **Response:** `{ "status": "success", "parser": { "interval_minutes": 15, "last_run_at": "...", "scrape_ok": true, "status_sync_ok": true, "next_run_at": "..." }, "last_bulletin": { "tcb_id": 432, "bulletin_count": 23, "is_final": true, "typhoon_name": "OPONG", "issued_at": "..." }, "email_alerts": { "configured": true } }`
 
 ## 4. Parametric Assessments
 * **POST `/api/assessments/calculate`**
@@ -41,6 +47,16 @@
 * **GET `/api/assessments/`** - Search and filter calculated risk assessments. Each row includes `typhoon_id` and `insurance_used` (`true`/`false`/`null` if no usage row exists yet for that typhoon).
 * **GET `/api/assessments/export`**
   - **Description:** Download payout-ready PCIC-formatted CSV file.
+* **GET `/api/assessments/pabs-summary`** / **POST `/api/assessments/export-pabs`**
+  - **Description:** Combined PABS-format rows (JSON preview / CSV download; the POST also locks exported policies as used). Columns: `FARMER_NAME, FARMERID, FARMID, AREA, TYPHOON_NAME, PERIOD_OF_EXPOSURE, WIND_VELOCITY, DATE_FILED, DATE_OF_OCCURRENCE, P, S, AC, FINAL_INDEMNITY_PAYMENT, REMARKS`. No IRID (2026-10-12). `FINAL_INDEMNITY_PAYMENT` is blank until the revised payout calculation lands. `P` is always `"1.0"` (100% prevalence); `S` is the RECSAP estimated yield loss as a fraction (`"0.3"` = 30%); `REMARKS` is PCIC's fixed sentence. `WIND_VELOCITY` is the TCWS signal number.
+
+## 4b. Farms (Farm Records)
+* **GET `/api/farms/`** and **GET `/api/farms/geometry`**
+  - **`active_only=true`:** farms with a policy inside its coverage dates today **and not locked as used** by a final PABS export (2026-10-12).
+  - **`typhoon_id`:** farms whose policy was locked as used for that typhoon; overrides `active_only`.
+* **GET `/api/farms/used-typhoons`**
+  - **Description:** Typhoons with at least one policy locked as used by a final export, for the Farm Records typhoon filter.
+  - **Response:** `{ "status": "success", "data": [ { "typhoon_id": 7, "name": "OPONG", "year": 2026, "farm_count": 20 } ] }`
 
 ## 5. Insurance
 * **GET `/api/insurance/summary`** - Counts date-window-active vs. total policies.

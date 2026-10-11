@@ -42,6 +42,56 @@ def _locked_typhoons_by_insurance_id(db: Session, insurance_ids: list[int]) -> d
     return {insurance_records_id: ", ".join(labels) for insurance_records_id, labels in names.items()}
 
 
+def _locked_insurance_ids(db: Session):
+    """Policies locked as used by a final PABS export (same definition as
+    _locked_typhoons_by_insurance_id and AssessmentService.calculate's
+    exclusion)."""
+    return db.query(InsuranceUsage.insurance_records_id).filter(
+        InsuranceUsage.is_used.is_(True),
+        InsuranceUsage.finalized_at.isnot(None),
+    )
+
+
+def _active_farm_ids(db: Session):
+    """
+    Farms with at least one policy that is both inside its coverage dates
+    today AND not locked as used by a final PABS export -- i.e. insurance that
+    can still be used. Backs `active_only` on GET /farms/ and /farms/geometry.
+    The used check was added 2026-10-12 (per Cristian): once exported, a
+    policy is spent, so its farm drops out of the Active Insurance view.
+    """
+    today = date.today()
+    return (
+        db.query(InsuranceRecord.farm_id)
+        .filter(
+            InsuranceRecord.effectivity_date <= today,
+            InsuranceRecord.expiry_date >= today,
+            InsuranceRecord.insurance_records_id.not_in(_locked_insurance_ids(db)),
+        )
+        .distinct()
+        # A bare Query object isn't a valid .in_() operand in SQLAlchemy
+        # 2.x -- scalar_subquery() turns it into the embeddable
+        # ScalarSelect the outer filter below actually needs.
+        .scalar_subquery()
+    )
+
+
+def _typhoon_used_farm_ids(db: Session, typhoon_id: int):
+    """Farms whose policy was locked as used for this typhoon by a final PABS
+    export -- the Farm Records typhoon filter (2026-10-12)."""
+    return (
+        db.query(InsuranceRecord.farm_id)
+        .join(InsuranceUsage, InsuranceUsage.insurance_records_id == InsuranceRecord.insurance_records_id)
+        .filter(
+            InsuranceUsage.typhoon_id == typhoon_id,
+            InsuranceUsage.is_used.is_(True),
+            InsuranceUsage.finalized_at.isnot(None),
+        )
+        .distinct()
+        .scalar_subquery()
+    )
+
+
 @router.get("/")
 def list_farms(
     db: Session = Depends(get_db),
@@ -50,6 +100,7 @@ def list_farms(
     active_only: bool = Query(False),
     municipality: str | None = Query(None),
     farmer_id: int | None = Query(None),
+    typhoon_id: int | None = Query(None),
 ):
     """
     Lists farms with farmer/boundary identity, insurance coverage dates (from
@@ -90,9 +141,13 @@ def list_farms(
 
     `active_only=True` restricts results to farms with at least one
     InsuranceRecord currently bracketing today (effectivity_date <= today <=
-    expiry_date) -- the same "active" definition SpatialAnalysisModule.tsx's
-    isActiveInsurance() already applies client-side, now pushed into the
-    query so an all-inactive farm is never fetched in the first place.
+    expiry_date) that is not locked as used by a final PABS export -- see
+    _active_farm_ids. Pushed into the query so an all-inactive farm is never
+    fetched in the first place.
+
+    `typhoon_id` (2026-10-12) restricts results to farms whose policy was
+    locked as used for that typhoon (_typhoon_used_farm_ids). Those farms are
+    by definition not active, so `active_only` is ignored when it is set.
 
     `municipality` (2026-08-17, part of the on-demand-pagination redesign --
     see .claude/FUNCTION_CHANGES.md) restricts results to farms whose
@@ -137,29 +192,21 @@ def list_farms(
     instead of re-running these queries, since this listing doesn't change
     on every request the way a live feed would.
     """
+    if typhoon_id is not None:
+        active_only = False  # used farms are never active -- see docstring
     cached = get_cached_farms_page(
-        limit=limit, after_id=after_id, active_only=active_only, municipality=municipality, farmer_id=farmer_id
+        limit=limit, after_id=after_id, active_only=active_only,
+        municipality=municipality, farmer_id=farmer_id, typhoon_id=typhoon_id,
     )
     if cached is not None:
         return cached
 
     base_query = db.query(Farm)
 
-    if active_only:
-        today = date.today()
-        active_farm_ids = (
-            db.query(InsuranceRecord.farm_id)
-            .filter(
-                InsuranceRecord.effectivity_date <= today,
-                InsuranceRecord.expiry_date >= today,
-            )
-            .distinct()
-            # A bare Query object isn't a valid .in_() operand in SQLAlchemy
-            # 2.x -- scalar_subquery() turns it into the embeddable
-            # ScalarSelect the outer filter below actually needs.
-            .scalar_subquery()
-        )
-        base_query = base_query.filter(Farm.farm_id.in_(active_farm_ids))
+    if typhoon_id is not None:
+        base_query = base_query.filter(Farm.farm_id.in_(_typhoon_used_farm_ids(db, typhoon_id)))
+    elif active_only:
+        base_query = base_query.filter(Farm.farm_id.in_(_active_farm_ids(db)))
 
     if municipality:
         # Plain join (not joinedload) purely to filter -- Farm.boundary_id ->
@@ -276,7 +323,8 @@ def list_farms(
         }
 
     cache_farms_page(
-        limit=limit, after_id=after_id, active_only=active_only, municipality=municipality, farmer_id=farmer_id, result=result
+        limit=limit, after_id=after_id, active_only=active_only,
+        municipality=municipality, farmer_id=farmer_id, typhoon_id=typhoon_id, result=result,
     )
     return result
 
@@ -297,6 +345,10 @@ def get_farms_geometry(
     ),
     active_only: bool = Query(False),
     municipality: str | None = Query(None),
+    typhoon_id: int | None = Query(
+        None,
+        description="Only farms whose policy was locked as used for this typhoon; overrides active_only. Same filter as GET /farms/.",
+    ),
     db: Session = Depends(get_db),
 ):
     """
@@ -365,18 +417,10 @@ def get_farms_geometry(
 
     query = db.query(Farm.farm_id, Farm.location_geom).filter(Farm.location_geom.isnot(None))
 
-    if active_only:
-        today = date.today()
-        active_farm_ids = (
-            db.query(InsuranceRecord.farm_id)
-            .filter(
-                InsuranceRecord.effectivity_date <= today,
-                InsuranceRecord.expiry_date >= today,
-            )
-            .distinct()
-            .scalar_subquery()
-        )
-        query = query.filter(Farm.farm_id.in_(active_farm_ids))
+    if typhoon_id is not None:
+        query = query.filter(Farm.farm_id.in_(_typhoon_used_farm_ids(db, typhoon_id)))
+    elif active_only:
+        query = query.filter(Farm.farm_id.in_(_active_farm_ids(db)))
 
     if municipality:
         query = query.join(AdminBoundary, Farm.boundary_id == AdminBoundary.boundary_id).filter(
@@ -399,6 +443,36 @@ def get_farms_geometry(
     ]
 
     return {"status": "success", "data": data}
+
+
+@router.get("/used-typhoons")
+def list_used_typhoons(db: Session = Depends(get_db)):
+    """
+    Typhoons that have at least one policy locked as used by a final PABS
+    export, with how many farms each -- the Farm Records typhoon filter's
+    options (2026-10-12). Newest year first.
+    """
+    rows = (
+        db.query(
+            Typhoon.typhoon_id,
+            Typhoon.name,
+            Typhoon.year,
+            func.count(func.distinct(InsuranceRecord.farm_id)),
+        )
+        .join(InsuranceUsage, InsuranceUsage.typhoon_id == Typhoon.typhoon_id)
+        .join(InsuranceRecord, InsuranceRecord.insurance_records_id == InsuranceUsage.insurance_records_id)
+        .filter(InsuranceUsage.is_used.is_(True), InsuranceUsage.finalized_at.isnot(None))
+        .group_by(Typhoon.typhoon_id, Typhoon.name, Typhoon.year)
+        .order_by(Typhoon.year.desc(), Typhoon.name.asc())
+        .all()
+    )
+    return {
+        "status": "success",
+        "data": [
+            {"typhoon_id": tid, "name": name, "year": year, "farm_count": count}
+            for tid, name, year, count in rows
+        ],
+    }
 
 
 @router.get("/municipalities")

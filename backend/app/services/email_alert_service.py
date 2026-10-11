@@ -47,6 +47,12 @@ def _smtp_config() -> dict | None:
     }
 
 
+def smtp_configured() -> bool:
+    """Whether SMTP settings are present in backend/.env -- for the Monitoring
+    dashboard's System Status panel. Does not test the mail server."""
+    return _smtp_config() is not None
+
+
 def _active_typhoon_bulletins(created: list[dict], db: Session) -> list[TropicalCycloneBulletin]:
     """Re-fetches each just-created bulletin by tcb_id (the `created` dicts from
     BulletinParserService.scrape_and_save_all only carry tcb_id/title/

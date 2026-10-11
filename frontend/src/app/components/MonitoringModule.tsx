@@ -2,25 +2,19 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import { toast } from "sonner";
 import {
   Activity, Download, FileDown,
-  RefreshCw, Eye, BarChart2, Zap, CheckCircle2,
+  RefreshCw, Eye, Zap, AlertTriangle,
   X, MapPinned, ShieldCheck,
-  ChevronUp, ChevronDown, ArrowUpDown
+  ChevronUp, ChevronDown, ArrowUpDown, Check, CheckCircle2, Clock, Wifi, ListChecks
 } from "lucide-react";
-import {
-  BarChart, Bar, XAxis, YAxis, Tooltip as RTooltip, ResponsiveContainer,
-  CartesianGrid, Legend
-} from "recharts";
 import {
   Bulletin, TcbSignal, InsuranceSummary, ActiveTyphoon, AssessmentsSummary,
   getBulletins, parseBulletins, getBulletinSignals,
   computeExposure, ComputeExposureResult, getAssessmentsSummary, getInsuranceSummary,
-  getActiveTyphoons,
+  getActiveTyphoons, TyphoonProgress, getTyphoonProgress, SystemStatus, getSystemStatus,
 } from "@/lib/api";
 
 type BulletinSortField = "bulletin_count" | "typhoon_name" | "issued_at" | "category" | "max_sustained_winds" | "gustiness";
 type SortDir = "asc" | "desc";
-
-const SIGNAL_BAR_COLOR = "#166534";
 
 function uniqueAreas(signals: TcbSignal[]): string[] {
   return Array.from(new Set(signals.map(s => s.area_name)));
@@ -73,6 +67,172 @@ function formatIssuedAt(isoString: string | null | undefined): string {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(date);
+}
+
+function formatClock(isoString: string | null | undefined): string {
+  if (!isoString) return "—";
+  const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat("en-PH", { timeZone: "Asia/Manila", timeStyle: "short" }).format(date);
+}
+
+// Typhoon progress strip (2026-10-11) -- where the tracked typhoon is in the
+// workflow, from bulletins collected to the final PABS export. "Current" is
+// the first step not done yet.
+function TyphoonProgressStrip({ progress, onNavigateToAssessment }: {
+  progress: TyphoonProgress;
+  onNavigateToAssessment?: () => void;
+}) {
+  const steps: { title: string; done: boolean; detail: string }[] = [
+    {
+      title: "Bulletins collected",
+      done: progress.bulletin_count > 0,
+      detail: `${progress.bulletin_count} TCB${progress.bulletin_count === 1 ? "" : "s"} downloaded`,
+    },
+    {
+      title: "Final TCB issued",
+      done: progress.final_bulletin !== null,
+      detail: progress.final_bulletin
+        ? `TCB #${progress.final_bulletin.bulletin_count} · ${formatIssuedAt(progress.final_bulletin.issued_at)}`
+        : "Waiting for PAGASA's final bulletin",
+    },
+    {
+      title: "Exposure computed",
+      done: progress.exposure_areas > 0,
+      detail: progress.exposure_areas > 0
+        ? `${progress.exposure_areas} municipalit${progress.exposure_areas === 1 ? "y" : "ies"}`
+        : "Not computed yet",
+    },
+    {
+      title: "Assessment calculated",
+      done: progress.assessed_farms > 0,
+      detail: progress.assessed_farms > 0
+        ? `${progress.assessed_farms} farm${progress.assessed_farms === 1 ? "" : "s"} assessed`
+        : "Not calculated yet",
+    },
+    {
+      title: "Exported to PABS",
+      done: progress.exported_policies > 0,
+      detail: progress.exported_policies > 0
+        ? `${progress.exported_policies} polic${progress.exported_policies === 1 ? "y" : "ies"} · ${formatIssuedAt(progress.exported_at)}`
+        : "Not exported yet",
+    },
+  ];
+  const currentIndex = steps.findIndex(s => !s.done);
+
+  return (
+    <div className="bg-card border border-border rounded-xl shrink-0">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+        <div className="flex items-center gap-2">
+          <ListChecks size={15} className="text-[#166534]" />
+          <span className="text-sm font-semibold">{progress.typhoon_name} — Assessment Progress</span>
+        </div>
+        {progress.in_par ? (
+          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-red-100 text-red-700 dark:bg-red-950/40 dark:text-red-400">
+            <span className="w-2 h-2 rounded-full bg-current" /> Inside PAR
+          </span>
+        ) : (
+          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-muted text-muted-foreground">
+            <span className="w-2 h-2 rounded-full bg-current" /> Exited PAR
+          </span>
+        )}
+      </div>
+      <div className="grid grid-cols-5 px-4 py-4">
+        {steps.map((s, i) => {
+          const isCurrent = i === currentIndex;
+          return (
+            <div key={s.title} className="relative px-2 text-center">
+              {i > 0 && (
+                <div className={`absolute top-[14px] -left-1/2 w-full h-[3px] ${s.done || isCurrent ? "bg-[#166534]" : "bg-border"}`} />
+              )}
+              <div className={`relative z-10 mx-auto mb-1.5 w-[30px] h-[30px] rounded-full flex items-center justify-center text-[12px] font-bold border-[3px] ${
+                s.done
+                  ? "bg-[#166534] border-[#166534] text-white"
+                  : isCurrent
+                    ? "bg-card border-[#ca8a04] text-[#ca8a04] ring-4 ring-[#ca8a04]/20"
+                    : "bg-card border-border text-muted-foreground"
+              }`}>
+                {s.done ? <Check size={14} strokeWidth={3} /> : i + 1}
+              </div>
+              <p className="text-[12px] font-semibold">{s.title}</p>
+              <p className="text-[11px] text-muted-foreground">{s.detail}</p>
+              {isCurrent && i >= 3 && onNavigateToAssessment && (
+                <button onClick={onNavigateToAssessment} className="mt-0.5 text-[11px] font-medium text-[#ca8a04] hover:underline">
+                  Go to Assessment &amp; Reporting →
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// System Status panel (2026-10-11) -- PAGASA polling job, newest bulletin,
+// and email alert config, from GET /api/system/status. Calibration keeps its
+// own Backend API row separately.
+function SystemStatusPanel({ status, checkedAt }: { status: SystemStatus | null; checkedAt: string | null }) {
+  const parser = status?.parser;
+  const parserOk = parser?.last_run_at ? parser.scrape_ok && parser.status_sync_ok : null;
+  const rows: { label: string; ok: boolean | null; detail: string; sub?: string }[] = status ? [
+    {
+      label: "PAGASA Parser",
+      ok: parserOk,
+      detail: parser?.last_run_at
+        ? `Last run ${formatClock(parser.last_run_at)}${parserOk ? "" : " (failed)"}`
+        : "Not run yet since restart",
+      sub: `Next ${formatClock(parser?.next_run_at)} · every ${parser?.interval_minutes} min`,
+    },
+    {
+      label: "Last bulletin parsed",
+      ok: status.last_bulletin ? true : null,
+      detail: status.last_bulletin
+        ? `TCB #${status.last_bulletin.bulletin_count}${status.last_bulletin.is_final ? " (Final)" : ""} · ${status.last_bulletin.typhoon_name ?? "Unknown"}`
+        : "None yet",
+      sub: status.last_bulletin ? formatIssuedAt(status.last_bulletin.issued_at) : undefined,
+    },
+    {
+      label: "Email Alerts",
+      ok: status.email_alerts.configured,
+      detail: status.email_alerts.configured ? "Configured" : "Not configured",
+    },
+  ] : [];
+
+  return (
+    <div className="bg-card border border-border rounded-xl p-4 flex flex-col min-h-0">
+      <div className="flex items-center gap-2 mb-3">
+        <Wifi size={15} className="text-[#166534]" />
+        <span className="text-sm font-semibold">System Status</span>
+      </div>
+      {status === null ? (
+        <p className="text-[12px] text-muted-foreground">Status unavailable.</p>
+      ) : (
+        <div className="divide-y divide-border">
+          {rows.map(r => (
+            <div key={r.label} className="py-2 flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2">
+                {r.ok === null
+                  ? <span className="w-3 h-3 rounded-full border-2 border-muted-foreground/50 shrink-0" />
+                  : r.ok
+                    ? <CheckCircle2 size={13} className="text-emerald-500 shrink-0" />
+                    : <AlertTriangle size={13} className="text-amber-500 shrink-0" />}
+                <span className="text-[12px]">{r.label}</span>
+              </div>
+              <div className="text-right">
+                <p className="text-[12px] font-medium">{r.detail}</p>
+                {r.sub && <p className="text-[11px] text-muted-foreground">{r.sub}</p>}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="mt-auto pt-2 border-t border-border flex items-center gap-1.5">
+        <Clock size={11} className="text-muted-foreground" />
+        <span className="text-[11px] text-muted-foreground">Checked {checkedAt ?? "—"}</span>
+      </div>
+    </div>
+  );
 }
 
 // ─── TCB Detail Viewer Modal ─────────────────────────────────────────────────
@@ -337,9 +497,12 @@ interface MonitoringModuleProps {
   darkMode: boolean;
   selectedBulletin: Bulletin | null;
   onSelectBulletin: (bulletin: Bulletin | null) => void;
+  onNavigateToAssessment?: () => void;
 }
 
-export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin }: MonitoringModuleProps) {
+const SYSTEM_STATUS_REFRESH_MS = 60_000;
+
+export function MonitoringModule({ selectedBulletin, onSelectBulletin, onNavigateToAssessment }: MonitoringModuleProps) {
   const [bulletins, setBulletins] = useState<Bulletin[]>([]);
   const [isLoadingBulletins, setIsLoadingBulletins] = useState(false);
   const [isParsing, setIsParsing] = useState(false);
@@ -366,6 +529,27 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
   const [assessmentsSummary, setAssessmentsSummary] = useState<AssessmentsSummary | null>(null);
   const [insuranceSummary, setInsuranceSummary] = useState<InsuranceSummary | null>(null);
   const [activeTyphoons, setActiveTyphoons] = useState<ActiveTyphoon[]>([]);
+  const [typhoonProgress, setTyphoonProgress] = useState<TyphoonProgress | null>(null);
+  const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
+  const [systemStatusCheckedAt, setSystemStatusCheckedAt] = useState<string | null>(null);
+
+  const loadSystemStatus = useCallback(async () => {
+    try {
+      setSystemStatus(await getSystemStatus());
+    } catch {
+      setSystemStatus(null);
+    } finally {
+      setSystemStatusCheckedAt(formatClock(new Date().toISOString()));
+    }
+  }, []);
+
+  // Refreshed every minute so the parser's last/next run stays current
+  // while the dashboard is left open.
+  useEffect(() => {
+    loadSystemStatus();
+    const id = setInterval(loadSystemStatus, SYSTEM_STATUS_REFRESH_MS);
+    return () => clearInterval(id);
+  }, [loadSystemStatus]);
 
   const loadActiveTyphoons = useCallback(async () => {
     try {
@@ -390,13 +574,6 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
   const affectedFarms = assessmentsSummary?.affected_farms ?? 0;
   const totalArea = assessmentsSummary?.total_area ?? 0;
 
-  const signalChartData = useMemo(
-    () => [...(assessmentsSummary?.signal_breakdown ?? [])]
-      .sort((a, b) => a.wind_velocity - b.wind_velocity)
-      .map(d => ({ signal: `Signal ${d.wind_velocity}`, farms: d.farm_count, area: Math.round(d.total_area * 10) / 10 })),
-    [assessmentsSummary]
-  );
-
   const loadBulletins = useCallback(async () => {
     setIsLoadingBulletins(true);
     setLoadError(null);
@@ -420,6 +597,7 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
       const result = await parseBulletins();
       await loadBulletins();
       await loadActiveTyphoons();
+      loadSystemStatus();
       toast.success(
         result.parsed_count > 0
           ? `Parsed ${result.parsed_count} new bulletin(s).`
@@ -544,52 +722,58 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
 
   const activeTyphoonNames = activeTyphoons.map(t => t.name).join(", ");
 
-  // Typhoon the "TCBs Downloaded" card follows: the active typhoon (the one
-  // with the most recent bulletin, if several are active). With none active,
-  // it keeps showing the most recent typhoon (newest bulletin's) until a new
-  // one becomes active -- PAGASA drops a storm from its status page right
-  // around its final bulletin, so "active only" would hide the "ready for
-  // assessment" notice almost immediately. Deliberately not "last typhoon
-  // with a final bulletin": that jumped back to an older storm whenever the
-  // newest one's final TCB wasn't flagged yet (QUEENIE 14F, saved before
-  // is_final was stored). `bulletins` is newest-issued-first.
-  const trackedTyphoon = useMemo(() => {
-    const activeIds = new Set(activeTyphoons.map(t => t.typhoon_id));
-    let typhoonId: number | null = null;
-    let name: string | null = null;
-    if (activeIds.size > 0) {
-      const latestActive = bulletins.find(b => activeIds.has(b.typhoon_id));
-      typhoonId = latestActive?.typhoon_id ?? activeTyphoons[0].typhoon_id;
-      name = latestActive?.typhoon_name ?? activeTyphoons[0].name;
-    } else if (bulletins.length > 0) {
-      typhoonId = bulletins[0].typhoon_id;
-      name = bulletins[0].typhoon_name;
-    }
-    if (typhoonId === null) return null;
-    const own = bulletins.filter(b => b.typhoon_id === typhoonId);
-    return {
-      name,
-      count: own.length,
-      finalBulletin: own.find(b => b.is_final) ?? null,
-      otherActiveCount: Math.max(0, activeIds.size - 1),
-    };
-  }, [bulletins, activeTyphoons]);
+  // TCBs Downloaded is scoped to one typhoon, not a lifetime total -- the
+  // first/primary active typhoon if there is one (per Fabio: two storms
+  // active at once is rare enough not to bother summing/listing separately),
+  // falling back to the most recently-issued bulletin's typhoon once nothing
+  // is active anymore, so the count + alert below still has something to
+  // point at right after a typhoon closes out. Matched by typhoon_id, not
+  // name -- PAGASA reuses local names across seasons.
+  const primaryTyphoonId = activeTyphoons[0]?.typhoon_id ?? bulletins[0]?.typhoon_id ?? null;
+  const primaryTyphoonName = activeTyphoons[0]?.name ?? bulletins[0]?.typhoon_name ?? null;
+  const primaryTyphoonBulletins = primaryTyphoonId !== null
+    ? bulletins.filter(b => b.typhoon_id === primaryTyphoonId)
+    : [];
+  // "Ready for assessment" = PAGASA has issued this typhoon's final bulletin
+  // (the stored is_final marker -- trailing "F" on the bulletin number, or an
+  // LPA bulletin). Replaces the earlier "no longer on PAGASA's active list"
+  // signal, which was only a stand-in while is_final wasn't persisted: a
+  // storm drops off the active list even if its final TCB was never
+  // downloaded. See .claude/FUNCTION_CHANGES.md (2026-10-09).
+  const typhoonDoneCollecting = primaryTyphoonBulletins.some(b => b.is_final);
 
-  const statCards = [
-    { label:"Active Typhoon",       value: activeTyphoonNames || "N/A", sub:"From PAGASA status page", icon:<Zap size={14} />,        color:"#ef4444", bg:"bg-red-50 dark:bg-red-950/30",     border:"border-red-200 dark:border-red-900" },
+  // Progress strip follows the same typhoon as the TCBs Downloaded card, and
+  // refetches when that typhoon's bulletin count or PAR status changes.
+  const primaryTyphoonInPar = activeTyphoons.some(t => t.typhoon_id === primaryTyphoonId);
+  useEffect(() => {
+    if (primaryTyphoonId === null) {
+      setTyphoonProgress(null);
+      return;
+    }
+    let cancelled = false;
+    getTyphoonProgress(primaryTyphoonId)
+      .then(p => { if (!cancelled) setTyphoonProgress(p); })
+      .catch(() => { if (!cancelled) setTyphoonProgress(null); });
+    return () => { cancelled = true; };
+  }, [primaryTyphoonId, primaryTyphoonBulletins.length, primaryTyphoonInPar]);
+
+  const statCards: {
+    label: string; value: string | number; sub: string; icon: React.ReactNode;
+    color: string; bg: string; border: string; alert: string | null;
+  }[] = [
+    { label:"Active Typhoon",   value: activeTyphoonNames || "N/A", sub:"From PAGASA status page", icon:<Zap size={18} />,        color:"#ef4444", bg:"bg-red-50 dark:bg-red-950/30",     border:"border-red-200 dark:border-red-900", alert: null },
     {
       label:"TCBs Downloaded",
-      value: trackedTyphoon ? trackedTyphoon.count : "—",
-      sub: trackedTyphoon
-        ? `${trackedTyphoon.name}${trackedTyphoon.otherActiveCount > 0 ? ` (+${trackedTyphoon.otherActiveCount} active)` : ""}`
-        : "No active typhoon",
-      notice: trackedTyphoon?.finalBulletin
-        ? `Final TCB No. ${trackedTyphoon.finalBulletin.bulletin_count} received — ready for assessment`
-        : null,
-      icon:<Download size={18} />, color:"#1e3a5f", bg:"bg-blue-50 dark:bg-blue-950/30", border:"border-blue-200 dark:border-blue-900",
+      value: primaryTyphoonBulletins.length,
+      sub: primaryTyphoonName ? `for ${primaryTyphoonName}` : "No tracked typhoon yet",
+      icon: typhoonDoneCollecting ? <AlertTriangle size={18} /> : <Download size={18} />,
+      color: typhoonDoneCollecting ? "#d97706" : "#1e3a5f",
+      bg: typhoonDoneCollecting ? "bg-amber-50 dark:bg-amber-950/30" : "bg-blue-50 dark:bg-blue-950/30",
+      border: typhoonDoneCollecting ? "border-amber-300 dark:border-amber-700" : "border-blue-200 dark:border-blue-900",
+      alert: typhoonDoneCollecting ? "Ready for assessment" : null,
     },
-    { label:"Affected Farms",       value:`${affectedFarms}/${totalFarms}`,  sub:`${totalArea.toFixed(1)} ha`,icon:<Activity size={18} />, color:"#166534", bg:"bg-green-50 dark:bg-green-950/30", border:"border-green-200 dark:border-green-900" },
-    { label:"Active Insurance",     value: insuranceSummary ? `${insuranceSummary.active_count}/${insuranceSummary.total_count}` : "—", sub:"Within coverage window", icon:<ShieldCheck size={18} />, color:"#7c3aed", bg:"bg-purple-50 dark:bg-purple-950/30", border:"border-purple-200 dark:border-purple-900" },
+    { label:"Affected Farms",   value:`${affectedFarms}/${totalFarms}`,  sub:`${totalArea.toFixed(1)} ha`,icon:<Activity size={18} />, color:"#166534", bg:"bg-green-50 dark:bg-green-950/30", border:"border-green-200 dark:border-green-900", alert: null },
+    { label:"Active Insurance", value: insuranceSummary ? `${insuranceSummary.active_count}/${insuranceSummary.total_count}` : "—", sub:"Within coverage window", icon:<ShieldCheck size={18} />, color:"#7c3aed", bg:"bg-purple-50 dark:bg-purple-950/30", border:"border-purple-200 dark:border-purple-900", alert: null },
   ];
 
   return (
@@ -612,28 +796,35 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
         />
       )}
 
-      {/* Stat Cards */}
-      <div className="grid grid-cols-4 gap-3 shrink-0">
+      {/* Stat Cards -- Est. Total Indemnity and Growth Stage/TCB Timeline
+          charts removed per Fabio's redesign; TCBs Downloaded brought back
+          but rescoped to one typhoon with a "Ready for assessment" alert. */}
+      <div className="grid grid-cols-4 gap-4 shrink-0">
         {statCards.map((c, i) => (
-          <div key={i} className={`bg-card border rounded-xl p-4 transition-shadow hover:shadow-md ${c.border}`}>
-            <div className="flex items-start justify-between">
+          <div key={i} className={`bg-card border rounded-xl p-5 transition-shadow hover:shadow-md ${c.border}`}>
+            <div className="flex items-center justify-between">
               <div>
-                <p className="text-[11px] text-muted-foreground uppercase tracking-wide">{c.label}</p>
-                <p className="text-2xl font-bold mt-0.5" style={{ color: c.color }}>{c.value}</p>
-                <p className="text-[10px] text-muted-foreground mt-0.5">{c.sub}</p>
-                {c.notice && (
-                  <p className="mt-1.5 inline-flex items-center gap-1 rounded-md bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-600 dark:text-emerald-400">
-                    <CheckCircle2 size={11} className="shrink-0" /> {c.notice}
-                  </p>
-                )}
+                <p className="text-[12px] text-muted-foreground uppercase tracking-wide">{c.label}</p>
+                <p className="text-3xl font-bold mt-1" style={{ color: c.color }}>{c.value}</p>
+                <p className="text-[11px] text-muted-foreground mt-1">{c.sub}</p>
               </div>
-              <div className="w-10 h-10 rounded-lg flex items-center justify-center" style={{ backgroundColor: c.color + "20", color: c.color }}>
+              <div className="w-14 h-14 rounded-xl flex items-center justify-center" style={{ backgroundColor: c.color + "20", color: c.color }}>
                 {c.icon}
               </div>
             </div>
+            {c.alert && (
+              <div className="mt-3 flex items-center gap-1.5 px-2 py-1.5 rounded-lg bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300">
+                <AlertTriangle size={12} className="shrink-0" />
+                <span className="text-[10px] font-medium leading-tight">{c.alert}</span>
+              </div>
+            )}
           </div>
         ))}
       </div>
+
+      {typhoonProgress && (
+        <TyphoonProgressStrip progress={typhoonProgress} onNavigateToAssessment={onNavigateToAssessment} />
+      )}
 
       <div className="grid grid-cols-3 gap-4 flex-1 min-h-0">
         {/* TCB Bulletin List */}
@@ -743,34 +934,10 @@ export function MonitoringModule({ darkMode, selectedBulletin, onSelectBulletin 
           )}
         </div>
 
-        {/* Right Panel -- Farms by Signal Number, side by side with the
-            bulletin list (Growth Stage Distribution and the TCB Download
-            Timeline were removed 2026-10-09 per Cristian). */}
-        <div className="bg-card border border-border rounded-xl p-4 flex flex-col min-h-0">
-          <div className="flex items-center gap-2 mb-3">
-            <BarChart2 size={14} className="text-[#1e3a5f]" />
-            <span className="text-xs font-semibold">Farms by Signal Number</span>
-          </div>
-          {signalChartData.length === 0 ? (
-            <p className="text-[11px] text-muted-foreground py-8 text-center">No assessed farms yet.</p>
-          ) : (
-            <div className="flex-1 min-h-0">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={signalChartData} barSize={28}>
-                  <CartesianGrid strokeDasharray="3 3" stroke={darkMode ? "#1c2e1c" : "#e5e7eb"} />
-                  <XAxis dataKey="signal" tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
-                  <YAxis tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
-                  <RTooltip
-                    contentStyle={{ backgroundColor: darkMode ? "#111e11" : "#fff", border:"1px solid #ccc", borderRadius:6, fontSize:11 }}
-                  />
-                  <Bar dataKey="farms"  name="Farms"       fill={SIGNAL_BAR_COLOR} radius={[4,4,0,0]} />
-                  <Bar dataKey="area"   name="Area (ha)"   fill="#1e3a5f" radius={[4,4,0,0]} />
-                  <Legend iconSize={10} iconType="square" wrapperStyle={{ fontSize: 10 }} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-        </div>
+        {/* System Status took the slot Farms by Signal Number had (removed
+            2026-10-11 per Cristian; Growth Stage Distribution and the TCB
+            Download Timeline went 2026-10-09). */}
+        <SystemStatusPanel status={systemStatus} checkedAt={systemStatusCheckedAt} />
       </div>
 
     </div>

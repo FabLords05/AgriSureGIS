@@ -4,6 +4,335 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-12] - Farm Records: Hide Used Policies; Filter by Typhoon Used (Sprint 3, branch: develop)
+
+By Cristian. Once a final PABS export locks a policy as used, that farm should
+drop out of the Active Insurance view. A new filter lists the farms used for
+one typhoon. Decisions:
+* The typhoon filter means "locked as used for that typhoon".
+* With Active Insurance Only OFF (needs a municipality or farmer search),
+  used farms still show, with their Used For Typhoon label.
+
+### 1. File: `backend/app/api/farms.py`
+* New helpers:
+  * **`_locked_insurance_ids()`**: policies locked by a final export
+    (`is_used` + `finalized_at`).
+  * **`_active_farm_ids()`**: within coverage dates **and** not locked.
+    Replaces the dates-only subquery that was duplicated in both routes.
+  * **`_typhoon_used_farm_ids()`**: farms locked as used for one typhoon.
+* **`list_farms()`** and **`get_farms_geometry()`**:
+  * `active_only` now uses `_active_farm_ids`;
+  * new `typhoon_id` parameter, which overrides `active_only` (used farms are
+    never active).
+* New **`GET /api/farms/used-typhoons`** (**`list_used_typhoons()`**):
+  typhoons with locked policies and a distinct farm count each, newest year
+  first. Feeds the filter dropdown.
+
+### 2. File: `backend/app/core/farms_cache.py`
+* `typhoon_id` added to `_cache_key()`, `get_cached_farms_page()` and
+  `cache_farms_page()`. The `invalidate_farms_cache()` docstring now mentions
+  the export.
+
+### 3. File: `backend/app/api/assessments.py`
+* **`export_assessments_pabs_csv()`** calls `invalidate_farms_cache()` after
+  `finalize_exported_usage`. Before this, the export never cleared cached
+  Farm Records pages, so just-locked farms could keep showing as active.
+
+### 4. File: `frontend/src/lib/api.ts`
+* `getFarms()` / `getFarmsGeometry()` accept `typhoon_id`.
+* New `UsedTyphoon` type and `getUsedTyphoons()`.
+
+### 5. File: `frontend/src/lib/useFarmsData.ts`
+* New `typhoonId` parameter. It is a bounded scope like municipality/farmer,
+  so it is included in the unbounded-combination guards and the restart
+  dependencies.
+* New **`replaceOnNextPageRef`**: the first page after `start()` (a filter
+  change or `refresh()`) now **replaces** `farms` instead of merging into
+  them. Merging kept rows that had left the result set, e.g. a just-locked
+  farm with stale "not used" data. Later pages still merge. Pages are 1,000
+  rows, so the active view normally fits in page 1.
+
+### 6. File: `frontend/src/app/App.tsx`
+* New `filterTyphoonId` state, passed to `useFarmsData` and
+  `SpatialAnalysisModule`.
+* The Active-Insurance guard now also counts the typhoon filter as a scope.
+* Farms are re-fetched (`farmsData.refresh()`) every time the Spatial tab
+  opens, so an export done on the Assessment tab shows up immediately.
+
+### 7. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* New props `filterTyphoonId` / `onFilterTyphoonIdChange`.
+* New **"Used for typhoon"** dropdown, e.g. "OPONG 2026 (20 farms)", in the
+  Farm Records toolbar. Options come from `getUsedTyphoons()` on mount.
+* `filteredFarms`: the active check also needs `!f.used_for_typhoon`. It is
+  skipped while a typhoon is picked.
+* The Active Insurance Only toggle is disabled while a typhoon is picked,
+  with a tooltip explaining why.
+
+### 8. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* New `typhoonId` prop, passed to `getFarmsGeometry`. The geometry cache
+  resets when it changes, and the guard treats it as a scope.
+
+### 9. File: `.claude/API_CONTRACT.md`
+* Documented `typhoon_id`, the new active definition, and
+  `GET /api/farms/used-typhoons`.
+
+---
+
+## [2026-10-12] - PABS Export: Blank FINAL_INDEMNITY_PAYMENT Column (Sprint 3, branch: develop)
+
+By Cristian. The payout calculation is being revised at the client's
+request; Fabio will change the logic. Until then the column is a blank
+placeholder.
+
+### 1. File: `backend/app/api/assessments.py`
+* **`_build_pabs_rows()`**: new `"FINAL_INDEMNITY_PAYMENT": None` key, right
+  after `AC`.
+  * The lowercase `final_indemnity_payment` field is unchanged. It is not
+    exported and still decides which policies the export locks as used
+    (payout > 0).
+* **`export_assessments_pabs_csv()`**: `FINAL_INDEMNITY_PAYMENT` added to
+  `pabs_columns` between `AC` and `REMARKS`. The CSV now has 14 columns.
+
+### 2. File: `frontend/src/lib/api.ts`
+* `PabsAssessmentRow`: added `FINAL_INDEMNITY_PAYMENT: number | null`.
+
+### 3. File: `frontend/src/app/components/AssessmentModule.tsx`
+* **`PABS_HEADERS`**: "Final Indemnity Payment" column after AC,
+  right-aligned. It shows "—" while blank.
+* The preview notice says the column is blank until the revised calculation
+  is in place.
+
+### 4. File: `.claude/API_CONTRACT.md`
+* PABS column list updated.
+
+---
+
+## [2026-10-12] - PABS Export: Drop IRID, Fill P / S / Remarks, Align Preview (Sprint 3, branch: develop)
+
+By Cristian, based on PCIC's final-output reference. Decisions:
+* IRID is removed (PCIC's reference still has the column).
+* Our column layout is kept, Date Filed / Date of Occurrence included.
+* REMARKS is the same sentence on every row.
+* WIND_VELOCITY stays the TCWS signal number for now. PCIC's reference uses
+  km/h; converting is a separate task.
+
+### 1. File: `backend/app/api/assessments.py`
+* New constants:
+  * **`PABS_PREVALENCE`** = `"1.0"`: PCIC's fixed P, 100% prevalence.
+  * **`PABS_REMARKS`** = PCIC's fixed remark: "Prolonged destructive winds
+    caused severe crop damage with critical production loss."
+* New **`_yield_loss_fraction()`**: builds S from the assessment's RECSAP
+  step-1 `estimated_yield_loss` (via `RiskAssessment.matrix`) ÷ 100, with
+  trailing zeros trimmed (30% → `"0.3"`, 25% → `"0.25"`, 5% → `"0.05"`).
+  Returns `None` if the assessment has no matrix row.
+* **`_build_pabs_rows()`**:
+  * IRID key removed;
+  * P, S and REMARKS filled from the above;
+  * docstring updated.
+  * P and S are strings, so the CSV's `float_format="%.2f"` doesn't turn them
+    into `1.00` / `0.30`.
+* **`export_assessments_pabs_csv()`**: IRID removed from `pabs_columns`. The
+  CSV now has 13 columns.
+
+### 2. File: `frontend/src/lib/api.ts`
+* `PabsAssessmentRow`:
+  * `IRID` removed;
+  * `P: string`, `S: string | null`, `REMARKS: string`.
+
+### 3. File: `frontend/src/app/components/AssessmentModule.tsx`
+* **`PABS_HEADERS`** (CSV preview):
+  * IRID removed;
+  * new `right` flag on Area, Exposure (h), Wind Velocity, P, S and AC.
+    Those headers and cells are right-aligned (cells `tabular-nums`). The
+    text and date columns stay left-aligned.
+* The preview's notice now explains P / S / Remarks instead of saying they
+  are blank.
+
+### 4. File: `.claude/API_CONTRACT.md`
+* Noted the PABS column changes under `GET /api/assessments/export`.
+
+---
+
+## [2026-10-11] - Assessment & Reporting: Remove AC by Municipality; Readable Typhoons List (Sprint 3, branch: develop)
+
+By Cristian.
+
+### 1. File: `frontend/src/app/components/AssessmentModule.tsx`
+* **AC by Municipality removed** (right-hand panel; Cristian: not needed).
+  * The assessment table now takes the full width.
+  * Removed `muniChartData` and the `recharts` import.
+  * `darkMode` was the chart's only use, so it is no longer destructured
+    (`_props`). It stays in `AssessmentModuleProps`, so `App.tsx` is
+    unchanged.
+* **Typhoons list readability:**
+  * panel `w-56` → `w-60`;
+  * title 11px → 14px;
+  * hint 9px → 11px;
+  * typhoon name 10px → 13px;
+  * bulletin count 9px → 12px;
+  * secondary text `text-muted-foreground` → `text-foreground/70`, for
+    contrast.
+* **Bars re-aligned.** The larger hint wraps to two lines, which made the
+  Typhoons header about 69px, taller than the 56px top bar beside it.
+  * Both bars are now `min-h-16` (64px).
+  * The Typhoons header uses `py-1.5` and `leading-tight`, so its two-line
+    hint (about 59px total) fits inside 64px and the bottom borders line up.
+
+---
+
+## [2026-10-11] - Fix: Assessment Table Column Alignment & Wind Label (Sprint 3, branch: develop)
+
+By Cristian. Display-only; the PABS CSV export is unchanged.
+
+### 1. File: `frontend/src/app/components/AssessmentModule.tsx`
+* **`sortableCols`**: new optional `right` flag on Area, Exp (h), Wind and
+  AC.
+  * Those headers are now right-aligned (`text-right` + `justify-end`) to sit
+    over their right-aligned values.
+  * Before, every header was left-aligned while those four columns' values
+    were right-aligned, so the headers looked shifted.
+* **Wind column and Wind Velocity filter**: now show "Signal 2" instead of
+  "2 km/h". `WIND_VELOCITY` holds the TCWS signal number, not a speed.
+* **AC and Farm ID text**: `dark:text-emerald-400`. The `#166534` green was
+  hard to read on the dark background. Light mode is unchanged.
+
+---
+
+## [2026-10-11] - Fix: Typhoons / Assessment & Reporting Bars Misaligned (Sprint 3, branch: develop)
+
+By Cristian.
+
+### 1. File: `frontend/src/app/components/AssessmentModule.tsx`
+* The left "Typhoons" header (about 52px) and the "Assessment & Reporting"
+  top bar (about 45px) each took their natural height, so their bottom
+  borders sat a few pixels apart.
+* Both now have `min-h-14` (56px) with vertically centered content, so the
+  titles and borders line up.
+* It's a minimum, not a fixed height, so the top bar can still wrap its
+  controls on narrow screens.
+
+---
+
+## [2026-10-11] - Fix: Header Pushed Up on Assessment & Reporting (Sprint 3, branch: develop)
+
+By Cristian. On Assessment & Reporting, the header (brand badge, module
+tabs) slid up and was half hidden behind the page.
+
+### 1. File: `frontend/src/app/App.tsx`
+* **Outer app frame:** changed from `overflow: hidden` to `overflow: clip`.
+  * Cause: a `hidden` box can still be scrolled by the browser itself, for
+    example when an element gets focus or a chart tooltip pokes out. That
+    scrolled the whole frame and pushed the header up.
+  * A `clip` box clips the same way but can't be scrolled, so the header now
+    stays in place on every page.
+* **`<main>`:** changed from `overflow-hidden` to `min-h-0 overflow-clip`, for
+  the same reason. `min-h-0` keeps it at exactly the height left under the
+  header, since `clip` (unlike `hidden`) doesn't zero a flex item's minimum
+  height. Each module still scrolls its own tables and lists.
+
+---
+
+## [2026-10-11] - Monitoring Dashboard: Typhoon Progress Strip & System Status (Sprint 3, branch: develop)
+
+By Cristian. Two of the four dashboard suggestions from the HTML mockup were
+accepted: (1) the typhoon progress strip and (3) System Status, without the
+GEE row. Decisions:
+* the PAR badge shows Inside/Exited only, with no exit time (no schema
+  change);
+* no Database Backup row, because nothing records backups;
+* Calibration keeps its own System Status (Backend API row) unchanged.
+
+### 1. File: `backend/app/core/scheduler.py`
+* New module-level **`last_run`** dict (`finished_at`, `scrape_ok`,
+  `status_sync_ok`). It is kept in memory, so it is `None` until the first
+  scheduled run after a restart.
+* **`run_scheduled_scrape()`** fills `last_run` after the scrape and the
+  active-typhoon sync. A failed step is recorded as `False`; the steps still
+  never raise.
+
+### 2. File: `backend/app/services/email_alert_service.py`
+* New **`smtp_configured()`**: a public wrapper around `_smtp_config()`. It
+  only checks that the settings exist and does not test the mail server.
+
+### 3. File: `backend/app/api/system.py` (new) + `backend/app/main.py`
+* New **`GET /api/system/status`** (**`get_system_status()`**), which returns:
+  * the parser's interval, last run and result (from `last_run`);
+  * the parser's next run, read from the live APScheduler job;
+  * the newest bulletin;
+  * whether email alerts are configured.
+* Registered under `/api` in `main.py`.
+
+### 4. File: `backend/app/api/typhoons.py`
+* New **`GET /api/typhoons/{typhoon_id}/progress`**
+  (**`get_typhoon_progress()`**). Read-only counts for one typhoon:
+  * TCBs downloaded, and the final TCB;
+  * exposure-summary municipalities;
+  * distinct farms assessed. Only `RiskAssessment` rows whose `summary_id`
+    belongs to the typhoon are counted, so CSV-seeded rows are left out.
+  * policies locked by a final PABS export (`InsuranceUsage.finalized_at`).
+* `in_par` = `Typhoon.is_active`. PAGASA's status page only lists cyclones
+  inside PAR.
+
+### 5. File: `frontend/src/lib/api.ts`
+* Added the `TyphoonProgress` and `SystemStatus` types, plus
+  `getTyphoonProgress()` and `getSystemStatus()`.
+
+### 6. File: `frontend/src/app/components/MonitoringModule.tsx`
+* New **`TyphoonProgressStrip`**, shown under the stat cards. Five steps:
+  Bulletins collected → Final TCB issued → Exposure computed → Assessment
+  calculated → Exported to PABS.
+  * The current step is the first step not done yet.
+  * An Inside/Exited PAR badge sits in the header.
+  * A "Go to Assessment & Reporting →" link shows when the current step is
+    Assessment or Export.
+  * It follows the same typhoon as the TCBs Downloaded card. It refetches
+    when that typhoon's bulletin count or PAR status changes.
+* New **`SystemStatusPanel`**, to the right of the bulletin list (grid back
+  to 3 columns; the bulletin list is `col-span-2` again). Rows: PAGASA Parser,
+  Last bulletin parsed, Email Alerts.
+  * Refreshes every 60s (**`SYSTEM_STATUS_REFRESH_MS`**) and after "Parse
+    Latest Bulletin".
+* New **`formatClock()`** helper: time only, Asia/Manila.
+* New optional prop **`onNavigateToAssessment`**.
+
+### 7. File: `frontend/src/app/App.tsx`
+* Passes `onNavigateToAssessment={() => setActiveModule("assessment")}` to
+  `MonitoringModule`.
+
+### 8. File: `.claude/API_CONTRACT.md`
+* Documented the two new routes.
+
+---
+
+## [2026-10-11] - Farm Details: Amount of Cover & Readability; Remove Farms by Signal Chart (Sprint 3, branch: develop)
+
+By Cristian. Minor UI changes; no backend or schema changes.
+
+### 1. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* **Selected Farm Info Panel** (Spatial Analysis & Data Import map):
+  * The **Payment** row (`assessment.final_indemnity_payment`) was replaced
+    with **Amount of Cover** (`Farm.amount_cover`, from the farm's latest
+    policy). It now shows for every farm, assessed or not, and shows "—"
+    when the farm has no policy.
+  * Readability changes:
+    * body text 10px → 12px, farmer name 12px → 14px, header 11px → 12px;
+    * labels use `text-foreground/70` instead of `text-muted-foreground`;
+    * label column is `grid-cols-[auto_1fr]`;
+    * panel is `min-w-[270px]` (was 230px).
+
+### 2. File: `frontend/src/app/components/MonitoringModule.tsx`
+* **Farms by Signal Number** bar chart removed (Cristian: no longer needed).
+  The bulletin list now takes the full width (`grid-cols-1`, dropped
+  `col-span-2`).
+* Removed `signalChartData`, `SIGNAL_BAR_COLOR`, the `recharts` import, and
+  the `BarChart2` icon import.
+* `darkMode` is no longer destructured (the chart was its only use). It stays
+  in `MonitoringModuleProps`, so the parent is unchanged.
+* `GET /assessments/summary` still returns `signal_breakdown`. Nothing reads
+  it now, but it was left as is to keep this change frontend-only.
+
+---
+
 ## [2026-10-11] - TCWS Parsing: Missing / Wrong Wind-Signal Areas (Sprint 3, branch: develop)
 
 By Cristian.
@@ -350,6 +679,64 @@ most farms in every signalled municipality.
   `tbl_insurance_usage` rows, and clears the `is_used` / `used_for_typhoon_id` /
   `used_at` mirror where it points at OPONG. Crop-stage seed rows, bulletins,
   the signal override and the 20 active records are kept.
+
+---
+
+## [2026-10-09] - One-Click Server Start Script (branch: develop)
+
+By Cristian.
+
+### 1. File: `start-servers.bat` (new, repo root)
+* Double-click to start GeoServer and the FastAPI backend, each in its own
+  window. Backend runs the same command as `.claude/LOCAL_SERVER_SETUP.md`
+  (`backend\.venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0
+  --port 8000 --reload`; `0.0.0.0` needed for Tailscale peers). GeoServer
+  runs `C:\geoserver\bin\startup.bat` with the system `JAVA_HOME`, falling
+  back to the JDK 17 path on Cristian's PC.
+* Skips a server whose port (8080 / 8000) is already listening, so running
+  it twice doesn't start duplicates; prints which path to edit if
+  GeoServer, Java, or the venv isn't found.
+* No secrets: backend credentials stay in `backend\.env` (gitignored),
+  GeoServer's admin login in its own data dir. The GeoServer/JDK paths at
+  the top are machine-specific -- teammates edit them for their install.
+
+---
+
+## [2026-10-09] - Monitoring "TCBs Downloaded": Restore Gayla's Card Design, Keep `is_final` Trigger (branch: develop)
+
+By Cristian. `af5433c` (entry below) was built in parallel with Gayla's
+`eab00b7` "Monitoring & Extraction Redesign" and, once both landed on
+`develop`, replaced her card design and her user-chosen "Ready for
+assessment" wording along with the trigger. Per Cristian, the two are now
+combined: Gayla's design back, only the trigger and matching changed.
+
+### 1. File: `frontend/src/app/components/MonitoringModule.tsx`
+* Restored Gayla's stat-card markup and `statCards` shape exactly: larger
+  cards (`p-5`, `text-3xl`, 14×14 icon tile, `gap-4`), typed `alert` field,
+  amber `AlertTriangle` styling when ready, sub-text `for <NAME>` /
+  "No tracked typhoon yet", badge text exactly "Ready for assessment".
+  Removes `af5433c`'s green `CheckCircle2` "Final TCB No. N received —
+  ready for assessment" notice and its `trackedTyphoon` `useMemo`.
+* Kept Gayla's typhoon choice (first/primary active typhoon, per Fabio,
+  falling back to the newest bulletin's typhoon), but matched by
+  **`typhoon_id`** (`primaryTyphoonId`) instead of name — PAGASA reuses
+  local typhoon names across seasons, so name matching would merge a future
+  storm's count with an older same-named one.
+* **`typhoonDoneCollecting`** now = the tracked typhoon has a bulletin with
+  `is_final` (from `af5433c`), not "no longer on PAGASA's active list". A
+  storm drops off the active list even when its final TCB was never
+  downloaded, which the old stand-in signal couldn't tell apart.
+* Context for why the newest-typhoon fallback matters: QUEENIE's #14 is
+  "NR. 14F" (exited PAR at typhoon strength, not as an LPA), saved Sep 30
+  before `is_final` existed, so the migration's LPA-only backfill couldn't
+  flag it. An earlier "last typhoon with a final bulletin" fallback therefore
+  jumped back to NENENG. QUEENIE gets flagged on its next re-scrape
+  (`TCB#14_queenie.pdf` is still on PAGASA's index).
+
+### Status / Next Steps
+* Unchanged from `af5433c`: the bell/toast notification for new final TCBs
+  in `App.tsx`, all backend/migration changes, the Spatial Analysis table.
+* No migration needed for this change.
 
 ---
 

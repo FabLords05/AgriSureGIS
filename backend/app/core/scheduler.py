@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -19,6 +20,12 @@ BULLETIN_JOB_ID = "pagasa_bulletin_poll"
 # connectivity ping for CalibrationModule's System Status section).
 FIXED_POLL_INTERVAL_MINUTES = 15
 
+# Outcome of the most recent run_scheduled_scrape(), read by GET
+# /api/system/status for the Monitoring dashboard's System Status panel.
+# In memory only -- resets on backend restart, so until the first scheduled
+# run (up to FIXED_POLL_INTERVAL_MINUTES later) finished_at stays None.
+last_run: dict = {"finished_at": None, "scrape_ok": None, "status_sync_ok": None}
+
 
 def run_scheduled_scrape() -> None:
     """
@@ -32,8 +39,11 @@ def run_scheduled_scrape() -> None:
     """
     db = SessionLocal()
     created: list[dict] = []
+    scrape_ok = False
+    status_sync_ok = False
     try:
         created = asyncio.run(BulletinParserService.scrape_and_save_all(db))
+        scrape_ok = True
         if created:
             logger.info("Scheduled PAGASA scrape saved %d new bulletin(s).", len(created))
         else:
@@ -44,9 +54,16 @@ def run_scheduled_scrape() -> None:
     try:
         active_names = asyncio.run(PagasaStatusService.fetch_active_storm_names())
         PagasaStatusService.sync_active_typhoons(active_names, db)
+        status_sync_ok = True
         logger.info("Synced active-typhoon status: %s", ", ".join(active_names) or "none active")
     except Exception:
         logger.exception("PAGASA active-typhoon status sync failed.")
+
+    last_run.update(
+        finished_at=datetime.now(timezone.utc),
+        scrape_ok=scrape_ok,
+        status_sync_ok=status_sync_ok,
+    )
 
     # Runs after the active-typhoon sync above (not inside the same try) so
     # Typhoon.is_active reflects this cycle's freshest status, not the

@@ -13,6 +13,7 @@ from app.api.assessments import router as assessments_router
 from app.api.farms import router as farms_router
 from app.api.insurance import router as insurance_router
 from app.api.typhoons import router as typhoons_router
+from app.api.system import router as system_router
 from app.api.users import router as users_router
 from app.core.activity_log import record_activity
 from app.core.database import SessionLocal, get_db
@@ -51,6 +52,7 @@ app.include_router(assessments_router, prefix="/api")
 app.include_router(farms_router, prefix="/api")
 app.include_router(insurance_router, prefix="/api")
 app.include_router(typhoons_router, prefix="/api")
+app.include_router(system_router, prefix="/api")
 app.include_router(users_router, prefix="/api")
 app.include_router(activity_log_router, prefix="/api")
 

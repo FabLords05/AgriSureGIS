@@ -296,6 +296,51 @@ export function getActiveTyphoons(): Promise<ActiveTyphoonsResult> {
   return request<ActiveTyphoonsResult>('/api/typhoons/active');
 }
 
+// Monitoring dashboard's typhoon progress strip -- backend/app/api/typhoons.py's
+// get_typhoon_progress. in_par = still listed on PAGASA's status page.
+export interface TyphoonProgress {
+  status: string;
+  typhoon_id: number;
+  typhoon_name: string;
+  in_par: boolean;
+  bulletin_count: number;
+  final_bulletin: { bulletin_count: number; issued_at: string } | null;
+  exposure_areas: number;
+  assessed_farms: number;
+  exported_policies: number;
+  exported_at: string | null;
+}
+
+export function getTyphoonProgress(typhoonId: number): Promise<TyphoonProgress> {
+  return request<TyphoonProgress>(`/api/typhoons/${typhoonId}/progress`);
+}
+
+// Monitoring dashboard's System Status panel -- backend/app/api/system.py.
+// parser.last_run_at is null until the first scheduled run after a backend
+// restart (kept in memory only).
+export interface SystemStatus {
+  status: string;
+  parser: {
+    interval_minutes: number;
+    last_run_at: string | null;
+    scrape_ok: boolean | null;
+    status_sync_ok: boolean | null;
+    next_run_at: string | null;
+  };
+  last_bulletin: {
+    tcb_id: number;
+    bulletin_count: number;
+    is_final: boolean;
+    typhoon_name: string | null;
+    issued_at: string;
+  } | null;
+  email_alerts: { configured: boolean };
+}
+
+export function getSystemStatus(): Promise<SystemStatus> {
+  return request<SystemStatus>('/api/system/status');
+}
+
 // Used only as a lightweight backend-connectivity ping by CalibrationModule's
 // System Status section now -- the interval value it returns is no longer
 // surfaced/editable in the UI (fixed backend-side, see scheduler.py).
@@ -347,6 +392,9 @@ export interface GetFarmsResult {
 // farmer's own farms (resolved via searchFarmers() below) -- see
 // useFarmsData.ts and SpatialAnalysisModule.tsx. `municipality`/`farmer_id`
 // combine (both, either, or neither), same as backend/app/api/farms.py.
+// "Active" excludes policies locked as used by a final PABS export; pass
+// `typhoon_id` to list the farms used for that typhoon instead (it overrides
+// active_only -- see getUsedTyphoons() below).
 //
 // `after_id` is a keyset (cursor) position, not an OFFSET: pass the highest
 // `farm_id` already seen (0 to start from the beginning). Unlike OFFSET,
@@ -359,6 +407,7 @@ export function getFarms(params?: {
   active_only?: boolean;
   municipality?: string;
   farmer_id?: number;
+  typhoon_id?: number;
 }): Promise<GetFarmsResult> {
   const query = new URLSearchParams();
   if (params?.limit != null) query.set('limit', String(params.limit));
@@ -366,6 +415,7 @@ export function getFarms(params?: {
   if (params?.active_only != null) query.set('active_only', String(params.active_only));
   if (params?.municipality) query.set('municipality', params.municipality);
   if (params?.farmer_id != null) query.set('farmer_id', String(params.farmer_id));
+  if (params?.typhoon_id != null) query.set('typhoon_id', String(params.typhoon_id));
   const qs = query.toString();
   return request<GetFarmsResult>(`/api/farms/${qs ? `?${qs}` : ''}`);
 }
@@ -395,6 +445,7 @@ export function getFarmsGeometry(params: {
   farmer_id?: number;
   active_only?: boolean;
   municipality?: string;
+  typhoon_id?: number;
 }): Promise<GetFarmsGeometryResult> {
   const query = new URLSearchParams();
   if (params.bbox) query.set('bbox', params.bbox);
@@ -402,7 +453,21 @@ export function getFarmsGeometry(params: {
   if (params.farmer_id != null) query.set('farmer_id', String(params.farmer_id));
   if (params.active_only != null) query.set('active_only', String(params.active_only));
   if (params.municipality) query.set('municipality', params.municipality);
+  if (params.typhoon_id != null) query.set('typhoon_id', String(params.typhoon_id));
   return request<GetFarmsGeometryResult>(`/api/farms/geometry?${query.toString()}`);
+}
+
+// Typhoons with at least one policy locked as used by a final PABS export --
+// options for the Farm Records typhoon filter (2026-10-12).
+export interface UsedTyphoon {
+  typhoon_id: number;
+  name: string;
+  year: number;
+  farm_count: number;
+}
+
+export function getUsedTyphoons(): Promise<{ status: string; data: UsedTyphoon[] }> {
+  return request<{ status: string; data: UsedTyphoon[] }>('/api/farms/used-typhoons');
 }
 
 // Distinct municipality names for the Farm Records search box's suggestion
@@ -514,8 +579,9 @@ export function downloadAssessmentsCsv(typhoonId: number): Promise<void> {
 }
 
 // Combined export across every typhoon (not scoped to one bulletin/typhoon
-// folder), in the PABS-required column format. IRID/P/S columns come back
-// blank -- no definition for them was available; see the backend docstring.
+// folder), in the PABS-required column format. P is PCIC's fixed "1.0", S the
+// yield loss as a fraction ("0.3"), REMARKS PCIC's fixed sentence; no IRID
+// (2026-10-12) -- see the backend's _build_pabs_rows docstring.
 // POST: the backend locks every exported policy with a payout as used, so it
 // can't be assessed again for a later typhoon.
 export function downloadAssessmentsPabsCsv(): Promise<void> {
@@ -527,17 +593,18 @@ export interface PabsAssessmentRow {
   FARMER_NAME: string | null;
   FARMERID: string | null;
   FARMID: number | null;
-  IRID: null;
   AREA: number | null;
   TYPHOON_NAME: string | null;
   PERIOD_OF_EXPOSURE: number | null;
   WIND_VELOCITY: number | null;
   DATE_FILED: string | null;
   DATE_OF_OCCURRENCE: string | null;
-  P: null;
-  S: null;
+  P: string;
+  S: string | null;
   AC: number | null;
-  REMARKS: null;
+  // Blank for now -- payout calculation is being revised (2026-10-12).
+  FINAL_INDEMNITY_PAYMENT: number | null;
+  REMARKS: string;
   municipality: string | null;
   province: string | null;
 }

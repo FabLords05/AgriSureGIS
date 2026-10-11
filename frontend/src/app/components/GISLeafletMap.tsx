@@ -27,6 +27,9 @@ interface GISLeafletMapProps {
   // the same way (2026-08-18, stage 2 of the on-demand-pagination redesign
   // -- see .claude/FUNCTION_CHANGES.md).
   activeOnly: boolean;
+  // Farm Records typhoon filter (2026-10-12): polygons of farms used for
+  // this typhoon only; overrides activeOnly server-side.
+  typhoonId?: number | null;
 }
 
 // Real, approximate town-center coordinates for the two municipalities actually
@@ -279,7 +282,7 @@ function approximateFarmPosition(municipality: string | null, indexInMunicipalit
   return [base[0] + row * step, base[1] + (col - 1) * step];
 }
 
-export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBulletin, darkMode, focusMunicipality, focusFarmerId, activeOnly }: GISLeafletMapProps) {
+export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBulletin, darkMode, focusMunicipality, focusFarmerId, activeOnly, typhoonId = null }: GISLeafletMapProps) {
   const [affectedAreas, setAffectedAreas] = useState<TcbSignal[]>([]);
   const [regionXBoundaries, setRegionXBoundaries] = useState<FeatureCollection | null>(null);
   const [showFarmsWmsOverlay, setShowFarmsWmsOverlay] = useState(false);
@@ -356,7 +359,7 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
 
   useEffect(() => {
     setGeomCache(new Map());
-  }, [activeOnly, focusMunicipality, focusFarmerId]);
+  }, [activeOnly, focusMunicipality, focusFarmerId, typhoonId]);
 
   const bboxString = mapBounds
     ? `${mapBounds.west},${mapBounds.south},${mapBounds.east},${mapBounds.north}`
@@ -371,16 +374,17 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
     // including the default activeOnly=true/focusMunicipality=null/
     // focusFarmerId=null, fetches normally (bounded by the viewport bbox
     // either way).
-    if (!activeOnly && !focusMunicipality && !focusFarmerId) return;
+    if (!activeOnly && !focusMunicipality && !focusFarmerId && typhoonId == null) return;
     getFarmsGeometry({
       bbox: bboxString,
       active_only: activeOnly,
       municipality: focusMunicipality ?? undefined,
       farmer_id: focusFarmerId ?? undefined,
+      typhoon_id: typhoonId ?? undefined,
     })
       .then(res => mergeGeomEntries(res.data.map(d => ({ farmId: d.farm_id, geom: d.location_geom }))))
       .catch(() => { /* leave the cache as-is on failure -- next moveend/zoomend retries */ });
-  }, [bboxString, activeOnly, focusMunicipality, focusFarmerId, mergeGeomEntries]);
+  }, [bboxString, activeOnly, focusMunicipality, focusFarmerId, typhoonId, mergeGeomEntries]);
 
   // Rendered-layer set -- viewport-culled subset of geomCache, used ONLY by
   // the polygon render loop below. Deliberately NOT used for `selectedFarm`,
@@ -565,33 +569,40 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
 
       {/* Selected Farm Info Panel */}
       {selectedFarm && (
-        <div className="absolute top-3 left-3 bg-card border-2 border-[#166534] rounded-lg shadow-xl p-3 min-w-[230px] z-[1000]">
-          <div className="flex items-center justify-between mb-1.5">
-            <span className="text-[11px] font-bold text-[#166534] uppercase tracking-wide">Farm Details</span>
-            <button onClick={() => onSelectFarm(null)} className="text-muted-foreground hover:text-foreground text-[10px]">✕</button>
+        <div className="absolute top-3 left-3 bg-card border-2 border-[#166534] rounded-lg shadow-xl p-3.5 min-w-[270px] z-[1000]">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-[12px] font-bold text-[#166534] uppercase tracking-wide">Farm Details</span>
+            <button onClick={() => onSelectFarm(null)} className="text-muted-foreground hover:text-foreground text-[12px]">✕</button>
           </div>
           {/* `||` not `??` -- see the matching note in SpatialAnalysisModule's
               Farmer cell: a blank-but-not-null name must still fall back. */}
-          <p className="text-[12px] font-semibold">{selectedFarm.farmer_name || "Unknown farmer"}</p>
-          <p className="text-[10px] text-muted-foreground mb-2">Farm #{selectedFarm.farm_id}</p>
-          <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px]">
-            <span className="text-muted-foreground">Municipality:</span><span className="font-medium">{selectedFarm.municipality ?? "—"}</span>
-            <span className="text-muted-foreground">Barangay:</span><span className="font-medium">{selectedFarm.barangay ?? "—"}</span>
-            <span className="text-muted-foreground">Area:</span><span className="font-medium">{selectedFarm.area_size ?? "—"} ha</span>
-            <span className="text-muted-foreground">GPX Boundary:</span>
+          <p className="text-[14px] font-semibold leading-snug">{selectedFarm.farmer_name || "Unknown farmer"}</p>
+          <p className="text-[12px] text-muted-foreground mb-2.5">Farm #{selectedFarm.farm_id}</p>
+          {/* Labels at text-foreground/70 rather than text-muted-foreground --
+              the muted token was too faint to read at a glance on the map. */}
+          <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[12px]">
+            <span className="text-foreground/70">Municipality:</span><span className="font-medium">{selectedFarm.municipality ?? "—"}</span>
+            <span className="text-foreground/70">Barangay:</span><span className="font-medium">{selectedFarm.barangay ?? "—"}</span>
+            <span className="text-foreground/70">Area:</span><span className="font-medium">{selectedFarm.area_size ?? "—"} ha</span>
+            <span className="text-foreground/70">GPX Boundary:</span>
             <span className="font-medium">{selectedFarm.has_geometry ? "Surveyed" : "Not yet uploaded"}</span>
             {selectedFarm.assessment && (
               <>
-                <span className="text-muted-foreground">Crop Stage:</span><span className="font-medium">{selectedFarm.assessment.crop_stage ?? "—"}</span>
-                <span className="text-muted-foreground">Signal No.:</span>
+                <span className="text-foreground/70">Crop Stage:</span><span className="font-medium">{selectedFarm.assessment.crop_stage ?? "—"}</span>
+                <span className="text-foreground/70">Signal No.:</span>
                 <span className="font-bold" style={{ color: selectedFarm.assessment.wind_velocity ? SIGNAL_DOT_COLORS[selectedFarm.assessment.wind_velocity] : undefined }}>
                   {selectedFarm.assessment.wind_velocity ? `Signal ${selectedFarm.assessment.wind_velocity}` : "—"}
                 </span>
-                <span className="text-muted-foreground">Exposure:</span><span className="font-medium">{selectedFarm.assessment.period_of_exposure ?? "—"}h</span>
-                <span className="text-muted-foreground">Payment:</span>
-                <span className="font-bold text-[#166534]">₱{selectedFarm.assessment.final_indemnity_payment.toLocaleString()}</span>
+                <span className="text-foreground/70">Exposure:</span><span className="font-medium">{selectedFarm.assessment.period_of_exposure ?? "—"}h</span>
               </>
             )}
+            {/* Amount of Cover replaced Payment (2026-10-11) -- it comes from
+                the farm's policy, so it shows whether or not the farm has
+                been assessed yet. */}
+            <span className="text-foreground/70">Amount of Cover:</span>
+            <span className="font-bold text-[#166534]">
+              {selectedFarm.amount_cover != null ? `₱${selectedFarm.amount_cover.toLocaleString()}` : "—"}
+            </span>
           </div>
         </div>
       )}

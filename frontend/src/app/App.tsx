@@ -161,21 +161,33 @@ export default function App() {
   const [activeInsuranceOnly, setActiveInsuranceOnly] = useState(true);
   const [filterMuni, setFilterMuni] = useState("All");
   const [filterFarmerId, setFilterFarmerId] = useState<number | null>(null);
+  // Typhoon filter (2026-10-12): farms whose policy was used for this
+  // typhoon. A scope like municipality/farmer, so it also allows Active
+  // Insurance Only off.
+  const [filterTyphoonId, setFilterTyphoonId] = useState<number | null>(null);
   // Guards against landing in the unbounded combination: if the user had
-  // turned Active Insurance Only off while a municipality or farmer was
-  // selected, then clears both back to "nothing selected", this forces it
-  // back on rather than leaving the table/map stuck showing nothing.
+  // turned Active Insurance Only off while a municipality, farmer or typhoon
+  // was selected, then clears all of them back to "nothing selected", this
+  // forces it back on rather than leaving the table/map stuck showing nothing.
   useEffect(() => {
-    if (filterMuni === "All" && filterFarmerId == null && !activeInsuranceOnly) {
+    if (filterMuni === "All" && filterFarmerId == null && filterTyphoonId == null && !activeInsuranceOnly) {
       setActiveInsuranceOnly(true);
     }
-  }, [filterMuni, filterFarmerId, activeInsuranceOnly]);
+  }, [filterMuni, filterFarmerId, filterTyphoonId, activeInsuranceOnly]);
   const farmsData = useFarmsData({
     enabled: !!currentUser,
     activeOnly: activeInsuranceOnly,
     municipality: filterMuni === "All" ? null : filterMuni,
     farmerId: filterFarmerId,
+    typhoonId: filterTyphoonId,
   });
+  // Re-fetch whenever the Spatial tab is opened: a final PABS export on the
+  // Assessment tab locks policies as used, which changes who is active.
+  const refreshFarms = farmsData.refresh;
+  useEffect(() => {
+    if (activeModule === "spatial") refreshFarms();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeModule]);
 
   const handleLogin = (user: CurrentUser, token: string) => {
     setCurrentUser(user);
@@ -498,7 +510,10 @@ export default function App() {
 
   return (
     <div className={darkMode ? "dark" : ""}>
-      <div className="flex flex-col bg-background text-foreground" style={{ height: "100vh", overflow: "hidden" }}>
+      {/* overflow: clip, not hidden -- a hidden box can still be scrolled by
+          the browser itself (focus, a tooltip poking out), which slid the
+          header up behind Assessment & Reporting. A clip box can't scroll. */}
+      <div className="flex flex-col bg-background text-foreground" style={{ height: "100vh", overflow: "clip" }}>
         <Header
           activeModule={activeModule}
           onModuleChange={setActiveModule}
@@ -523,7 +538,7 @@ export default function App() {
             spirit as before there was more than one admin tab to choose
             between. Account Settings (2026-08-16) is checked first since,
             unlike every other tab, it's available to both roles alike. */}
-        <main className="flex-1 overflow-hidden">
+        <main className="flex-1 min-h-0 overflow-clip">
           {activeModule === "account" ? (
             <AccountSettingsModule
               currentUser={currentUser}
@@ -551,6 +566,7 @@ export default function App() {
                   darkMode={darkMode}
                   selectedBulletin={selectedBulletin}
                   onSelectBulletin={setSelectedBulletin}
+                  onNavigateToAssessment={() => setActiveModule("assessment")}
                 />
               )}
               {activeModule === "spatial"     && (
@@ -564,6 +580,8 @@ export default function App() {
                   onFilterMuniChange={setFilterMuni}
                   filterFarmerId={filterFarmerId}
                   onFilterFarmerIdChange={setFilterFarmerId}
+                  filterTyphoonId={filterTyphoonId}
+                  onFilterTyphoonIdChange={setFilterTyphoonId}
                   csvUploadProgress={csvUploadProgress}
                   gpxUploadProgress={gpxUploadProgress}
                   onCsvFileSelected={handleCsvFileSelected}

@@ -71,6 +71,10 @@ export interface UseFarmsDataParams {
   // null = no farmer searched/picked yet. Scopes exactly like municipality
   // -- either one alone is enough to allow activeOnly: false.
   farmerId: number | null;
+  // null = no typhoon picked. A real typhoonId (2026-10-12) lists the farms
+  // used for that typhoon (overrides activeOnly server-side) and scopes like
+  // municipality/farmerId -- a bounded set, so it allows activeOnly: false.
+  typhoonId: number | null;
 }
 
 export interface FarmsData {
@@ -98,7 +102,7 @@ export interface FarmsData {
   requestMore: () => void;
 }
 
-export function useFarmsData({ enabled, activeOnly, municipality, farmerId }: UseFarmsDataParams): FarmsData {
+export function useFarmsData({ enabled, activeOnly, municipality, farmerId, typhoonId }: UseFarmsDataParams): FarmsData {
   const [farms, setFarms] = useState<Farm[]>([]);
   const [isLoadingFirstPage, setIsLoadingFirstPage] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -118,6 +122,11 @@ export function useFarmsData({ enabled, activeOnly, municipality, farmerId }: Us
   // fetch already in flight when a restart happens checks this on resolve
   // and discards its result instead of corrupting the new sequence's cursor.
   const generationRef = useRef(0);
+  // Set by start(): the first page of a restart replaces `farms` instead of
+  // merging into it (2026-10-12). Merging kept rows that had left the result
+  // set -- e.g. a farm whose policy a final PABS export just locked as used
+  // would linger in the Active Insurance view with its stale "not used" data.
+  const replaceOnNextPageRef = useRef(false);
 
   const fetchNextPage = async (myGeneration: number) => {
     if (fetchInFlightRef.current || !hasMoreRef.current) return;
@@ -132,10 +141,12 @@ export function useFarmsData({ enabled, activeOnly, municipality, farmerId }: Us
         active_only: activeOnly,
         municipality: municipality ?? undefined,
         farmer_id: farmerId ?? undefined,
+        typhoon_id: typhoonId ?? undefined,
       });
       if (myGeneration !== generationRef.current) return; // superseded by a restart -- discard
 
-      const merged = mergeFarmsPage(farmsRef.current, res.data);
+      const merged = mergeFarmsPage(replaceOnNextPageRef.current ? [] : farmsRef.current, res.data);
+      replaceOnNextPageRef.current = false;
       farmsRef.current = merged;
       setFarms(merged);
       // The cursor advances to the last (highest) farm_id actually
@@ -168,9 +179,8 @@ export function useFarmsData({ enabled, activeOnly, municipality, farmerId }: Us
   // Full restart: bumps generation (discards any in-flight page from
   // before this call), resets the cursor to 0, and fetches page 1 under
   // whatever activeOnly/municipality are current at call time. Existing
-  // `farms` are left in place -- fetchNextPage's merge (not replace) means
-  // old rows only disappear once nothing new matches them AND the caller's
-  // own display filter (SpatialAnalysisModule's filteredFarms) excludes them.
+  // `farms` stay on screen until page 1 arrives, which then replaces them
+  // (replaceOnNextPageRef) -- later pages merge in as before.
   const start = () => {
     // No-op for the one combination that's genuinely unbounded at 100k-1M
     // scale: "every farm, active or not, no municipality or farmer scope"
@@ -179,19 +189,20 @@ export function useFarmsData({ enabled, activeOnly, municipality, farmerId }: Us
     // to fetch. Covers a CSV/GPX upload's refresh() firing while this
     // combination is briefly in effect (App.tsx's guard normally corrects
     // it before this matters).
-    if (!activeOnly && municipality == null && farmerId == null) return;
+    if (!activeOnly && municipality == null && farmerId == null && typhoonId == null) return;
     generationRef.current += 1;
     const myGeneration = generationRef.current;
     fetchInFlightRef.current = false;
     afterIdRef.current = 0;
     hasMoreRef.current = true;
+    replaceOnNextPageRef.current = true;
     setHasMore(true);
     if (hasLoadedOnceRef.current) setIsRefreshing(true);
     fetchNextPage(myGeneration);
   };
 
   useEffect(() => {
-    if (!enabled || (!activeOnly && municipality == null && farmerId == null)) {
+    if (!enabled || (!activeOnly && municipality == null && farmerId == null && typhoonId == null)) {
       // Hook disabled, or the one unbounded combination (see start() above)
       // -- nothing to fetch. Bump generation so any in-flight fetch from a
       // just-changed filter discards its result instead of landing after this.
@@ -211,7 +222,7 @@ export function useFarmsData({ enabled, activeOnly, municipality, farmerId }: Us
     }
     start();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, activeOnly, municipality, farmerId]);
+  }, [enabled, activeOnly, municipality, farmerId, typhoonId]);
 
   return {
     farms,

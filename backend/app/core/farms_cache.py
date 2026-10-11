@@ -60,13 +60,19 @@ def _get_client():
     return _redis_client
 
 
-# municipality/farmer_id default to None (not "" / 0) so a request with no
-# filter and a request explicitly filtering to some future ""/0 value can
-# never collide.
+# municipality/farmer_id/typhoon_id default to None (not "" / 0) so a request
+# with no filter and a request explicitly filtering to some future ""/0 value
+# can never collide.
 def _cache_key(
-    *, limit: int | None, after_id: int, active_only: bool, municipality: str | None = None, farmer_id: int | None = None
+    *,
+    limit: int | None,
+    after_id: int,
+    active_only: bool,
+    municipality: str | None = None,
+    farmer_id: int | None = None,
+    typhoon_id: int | None = None,
 ) -> str:
-    return f"agrisuregis:farms:{limit}:{after_id}:{active_only}:{municipality}:{farmer_id}"
+    return f"agrisuregis:farms:{limit}:{after_id}:{active_only}:{municipality}:{farmer_id}:{typhoon_id}"
 
 
 def get_cached_farms_page(
@@ -76,13 +82,17 @@ def get_cached_farms_page(
     active_only: bool,
     municipality: str | None = None,
     farmer_id: int | None = None,
+    typhoon_id: int | None = None,
 ) -> dict[str, Any] | None:
     client = _get_client()
     if client is None:
         return None
     try:
         raw = client.get(
-            _cache_key(limit=limit, after_id=after_id, active_only=active_only, municipality=municipality, farmer_id=farmer_id)
+            _cache_key(
+                limit=limit, after_id=after_id, active_only=active_only,
+                municipality=municipality, farmer_id=farmer_id, typhoon_id=typhoon_id,
+            )
         )
         return json.loads(raw) if raw else None
     except Exception:
@@ -97,13 +107,17 @@ def cache_farms_page(
     result: dict[str, Any],
     municipality: str | None = None,
     farmer_id: int | None = None,
+    typhoon_id: int | None = None,
 ) -> None:
     client = _get_client()
     if client is None:
         return
     try:
         client.setex(
-            _cache_key(limit=limit, after_id=after_id, active_only=active_only, municipality=municipality, farmer_id=farmer_id),
+            _cache_key(
+                limit=limit, after_id=after_id, active_only=active_only,
+                municipality=municipality, farmer_id=farmer_id, typhoon_id=typhoon_id,
+            ),
             _TTL_SECONDS,
             json.dumps(result),
         )
@@ -113,7 +127,8 @@ def cache_farms_page(
 
 def invalidate_farms_cache() -> None:
     """Called after a write that changes farm/insurance data through the app
-    (CSV/GPX upload) so the next request re-reads fresh data immediately
+    (CSV/GPX upload, and the final PABS export, which locks policies as
+    used and so changes who counts as active) so the next request re-reads fresh data immediately
     instead of waiting out _TTL_SECONDS. Scripts that write directly to the
     DB outside the app (e.g. backend/seed_active_insurance.py) bypass this
     the same way they already bypass frontend cache invalidation -- see

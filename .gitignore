@@ -71,6 +71,7 @@ LinuxCommands/
 ## farmer/insurance data (e.g. the local-to-remote-server migration dump).
 *.dump
 USTP CAPSTONE-20261008T140025Z-1-001/
+USTP CAPSTONE-20261009T021551Z-1-001/
 
 ## Google Cloud / Earth Engine service-account keys. These hold a live private
 ## key for a real GCP service account (e.g. webgis-pcic-*.json for
@@ -81,3 +82,5 @@ webgis-pcic-*.json
 *-service-account*.json
 *serviceaccount*.json
 gcp-credentials*.json
+# Local backup written by backend/seed_opong_assessment_test.py
+backend/opong_test_original_dates.json

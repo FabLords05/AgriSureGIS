@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.farmer_name import format_surname_first
+from app.core.farms_cache import invalidate_farms_cache
 from app.core.security import get_current_user
 from app.models.models import AdminBoundary, AreaExposureSummary, FarmerProfile, InsuranceRecord, RiskAssessment, Typhoon
 from app.models.models import (
@@ -332,6 +333,21 @@ def export_assessments_csv(
     )
 
 
+# PCIC's fixed values for the PABS P/REMARKS columns (2026-10-12, per
+# Cristian, from PCIC's final-output reference). P = prevalence, always 100%.
+PABS_PREVALENCE = "1.0"
+PABS_REMARKS = "Prolonged destructive winds caused severe crop damage with critical production loss."
+
+
+def _yield_loss_fraction(assessment: RiskAssessment) -> str | None:
+    """PABS "S": the RECSAP step-1 estimated yield loss % as a fraction,
+    trailing zeros trimmed (30.00 -> "0.3", 25.00 -> "0.25", 5.00 -> "0.05")."""
+    if assessment.matrix is None or assessment.matrix.estimated_yield_loss is None:
+        return None
+    fraction = assessment.matrix.estimated_yield_loss / 100
+    return f"{fraction:.4f}".rstrip("0").rstrip(".") or "0"
+
+
 def _build_pabs_rows(db: Session) -> list[dict]:
     """
     Shared row-building for the PABS-format views (JSON summary + CSV export):
@@ -339,12 +355,12 @@ def _build_pabs_rows(db: Session) -> list[dict]:
     exact column layout PCIC's PABS system requires for indemnity computation,
     per Fabio's request.
 
-    Three columns from the required format -- IRID, P, and S -- have no known
-    equivalent anywhere in our schema and no definition was available at
-    implementation time (not in the manuscript, not in any project doc). They are
-    left blank (None) rather than filled with guessed values. REMARKS is per the
-    source format's own legend a manually-inputted field, so it's left blank too,
-    for someone to fill in afterward -- this system has no source for that data.
+    2026-10-12 (per Cristian, from PCIC's final-output reference): IRID was
+    dropped; P is PCIC's fixed 100% prevalence (PABS_PREVALENCE); S is the
+    assessment's RECSAP estimated yield loss as a fraction
+    (_yield_loss_fraction); REMARKS is PCIC's fixed sentence (PABS_REMARKS).
+    P and S are strings so the CSV's float_format="%.2f" doesn't turn them
+    into "1.00"/"0.30".
     """
     assessments = (
         db.query(RiskAssessment)
@@ -383,7 +399,6 @@ def _build_pabs_rows(db: Session) -> list[dict]:
                 "FARMER_NAME": farmer_name,
                 "FARMERID": farmer.farmers_id if farmer else None,
                 "FARMID": farm.farm_id if farm else None,
-                "IRID": None,  # Unresolved -- see docstring above.
                 "AREA": float(farm.area_size) if farm and farm.area_size is not None else None,
                 "TYPHOON_NAME": typhoon.name if typhoon else None,
                 "PERIOD_OF_EXPOSURE": a.period_of_exposure,
@@ -392,10 +407,15 @@ def _build_pabs_rows(db: Session) -> list[dict]:
                 # pabs_format_mockup.csv), not the raw datetime the DB stores.
                 "DATE_FILED": a.assessment_date.strftime("%m/%d/%Y") if a.assessment_date else None,
                 "DATE_OF_OCCURRENCE": summary.start_time.strftime("%m/%d/%Y") if summary and summary.start_time else None,
-                "P": None,  # Unresolved -- see docstring above.
-                "S": None,  # Unresolved -- see docstring above.
+                "P": PABS_PREVALENCE,
+                "S": _yield_loss_fraction(a),
                 "AC": float(insurance.amount_cover) if insurance and insurance.amount_cover is not None else None,
-                "REMARKS": None,  # Manually inputted per the source format's own legend.
+                # Left blank on purpose (2026-10-12, per Cristian): the payout
+                # calculation is being changed per PCIC's request (Fabio). Not
+                # the lowercase final_indemnity_payment below, which still
+                # drives export locking.
+                "FINAL_INDEMNITY_PAYMENT": None,
+                "REMARKS": PABS_REMARKS,
                 # Extra fields beyond the PABS spec, kept for on-screen filtering/context
                 # (not written to the CSV export).
                 "municipality": farm.boundary.municipality if farm and farm.boundary else None,
@@ -434,10 +454,13 @@ def export_assessments_pabs_csv(db: Session = Depends(get_db)):
         ],
         db,
     )
+    # Locked policies no longer count as active insurance, so cached Farm
+    # Records pages are stale now (2026-10-12).
+    invalidate_farms_cache()
     pabs_columns = [
-        "FARMER_NAME", "FARMERID", "FARMID", "IRID", "AREA", "TYPHOON_NAME",
+        "FARMER_NAME", "FARMERID", "FARMID", "AREA", "TYPHOON_NAME",
         "PERIOD_OF_EXPOSURE", "WIND_VELOCITY", "DATE_FILED", "DATE_OF_OCCURRENCE",
-        "P", "S", "AC", "REMARKS",
+        "P", "S", "AC", "FINAL_INDEMNITY_PAYMENT", "REMARKS",
     ]
     dataframe = pd.DataFrame(rows, columns=pabs_columns)
     buffer = io.StringIO()

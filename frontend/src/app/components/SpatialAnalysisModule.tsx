@@ -1,12 +1,12 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import {
   ChevronUp, ChevronDown,
-  Filter, User, ArrowUpDown, UploadCloud, CheckCircle2, Table2, ShieldCheck, Loader2
+  Filter, User, ArrowUpDown, UploadCloud, CheckCircle2, Table2, ShieldCheck, Loader2, Wind
 } from "lucide-react";
 import { GISLeafletMap } from "./GISLeafletMap";
 import {
-  getAssessments, getMunicipalities, searchFarmers,
-  Farm, Assessment, Bulletin, FarmerSearchResult,
+  getAssessments, getMunicipalities, searchFarmers, getUsedTyphoons,
+  Farm, Assessment, Bulletin, FarmerSearchResult, UsedTyphoon,
 } from "@/lib/api";
 import { FarmsData } from "@/lib/useFarmsData";
 
@@ -64,6 +64,11 @@ interface SpatialAnalysisModuleProps {
   // are set). null = no farmer picked.
   filterFarmerId: number | null;
   onFilterFarmerIdChange: (value: number | null) => void;
+  // Typhoon filter (2026-10-12) -- farms whose policy was locked as used for
+  // this typhoon by a final PABS export (those are hidden from the Active
+  // Insurance view). Scopes like filterMuni/filterFarmerId. null = none.
+  filterTyphoonId: number | null;
+  onFilterTyphoonIdChange: (value: number | null) => void;
   // CSV/GPX upload progress + handlers now live in App.tsx, not here --
   // this module is conditionally mounted (only while activeModule ===
   // "spatial"), so an in-flight upload's progress/polling used to freeze
@@ -81,7 +86,7 @@ interface SpatialAnalysisModuleProps {
 export function SpatialAnalysisModule({
   darkMode, selectedBulletin, farmsData,
   activeInsuranceOnly, onActiveInsuranceOnlyChange, filterMuni, onFilterMuniChange,
-  filterFarmerId, onFilterFarmerIdChange,
+  filterFarmerId, onFilterFarmerIdChange, filterTyphoonId, onFilterTyphoonIdChange,
   csvUploadProgress, gpxUploadProgress, onCsvFileSelected, onGpxFilesSelected,
 }: SpatialAnalysisModuleProps) {
   const {
@@ -113,6 +118,12 @@ export function SpatialAnalysisModule({
   // newer one has already resolved is discarded rather than overwriting
   // fresher suggestions with stale ones.
   const farmerSearchSeqRef = useRef(0);
+  // Typhoon filter options -- typhoons with at least one policy used by a
+  // final export. Fetched on mount (each visit), so a fresh export shows up.
+  const [usedTyphoons, setUsedTyphoons] = useState<UsedTyphoon[]>([]);
+  useEffect(() => {
+    getUsedTyphoons().then(res => setUsedTyphoons(res.data)).catch(() => setUsedTyphoons([]));
+  }, []);
   const [sortField, setSortField] = useState<SortField>("farm_id");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [topPanelH, setTopPanelH] = useState(55);
@@ -253,7 +264,10 @@ export function SpatialAnalysisModule({
     () => farmRows
       .filter(f => filterMuni === "All" || f.municipality === filterMuni)
       .filter(f => filterFarmerId == null || f.farmer_id === filterFarmerId)
-      .filter(f => !activeInsuranceOnly || isActiveInsurance(f))
+      // Active = in its coverage dates AND not locked as used by a final
+      // export (2026-10-12). Skipped while a typhoon is picked -- the server
+      // already returns exactly that typhoon's used farms.
+      .filter(f => filterTyphoonId != null || !activeInsuranceOnly || (isActiveInsurance(f) && !f.used_for_typhoon))
       .sort((a, b) => {
         const va = a[sortField] ?? "";
         const vb = b[sortField] ?? "";
@@ -262,7 +276,7 @@ export function SpatialAnalysisModule({
           : String(va).localeCompare(String(vb));
         return sortDir === "asc" ? cmp : -cmp;
       }),
-    [farmRows, filterMuni, filterFarmerId, activeInsuranceOnly, sortField, sortDir]
+    [farmRows, filterMuni, filterFarmerId, filterTyphoonId, activeInsuranceOnly, sortField, sortDir]
   );
 
   // Windowed slice of filteredFarms actually mounted as <tr>s -- see the
@@ -314,6 +328,7 @@ export function SpatialAnalysisModule({
             focusMunicipality={filterMuni === "All" ? null : filterMuni}
             focusFarmerId={filterFarmerId}
             activeOnly={activeInsuranceOnly}
+            typhoonId={filterTyphoonId}
           />
         </div>
       </div>
@@ -349,8 +364,14 @@ export function SpatialAnalysisModule({
             </div>
             <button
               onClick={() => onActiveInsuranceOnlyChange(!activeInsuranceOnly)}
-              disabled={filterMuni === "All" && filterFarmerId == null}
-              title={filterMuni === "All" && filterFarmerId == null ? "Search a municipality or farmer to view inactive/all-status farms" : undefined}
+              disabled={(filterMuni === "All" && filterFarmerId == null) || filterTyphoonId != null}
+              title={
+                filterTyphoonId != null
+                  ? "Showing farms used for the selected typhoon -- clear the typhoon filter to use this"
+                  : filterMuni === "All" && filterFarmerId == null
+                    ? "Search a municipality or farmer to view inactive/all-status farms"
+                    : undefined
+              }
               className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors border disabled:opacity-50 disabled:cursor-not-allowed ${activeInsuranceOnly ? "bg-[#166534] text-white border-[#166534]" : "border-[#166534] text-[#166534] hover:bg-[#166534]/10"}`}
             >
               <ShieldCheck size={11} /> Active Insurance Only
@@ -426,6 +447,25 @@ export function SpatialAnalysisModule({
                   </div>
                 )}
               </div>
+            </div>
+
+            {/* Typhoon filter (2026-10-12) -- farms whose insurance was used
+                for the picked typhoon (hidden from the Active Insurance view). */}
+            <div className="flex items-center gap-1.5">
+              <Wind size={11} className="text-muted-foreground shrink-0" />
+              <select
+                value={filterTyphoonId ?? ""}
+                onChange={e => onFilterTyphoonIdChange(e.target.value === "" ? null : Number(e.target.value))}
+                title="Show farms whose insurance was used for this typhoon"
+                className={`text-[11px] border rounded px-2 py-1 bg-background ${filterTyphoonId != null ? "border-[#ca8a04] text-[#ca8a04] font-semibold" : "border-border"}`}
+              >
+                <option value="">Used for typhoon: All</option>
+                {usedTyphoons.map(t => (
+                  <option key={t.typhoon_id} value={t.typhoon_id}>
+                    {t.name} {t.year} ({t.farm_count} farm{t.farm_count === 1 ? "" : "s"})
+                  </option>
+                ))}
+              </select>
             </div>
 
             {/* Upload actions -- moved down from the map toolbar (2026-08-18),
