@@ -253,7 +253,12 @@ CREATE TABLE tbl_tropical_cyclone_bulletins (
     tcws_areas JSONB,
     -- PAGASA's final-bulletin marker (trailing "F" on the number, or an LPA
     -- bulletin) -- see migrations/2026-10-09_tcb_is_final.sql
-    is_final BOOLEAN NOT NULL DEFAULT FALSE
+    is_final BOOLEAN NOT NULL DEFAULT FALSE,
+    -- Wind circulation radius + latest forecast path for the Spatial
+    -- Analysis typhoon track overlay -- see migrations/2026-10-12_tcb_track_radius.sql
+    wind_radius_km INT,
+    storm_force_radius_km INT,
+    forecast_track JSONB
 );
 
 CREATE TABLE tbl_tcb_signals (

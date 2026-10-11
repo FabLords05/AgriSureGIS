@@ -1,4 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
+from geoalchemy2.shape import to_shape
+from shapely.geometry import Point, Polygon
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -14,6 +16,61 @@ from app.models.models import (
 )
 
 router = APIRouter(prefix="/typhoons", tags=["typhoons"], dependencies=[Depends(get_current_user)])
+
+# PAGASA's Philippine Area of Responsibility, as (lat, lon) corners in order.
+# Backs the track overlay's PAR outline and its inside/outside status.
+PAR_CORNERS = [(25.0, 120.0), (25.0, 135.0), (5.0, 135.0), (5.0, 115.0), (15.0, 115.0), (21.0, 120.0)]
+_PAR_POLYGON = Polygon([(lon, lat) for lat, lon in PAR_CORNERS])
+
+
+def inside_par(lat: float, lon: float) -> bool:
+    # covers, not contains: a center exactly on the PAR line counts as inside.
+    return _PAR_POLYGON.covers(Point(lon, lat))
+
+
+def _track_point(bulletin: TropicalCycloneBulletin) -> dict | None:
+    """
+    One track point per bulletin, or None when its center is missing --
+    including the parser's 0.0/0.0 fallback for a bulletin whose coordinates
+    couldn't be read, which would otherwise pull the line to the Gulf of Guinea.
+    """
+    if bulletin.center_geom is None:
+        return None
+    center = to_shape(bulletin.center_geom)
+    if center.x == 0 and center.y == 0:
+        return None
+    return {
+        "tcb_id": bulletin.tcb_id,
+        "bulletin_count": bulletin.bulletin_count,
+        "is_final": bulletin.is_final,
+        "issued_at": bulletin.issued_at,
+        "category": bulletin.category,
+        "max_sustained_winds": bulletin.max_sustained_winds,
+        "lat": center.y,
+        "lng": center.x,
+        "wind_radius_km": bulletin.wind_radius_km,
+        "storm_force_radius_km": bulletin.storm_force_radius_km,
+        "inside_par": inside_par(center.y, center.x),
+    }
+
+
+def build_track(bulletins: list[TropicalCycloneBulletin]) -> dict:
+    """
+    Observed track (every bulletin with a center, in the given order), the
+    latest bulletin's forecast positions, and whether the typhoon is inside
+    PAR going by its latest center (None if it has no center at all).
+    """
+    points = [p for p in (_track_point(b) for b in bulletins) if p is not None]
+    latest = bulletins[-1] if bulletins else None
+    forecast = [
+        {**f, "inside_par": inside_par(f["lat"], f["lon"])}
+        for f in ((latest.forecast_track or []) if latest else [])
+    ]
+    return {
+        "points": points,
+        "forecast": forecast,
+        "in_par": points[-1]["inside_par"] if points else None,
+    }
 
 
 @router.get("/active")
@@ -37,6 +94,39 @@ def get_active_typhoons(db: Session = Depends(get_db)):
             {"typhoon_id": t.typhoon_id, "name": t.name, "year": t.year}
             for t in typhoons
         ],
+    }
+
+
+@router.get("/{typhoon_id}/track")
+def get_typhoon_track(typhoon_id: int, db: Session = Depends(get_db)):
+    """
+    Backs the Spatial Analysis map's typhoon track overlay (2026-10-12):
+    every bulletin center of one typhoon in issue order, each with its
+    category, winds and wind circulation radius, plus the latest bulletin's
+    forecast path and the PAR outline.
+
+    in_par here is geometric (latest center inside PAR_CORNERS), unlike the
+    progress endpoint's in_par, which is Typhoon.is_active.
+    """
+    typhoon = db.query(Typhoon).filter(Typhoon.typhoon_id == typhoon_id).first()
+    if typhoon is None:
+        raise HTTPException(status_code=404, detail="Typhoon not found.")
+
+    bulletins = (
+        db.query(TropicalCycloneBulletin)
+        .filter(TropicalCycloneBulletin.typhoon_id == typhoon_id)
+        .order_by(TropicalCycloneBulletin.issued_at.asc(), TropicalCycloneBulletin.bulletin_count.asc())
+        .all()
+    )
+
+    return {
+        "status": "success",
+        "typhoon_id": typhoon.typhoon_id,
+        "typhoon_name": typhoon.name,
+        "year": typhoon.year,
+        "is_active": typhoon.is_active,
+        "par_polygon": [[lat, lon] for lat, lon in PAR_CORNERS],
+        **build_track(bulletins),
     }
 
 

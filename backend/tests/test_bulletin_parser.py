@@ -308,6 +308,87 @@ class BulletinParserTests(unittest.TestCase):
 
         self.assertEqual(result["signals"], {})
 
+    def test_parse_bulletin_text_extracts_forecast_track(self):
+        # Typhoon track overlay (2026-10-12): the same forecast table rows
+        # become forecast positions; the header row is skipped.
+        forecast = [
+            ["Date and Time", "Center Position", "", "Location"],
+            ["12-Hour Forecast\n2:00 AM", "9.7", "134.4", "980 km East of Northeastern Mindanao"],
+            ["72-Hour Forecast\n2:00 PM", "13.6°N", "122.8°E", "Over the coastal waters of\nLibmanan, Camarines Sur"],
+        ]
+        text = "Tropical Cyclone Bulletin No. 1\nTROPICAL DEPRESSION OPONG\n"
+        with patch("pdfplumber.open") as mock_pdf_open:
+            mock_pdf_open.return_value.__enter__.return_value = _mock_pdf(text, tables=[forecast])
+            result = BulletinParserService.parse_bulletin_text("dummy_path.pdf")
+
+        self.assertEqual(result["forecast_track"], [
+            {"label": "12-Hour Forecast 2:00 AM", "lat": 9.7, "lon": 134.4, "location": "980 km East of Northeastern Mindanao"},
+            {"label": "72-Hour Forecast 2:00 PM", "lat": 13.6, "lon": 122.8, "location": "Over the coastal waters of Libmanan, Camarines Sur"},
+        ])
+
+    def test_parse_bulletin_text_forecast_track_ignores_non_forecast_tables(self):
+        tcws = [["TCWS No.", "Luzon", "Visayas", "Mindanao"], ["2\nWind threat:\nGale-force\nwinds", "Batanes", "-", "-"]]
+        text = "Tropical Cyclone Bulletin No. 1\nTROPICAL DEPRESSION OPONG\n"
+        with patch("pdfplumber.open") as mock_pdf_open:
+            mock_pdf_open.return_value.__enter__.return_value = _mock_pdf(text, tables=[tcws])
+            result = BulletinParserService.parse_bulletin_text("dummy_path.pdf")
+
+        self.assertEqual(result["forecast_track"], [])
+
+    def test_parse_bulletin_text_extracts_wind_radius(self):
+        text = (
+            "Tropical Cyclone Bulletin No. 9\n"
+            "TYPHOON OPONG\n"
+            "Extent of tropical cyclone winds\n"
+            "Strong to gale-force winds extend outwards up to 1,000 km from the center "
+            "and storm-force winds extend outwards up to 160 km from the center.\n"
+        )
+        with patch("pdfplumber.open") as mock_pdf_open:
+            mock_pdf_open.return_value.__enter__.return_value = _mock_pdf(text)
+            result = BulletinParserService.parse_bulletin_text("dummy_path.pdf")
+
+        self.assertEqual(result["wind_radius_km"], 1000)
+        self.assertEqual(result["storm_force_radius_km"], 160)
+
+    def test_parse_bulletin_text_strong_to_storm_force_is_not_a_storm_force_radius(self):
+        text = (
+            "Tropical Cyclone Bulletin No. 3\n"
+            "TROPICAL STORM OPONG\n"
+            "Strong to storm-force winds extend outwards up to 400 km from the center.\n"
+        )
+        with patch("pdfplumber.open") as mock_pdf_open:
+            mock_pdf_open.return_value.__enter__.return_value = _mock_pdf(text)
+            result = BulletinParserService.parse_bulletin_text("dummy_path.pdf")
+
+        self.assertEqual(result["wind_radius_km"], 400)
+        self.assertIsNone(result["storm_force_radius_km"])
+
+    def test_parse_bulletin_text_strong_to_typhoon_force_wind_radius(self):
+        # Real wording at OPONG's peak (TCB#13-14, 22-23), with the number
+        # wrapped onto the next line.
+        text = (
+            "Tropical Cyclone Bulletin No. 13\n"
+            "TYPHOON OPONG\n"
+            "Extent of Tropical Cyclone Winds\n"
+            "Strong to typhoon-force winds extend outwards up to\n"
+            "460 km from the center.\n"
+        )
+        with patch("pdfplumber.open") as mock_pdf_open:
+            mock_pdf_open.return_value.__enter__.return_value = _mock_pdf(text)
+            result = BulletinParserService.parse_bulletin_text("dummy_path.pdf")
+
+        self.assertEqual(result["wind_radius_km"], 460)
+        self.assertIsNone(result["storm_force_radius_km"])
+
+    def test_parse_bulletin_text_wind_radius_none_when_not_stated(self):
+        text = "Tropical Cyclone Bulletin No. 1\nTROPICAL DEPRESSION OPONG\n"
+        with patch("pdfplumber.open") as mock_pdf_open:
+            mock_pdf_open.return_value.__enter__.return_value = _mock_pdf(text)
+            result = BulletinParserService.parse_bulletin_text("dummy_path.pdf")
+
+        self.assertIsNone(result["wind_radius_km"])
+        self.assertIsNone(result["storm_force_radius_km"])
+
     def test_parse_bulletin_text_against_real_sample_pdf(self):
         # End-to-end regression test against a real PAGASA bulletin (Tropical
         # Storm KIYAPO, Bulletin NR. 11) provided by Fabio. KIYAPO only
@@ -750,6 +831,41 @@ class BulletinParserSaveToDbTests(unittest.TestCase):
 
         self.assertIs(result, existing_bulletin)
         self.assertTrue(result.is_final)
+        mock_db.commit.assert_called_once()
+
+    def test_save_bulletin_to_db_stores_track_columns_on_new_bulletin(self):
+        mock_db = self._build_mock_db(boundaries=[])
+        forecast = [{"label": "12-Hour Forecast 2:00 AM", "lat": 9.7, "lon": 134.4, "location": None}]
+
+        result = BulletinParserService.save_bulletin_to_db(
+            {**self._luzon_parsed_data(), "wind_radius_km": 500, "storm_force_radius_km": 120, "forecast_track": forecast},
+            mock_db,
+        )
+
+        self.assertEqual(result.wind_radius_km, 500)
+        self.assertEqual(result.storm_force_radius_km, 120)
+        self.assertEqual(result.forecast_track, forecast)
+
+    def test_reparse_backfills_only_null_track_columns(self):
+        existing_bulletin = TropicalCycloneBulletin(title="Bulletin No. 11 for KIYAPO", bulletin_count=11)
+        existing_bulletin.tcb_id = 12
+        existing_bulletin.max_signal_level = 2
+        existing_bulletin.is_final = False
+        existing_bulletin.wind_radius_km = 300
+        existing_typhoon = Typhoon(name="KIYAPO", year=2026, is_active=True)
+        existing_typhoon.typhoon_id = 4
+        mock_db = self._build_mock_db(
+            boundaries=[], existing_typhoon=existing_typhoon, existing_bulletin=existing_bulletin,
+        )
+
+        result = BulletinParserService.save_bulletin_to_db(
+            {**self._luzon_parsed_data(), "wind_radius_km": 500, "storm_force_radius_km": 120, "forecast_track": []},
+            mock_db,
+        )
+
+        self.assertEqual(result.wind_radius_km, 300)  # already set -- not overwritten
+        self.assertEqual(result.storm_force_radius_km, 120)
+        self.assertIsNone(result.forecast_track)  # empty forecast stays NULL
         mock_db.commit.assert_called_once()
 
 

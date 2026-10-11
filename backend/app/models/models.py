@@ -277,6 +277,15 @@ class TropicalCycloneBulletin(Base):
     # 2026-10-09_tcb_is_final.sql. Drives the Monitoring "ready for
     # assessment" notice.
     is_final = Column(Boolean, nullable=False, default=False)
+    # Typhoon track overlay (see backend/migrations/2026-10-12_tcb_track_radius.sql).
+    # wind_radius_km: strong-wind extent (>= 39 km/h); storm_force_radius_km:
+    # storm-force extent (>= 89 km/h), NULL when the bulletin doesn't state
+    # it. forecast_track: [{"label", "lat", "lon", "location"}, ...] from the
+    # Track and Intensity Outlook table. All NULL for bulletins saved before
+    # these columns existed.
+    wind_radius_km = Column(Integer, nullable=True)
+    storm_force_radius_km = Column(Integer, nullable=True)
+    forecast_track = Column(JSONB, nullable=True)
 
     typhoon = relationship("Typhoon")
 

@@ -296,6 +296,49 @@ export function getActiveTyphoons(): Promise<ActiveTyphoonsResult> {
   return request<ActiveTyphoonsResult>('/api/typhoons/active');
 }
 
+// Spatial Analysis typhoon track overlay (2026-10-12) -- backend/app/api/typhoons.py's
+// get_typhoon_track. One point per bulletin center, in issue order; radii are
+// null for bulletins that didn't state them (or were saved before they were
+// stored). in_par = latest center inside the PAR polygon (geometric, unlike
+// TyphoonProgress.in_par); null when no bulletin has a center.
+export interface TyphoonTrackPoint {
+  tcb_id: number;
+  bulletin_count: number;
+  is_final: boolean;
+  issued_at: string;
+  category: string;
+  max_sustained_winds: number | null;
+  lat: number;
+  lng: number;
+  wind_radius_km: number | null;
+  storm_force_radius_km: number | null;
+  inside_par: boolean;
+}
+
+export interface TyphoonForecastPoint {
+  label: string;
+  lat: number;
+  lon: number;
+  location: string | null;
+  inside_par: boolean;
+}
+
+export interface TyphoonTrack {
+  status: string;
+  typhoon_id: number;
+  typhoon_name: string;
+  year: number;
+  is_active: boolean;
+  par_polygon: [number, number][];
+  points: TyphoonTrackPoint[];
+  forecast: TyphoonForecastPoint[];
+  in_par: boolean | null;
+}
+
+export function getTyphoonTrack(typhoonId: number): Promise<TyphoonTrack> {
+  return request<TyphoonTrack>(`/api/typhoons/${typhoonId}/track`);
+}
+
 // Monitoring dashboard's typhoon progress strip -- backend/app/api/typhoons.py's
 // get_typhoon_progress. in_par = still listed on PAGASA's status page.
 export interface TyphoonProgress {

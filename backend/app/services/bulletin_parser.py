@@ -56,6 +56,67 @@ def _tcws_header_columns(cells: list[str]) -> dict[int, int] | None:
     return {group: lowered.index(name) for name, group in (("luzon", 0), ("visayas", 1), ("mindanao", 2))}
 
 
+# Wind circulation radius (see parse_bulletin_text step 7), PAGASA's
+# "Extent of tropical cyclone winds" line, e.g. "Strong to gale-force winds
+# extend outwards up to 500 km from the center" -- "Strong to typhoon-force"
+# at a typhoon's peak (OPONG TCB#13-14, 22-23). The storm-force pattern's
+# lookbehind keeps "Strong to storm-force winds" from being read as a
+# separate storm-force radius.
+_WIND_RADIUS_RE = re.compile(
+    r"strong(?:\s+to\s+(?:gale|storm|typhoon)[-\s]force)?\s+winds\s+extend\s+outwards?\s+up\s+to\s+([\d,]+)\s*km",
+    re.IGNORECASE,
+)
+_STORM_FORCE_RADIUS_RE = re.compile(
+    r"(?<!to\s)(?<!to\n)\b(?:storm|typhoon)[-\s]force\s+winds\s+extend\s+outwards?\s+up\s+to\s+([\d,]+)\s*km",
+    re.IGNORECASE,
+)
+# Track and Intensity Outlook rows: ["12-Hour Forecast\n2:00 AM", "9.7",
+# "134.4", "980 km East of Northeastern Mindanao"] (OPONG TCB#1-4).
+_FORECAST_ROW_RE = re.compile(r"^\s*\d+\s*-\s*Hour\s+Forecast", re.IGNORECASE)
+_COORD_CELL_RE = re.compile(r"^\s*(\d{1,3}(?:\.\d+)?)\s*°?\s*([NSEW])?\s*$", re.IGNORECASE)
+
+
+def _radius_km(pattern: re.Pattern, text: str) -> int | None:
+    match = pattern.search(text)
+    return int(match.group(1).replace(",", "")) if match else None
+
+
+def _forecast_track(tables: list) -> list[dict]:
+    """
+    Forecast positions from the bulletin's Track and Intensity Outlook table,
+    in table order: [{"label", "lat", "lon", "location"}]. A row counts only
+    when its first cell is "<N>-Hour Forecast" and it has a lat and a lon cell
+    in range for the western Pacific, so other tables (TCWS, hazards) never
+    contribute points.
+    """
+    points = []
+    for table in tables:
+        for row in table:
+            cells = [(cell or "").strip() for cell in (row or [])]
+            if not cells or not _FORECAST_ROW_RE.match(cells[0]):
+                continue
+            numbers = []
+            location = None
+            for cell in cells[1:]:
+                coord = _COORD_CELL_RE.match(cell)
+                if coord:
+                    numbers.append(float(coord.group(1)))
+                elif cell:
+                    location = " ".join(cell.split())
+            if len(numbers) < 2:
+                continue
+            lat, lon = numbers[0], numbers[1]
+            if not (0 <= lat <= 45 and 90 <= lon <= 180):
+                continue
+            points.append({
+                "label": " ".join(cells[0].split()),
+                "lat": lat,
+                "lon": lon,
+                "location": location,
+            })
+    return points
+
+
 class PagasaScrapeError(Exception):
     """
     Raised when a PAGASA page couldn't actually be checked (network failure,
@@ -297,6 +358,13 @@ class BulletinParserService:
             re.search(r"No\s+Wind\s+Signal\s+is\s+currently\s+hoisted", text, re.IGNORECASE)
         )
 
+        # 7. Wind circulation radius and forecast track, for the Spatial
+        # Analysis typhoon track overlay (2026-10-12). None / [] when the
+        # bulletin doesn't state them.
+        wind_radius_km = _radius_km(_WIND_RADIUS_RE, text)
+        storm_force_radius_km = _radius_km(_STORM_FORCE_RADIUS_RE, text)
+        forecast_track = _forecast_track(tables)
+
         return {
             "typhoon_name": typhoon_name,
             "international_name": international_name,
@@ -310,6 +378,9 @@ class BulletinParserService:
             "issued_at": issued_at,
             "signals": signals_data,
             "no_signal_hoisted": no_signal_hoisted,
+            "wind_radius_km": wind_radius_km,
+            "storm_force_radius_km": storm_force_radius_km,
+            "forecast_track": forecast_track,
             "raw_text": text
         }
 
@@ -440,6 +511,9 @@ class BulletinParserService:
                 max_signal_level=max_signal_level,
                 tcws_areas=tcws_areas,
                 is_final=parsed_data.get("is_final", False),
+                wind_radius_km=parsed_data.get("wind_radius_km"),
+                storm_force_radius_km=parsed_data.get("storm_force_radius_km"),
+                forecast_track=parsed_data.get("forecast_track") or None,
             )
             db.add(bulletin)
             db.commit()
@@ -467,6 +541,22 @@ class BulletinParserService:
         # (2026-10-09). Only ever flips False -> True.
         if parsed_data.get("is_final") and not bulletin.is_final:
             bulletin.is_final = True
+            db.commit()
+
+        # Same idea for the track overlay columns (2026-10-12): fills them in
+        # on a re-scrape/re-upload of a bulletin saved before they existed.
+        # Only NULL columns are filled, so a later poll never overwrites them.
+        track_backfill = {
+            "wind_radius_km": parsed_data.get("wind_radius_km"),
+            "storm_force_radius_km": parsed_data.get("storm_force_radius_km"),
+            "forecast_track": parsed_data.get("forecast_track") or None,
+        }
+        changed = False
+        for column, value in track_backfill.items():
+            if value is not None and getattr(bulletin, column) is None:
+                setattr(bulletin, column, value)
+                changed = True
+        if changed:
             db.commit()
 
         return bulletin

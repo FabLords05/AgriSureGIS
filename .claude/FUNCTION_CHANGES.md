@@ -4,6 +4,88 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-12] - Spatial Analysis: Typhoon Track Overlay (Sprint 3, branch: develop)
+
+By Cristian. A new "Typhoon track overlay" toggle (next to "GeoServer farm
+overlay") lets the GIS specialist follow a typhoon's path and see whether it
+is inside or outside PAR. Decisions:
+* With the Farm Records typhoon filter on "All", the overlay shows the live
+  typhoon(s) (`Typhoon.is_active`). With a typhoon picked, it shows that
+  typhoon's archived track.
+* Track = one point per TCB center, in issue order. Forecast = the latest
+  TCB's Track and Intensity Outlook only.
+* Wind circulation radius drawn around every center: strong winds (≥ 39
+  km/h) always when stated, storm-force (≥ 89 km/h) only when the bulletin
+  states it.
+* Inside/outside PAR = the latest center checked against the PAR polygon,
+  not `is_active`.
+* Category colors orange (Low Pressure Area) → red (Super Typhoon), opacity
+  rising with intensity; legend follows PAGASA's TCB track-map legend.
+
+### 1. File: `backend/migrations/2026-10-12_tcb_track_radius.sql` (new), `backend/init_schema.sql`, `backend/app/models/models.py`
+* `tbl_tropical_cyclone_bulletins` gains `wind_radius_km`,
+  `storm_force_radius_km` (INT) and `forecast_track` (JSONB). NULL for
+  bulletins saved before this, until their PDF is re-scraped/re-uploaded.
+
+### 2. File: `backend/app/services/bulletin_parser.py`
+* New `_WIND_RADIUS_RE` / `_STORM_FORCE_RADIUS_RE` and **`_radius_km()`**:
+  read "Strong to gale-force winds extend outwards up to N km" and
+  "storm-force winds extend outwards up to N km". "Strong to storm-force" /
+  "Strong to typhoon-force" (OPONG TCB#13-14, 22-23) count as the
+  strong-wind radius only. Checked against all 23 OPONG PDFs: none states a
+  separate storm-force radius, so OPONG draws the outer circle only.
+* New **`_forecast_track()`**: "<N>-Hour Forecast" rows of the outlook table
+  → `[{label, lat, lon, location}]`; other tables never contribute.
+* **`parse_bulletin_text()`** step 7 returns `wind_radius_km`,
+  `storm_force_radius_km`, `forecast_track`.
+* **`save_bulletin_to_db()`** stores them on insert and backfills only NULL
+  columns on a re-parse.
+
+### 3. File: `backend/app/api/typhoons.py`
+* New `PAR_CORNERS`, **`inside_par()`** (Shapely `covers`, so on the line
+  counts as inside), **`_track_point()`** (skips a missing center and the
+  parser's 0.0/0.0 fallback), **`build_track()`**.
+* New **`GET /api/typhoons/{typhoon_id}/track`** (**`get_typhoon_track()`**).
+
+### 4. File: `frontend/src/lib/api.ts`
+* New `TyphoonTrackPoint`, `TyphoonForecastPoint`, `TyphoonTrack` types and
+  `getTyphoonTrack()`.
+
+### 5. File: `frontend/src/app/components/TyphoonTrackLayer.tsx` (new)
+* **`TyphoonTrackLayer`**: PAR outline, radius circles, observed track
+  segments colored by category, dotted forecast, PAGASA-symbol markers (live
+  latest center pulses). Radius circles are fill only, no outline; clicking
+  a center gives its circles a denser fill. Fits the map when the set of
+  typhoons shown changes.
+* **`TyphoonTrackLegend`**: typhoon name, live/archived, TCB count,
+  INSIDE/OUTSIDE PAR badge, category symbols, both radius entries, line types.
+
+### 6. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* New `showTyphoonTrack` toggle (always shown; the GeoServer toggle still
+  needs `VITE_GEOSERVER_URL`), tracks loaded from the filter's `typhoonId`
+  or `getActiveTyphoons()`. Layer drawn before farm polygons so farms stay
+  clickable.
+* Toggles and legend share one right-hand column, so the legend sits under
+  the toggles instead of covering them. Each toggle keeps the original
+  GeoServer pill styling with `text-[10px]` on the `<label>` itself
+  (`theme.css` sets every label to `text-base`, which had enlarged them).
+* Track markers reduced to 14px (18px for the live center); 22px symbols
+  piled on top of each other along the track.
+
+### 8. File: `backend/backfill_tcb_track_radius.py` (new)
+* Fills the three track columns for one typhoon (default OPONG) from its
+  original PDFs, only where NULL. Signals, summaries and assessments are not
+  touched. Dry run by default; prints the PDF's "extend" lines when no
+  radius is found, to check the parser's wording.
+
+### 7. Tests
+* `backend/tests/test_bulletin_parser.py`: forecast table, wind radius,
+  "strong to storm-force", not-stated, insert and NULL-only backfill.
+* `backend/tests/test_typhoons_track_api.py` (new): `inside_par`,
+  `build_track`, 404 and response shape.
+
+---
+
 ## [2026-10-12] - Farm Records: Hide Used Policies; Filter by Typhoon Used (Sprint 3, branch: develop)
 
 By Cristian. Once a final PABS export locks a policy as used, that farm should

@@ -4,7 +4,13 @@ import type { Layer } from "leaflet";
 import type { Feature, FeatureCollection } from "geojson";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { Farm, Assessment, Bulletin, TcbSignal, GeoJsonMultiPolygon, getBulletinSignals, getFarmsGeometry } from "@/lib/api";
+import { Farm, Assessment, Bulletin, TcbSignal, GeoJsonMultiPolygon, TyphoonTrack, getBulletinSignals, getFarmsGeometry, getActiveTyphoons, getTyphoonTrack } from "@/lib/api";
+import { TyphoonTrackLayer, TyphoonTrackLegend } from "./TyphoonTrackLayer";
+
+// Mirrors backend/app/api/typhoons.py's PAR_CORNERS -- only used to still draw
+// the PAR outline when no track is loaded (e.g. no active typhoon); a loaded
+// track carries its own par_polygon.
+const PAR_FALLBACK: [number, number][] = [[25, 120], [25, 135], [5, 135], [5, 115], [15, 115], [21, 120]];
 
 interface FarmRow extends Farm {
   assessment: Assessment | null;
@@ -286,6 +292,30 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
   const [affectedAreas, setAffectedAreas] = useState<TcbSignal[]>([]);
   const [regionXBoundaries, setRegionXBoundaries] = useState<FeatureCollection | null>(null);
   const [showFarmsWmsOverlay, setShowFarmsWmsOverlay] = useState(false);
+  // Typhoon track overlay (2026-10-12): the Farm Records typhoon filter's
+  // typhoon when one is picked, otherwise whichever typhoon(s) PAGASA lists
+  // as active right now.
+  const [showTyphoonTrack, setShowTyphoonTrack] = useState(false);
+  const [typhoonTracks, setTyphoonTracks] = useState<TyphoonTrack[]>([]);
+  const [typhoonTracksLoading, setTyphoonTracksLoading] = useState(false);
+
+  useEffect(() => {
+    if (!showTyphoonTrack) {
+      setTyphoonTracks([]);
+      return;
+    }
+    let cancelled = false;
+    setTyphoonTracksLoading(true);
+    const ids = typhoonId != null
+      ? Promise.resolve([typhoonId])
+      : getActiveTyphoons().then(res => res.active_typhoons.map(t => t.typhoon_id));
+    ids
+      .then(list => Promise.all(list.map(id => getTyphoonTrack(id))))
+      .then(tracks => { if (!cancelled) setTyphoonTracks(tracks); })
+      .catch(() => { if (!cancelled) setTyphoonTracks([]); })
+      .finally(() => { if (!cancelled) setTyphoonTracksLoading(false); });
+    return () => { cancelled = true; };
+  }, [showTyphoonTrack, typhoonId]);
 
   useEffect(() => {
     if (!selectedBulletin) {
@@ -475,7 +505,14 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
           <GeoJSON data={regionXBoundaries} style={styleBoundary} onEachFeature={labelBoundary} />
         )}
 
-        {/* Real typhoon marker + affected-area list (no track/radius geometry exists in the DB) */}
+        {/* Typhoon track overlay -- drawn before the farm polygons so farms
+            stay on top and clickable (its radius circles are non-interactive). */}
+        {showTyphoonTrack && (
+          <TyphoonTrackLayer tracks={typhoonTracks} parPolygon={typhoonTracks[0]?.par_polygon ?? PAR_FALLBACK} />
+        )}
+
+        {/* Selected bulletin's typhoon marker + affected-area list (the full
+            track and wind radius are the separate typhoon track overlay) */}
         {selectedBulletin?.center_lat != null && selectedBulletin?.center_lng != null && (
           <Marker position={[selectedBulletin.center_lat, selectedBulletin.center_lng]} icon={typhoonIcon}>
             <Popup>
@@ -536,17 +573,35 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
             just without drawing a marker there. */}
       </MapContainer>
 
-      {/* GeoServer WMS overlay toggle — only shown when VITE_GEOSERVER_URL is configured */}
-      {GEOSERVER_URL && (
-        <label className="absolute top-3 right-3 flex items-center gap-1.5 bg-card/90 border border-border rounded-lg px-3 py-2 shadow-md z-[1000] text-[10px] cursor-pointer select-none">
+      {/* Right-hand column: overlay toggles, then the typhoon track legend
+          below them (never on top of them). Each toggle keeps the original
+          GeoServer toggle's pill styling -- text-[10px] must stay on the
+          <label> itself, since theme.css sets every label to text-base.
+          GeoServer WMS — only shown when VITE_GEOSERVER_URL is configured; the
+          typhoon track comes from FastAPI, so it always shows. */}
+      <div className="absolute top-3 right-3 bottom-8 flex flex-col items-end gap-1.5 z-[1000] pointer-events-none">
+        {GEOSERVER_URL && (
+          <label className="pointer-events-auto flex items-center gap-1.5 bg-card/90 border border-border rounded-lg px-3 py-2 shadow-md text-[10px] cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={showFarmsWmsOverlay}
+              onChange={e => setShowFarmsWmsOverlay(e.target.checked)}
+            />
+            GeoServer farm overlay
+          </label>
+        )}
+        <label className="pointer-events-auto flex items-center gap-1.5 bg-card/90 border border-border rounded-lg px-3 py-2 shadow-md text-[10px] cursor-pointer select-none">
           <input
             type="checkbox"
-            checked={showFarmsWmsOverlay}
-            onChange={e => setShowFarmsWmsOverlay(e.target.checked)}
+            checked={showTyphoonTrack}
+            onChange={e => setShowTyphoonTrack(e.target.checked)}
           />
-          GeoServer farm overlay
+          Typhoon track overlay
         </label>
-      )}
+        {showTyphoonTrack && (
+          <TyphoonTrackLegend tracks={typhoonTracks} loading={typhoonTracksLoading} archived={typhoonId != null} />
+        )}
+      </div>
 
       {/* Legend */}
       <div className="absolute bottom-3 left-3 bg-card/90 border border-border rounded-lg px-3 py-2 shadow-md z-[1000]">
