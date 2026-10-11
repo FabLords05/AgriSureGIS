@@ -47,13 +47,19 @@ def materialized_view_available(db: Session) -> bool:
 
 def fetch_latest_insurance_from_view(db: Session, farm_ids: list[int]):
     """Returns {farm_id: Row} for the given farm_ids, Row exposing
-    .policy_no/.effectivity_date/.expiry_date -- a drop-in replacement for
-    the equivalent dict list_farms() builds from a raw InsuranceRecord query.
+    .insurance_records_id/.policy_no/.program_type/.amount_cover/
+    .effectivity_date/.expiry_date -- a drop-in replacement for the
+    equivalent dict list_farms() builds from a raw InsuranceRecord query.
+    The view only picks WHICH record is latest; the columns are read from
+    tbl_insurance_records by primary key, so the view needs no new columns.
     """
     rows = db.execute(
         text(
-            "SELECT farm_id, policy_no, effectivity_date, expiry_date "
-            "FROM mv_farm_latest_insurance WHERE farm_id = ANY(:farm_ids)"
+            "SELECT v.farm_id, r.insurance_records_id, r.policy_no, r.program_type, "
+            "r.amount_cover, r.effectivity_date, r.expiry_date "
+            "FROM mv_farm_latest_insurance v "
+            "JOIN tbl_insurance_records r ON r.insurance_records_id = v.insurance_records_id "
+            "WHERE v.farm_id = ANY(:farm_ids)"
         ),
         {"farm_ids": farm_ids},
     ).all()

@@ -11,9 +11,35 @@ from app.core.farmer_name import format_given_first, format_pcic
 from app.core.farms_cache import cache_farms_page, get_cached_farms_page
 from app.core.farms_view import fetch_latest_insurance_from_view, materialized_view_available
 from app.core.security import get_current_user
-from app.models.models import AdminBoundary, Farm, FarmerProfile, InsuranceRecord
+from app.models.models import AdminBoundary, Farm, FarmerProfile, InsuranceRecord, InsuranceUsage, Typhoon
 
 router = APIRouter(prefix="/farms", tags=["farms"], dependencies=[Depends(get_current_user)])
+
+
+def _locked_typhoons_by_insurance_id(db: Session, insurance_ids: list[int]) -> dict[int, str]:
+    """
+    {insurance_records_id: "OPONG 2025, ADA 2026"} for the Farm Records "Used
+    For Typhoon" column. Only usage locked by a final PABS export counts
+    (is_used + finalized_at set; see AssessmentService.finalize_exported_usage)
+    -- the provisional calculate-time mark is left out. One query for the page.
+    """
+    if not insurance_ids:
+        return {}
+    rows = (
+        db.query(InsuranceUsage.insurance_records_id, Typhoon.name, Typhoon.year)
+        .join(Typhoon, InsuranceUsage.typhoon_id == Typhoon.typhoon_id)
+        .filter(
+            InsuranceUsage.insurance_records_id.in_(insurance_ids),
+            InsuranceUsage.is_used.is_(True),
+            InsuranceUsage.finalized_at.isnot(None),
+        )
+        .order_by(InsuranceUsage.finalized_at.asc())
+        .all()
+    )
+    names: dict[int, list[str]] = {}
+    for insurance_records_id, name, year in rows:
+        names.setdefault(insurance_records_id, []).append(f"{name} {year}")
+    return {insurance_records_id: ", ".join(labels) for insurance_records_id, labels in names.items()}
 
 
 @router.get("/")
@@ -41,7 +67,9 @@ def list_farms(
     Actual polygon geometry now comes exclusively from GET /farms/geometry
     below, which the map calls directly.
 
-    Runs 2 queries total per request regardless of farm count: `farmer`/
+    Runs 2 queries total per request regardless of farm count (plus a 3rd
+    for the "Used For Typhoon" column when the page has insurance; see
+    _locked_typhoons_by_insurance_id below): `farmer`/
     `boundary` are eager-loaded via joinedload (they default to lazy/per-row
     loading), and the "most recent InsuranceRecord per farm" for this page
     -- instead of the old 1 (farms) + up to 3 per farm (farmer + boundary +
@@ -195,6 +223,10 @@ def list_farms(
             for record in insurance_records:
                 latest_insurance_by_farm_id.setdefault(record.farm_id, record)
 
+    locked_typhoons = _locked_typhoons_by_insurance_id(
+        db, [insurance.insurance_records_id for insurance in latest_insurance_by_farm_id.values()]
+    )
+
     data = []
     for farm in farms:
         insurance = latest_insurance_by_farm_id.get(farm.farm_id)
@@ -213,9 +245,13 @@ def list_farms(
                 "csv_farm_reference": farm.csv_farm_reference,
                 "georef_id": farm.georef_id,
                 "has_geometry": farm.location_geom is not None,
+                # CIC NO in the newer PCIC CSV ("Policy No." in the legacy one).
                 "policy_no": insurance.policy_no if insurance else None,
+                "amount_cover": float(insurance.amount_cover) if insurance and insurance.amount_cover is not None else None,
+                "program_type": insurance.program_type if insurance else None,
                 "effectivity_date": insurance.effectivity_date.strftime("%m/%d/%Y") if insurance and insurance.effectivity_date else None,
                 "expiry_date": insurance.expiry_date.strftime("%m/%d/%Y") if insurance and insurance.expiry_date else None,
+                "used_for_typhoon": locked_typhoons.get(insurance.insurance_records_id) if insurance else None,
             }
         )
 

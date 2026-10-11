@@ -502,12 +502,14 @@ export function SpatialAnalysisModule({
                 Loading farm records…
               </div>
             ) : (
-            <table className="table-fixed w-[1600px] min-w-full text-[11px]">
-              {/* Column order: Farm ID (pinned), Farmer, Municipality,
-                  Barangay, Area, GPX Boundary, Effective, Expiry, Crop Stage,
-                  Signal, Exp (h), Est. Payment -- sums to 1600px. */}
+            <table className="table-fixed w-[2030px] min-w-full text-[11px]">
+              {/* Column order (2026-10-11, per Cristian): Farm ID (pinned),
+                  Farmer, Municipality, Barangay, Area, Amount of Cover,
+                  CIC No., Effectivity, Expiry, Program Type, Crop Stage,
+                  Used For Typhoon, Signal, Exp (h), GPX Boundary -- sums to
+                  2030px. Est. Payment was dropped for Amount of Cover. */}
               <colgroup>
-                {[90, 200, 140, 150, 100, 120, 120, 120, 260, 90, 90, 120].map((w, i) => (
+                {[90, 200, 140, 150, 100, 130, 150, 120, 120, 150, 220, 160, 90, 90, 120].map((w, i) => (
                   <col key={i} style={{ width: w }} />
                 ))}
               </colgroup>
@@ -533,13 +535,16 @@ export function SpatialAnalysisModule({
                       </span>
                     </th>
                   ))}
-                  <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">GPX Boundary</th>
-                  <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Effective Date</th>
+                  <th className="px-2.5 py-2 text-right font-semibold whitespace-nowrap">Amount of Cover</th>
+                  <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">CIC No.</th>
+                  <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Effectivity Date</th>
                   <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Expiry Date</th>
+                  <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Program Type</th>
                   <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Crop Stage</th>
+                  <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Used For Typhoon</th>
                   <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Signal</th>
                   <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Exp (h)</th>
-                  <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Est. Payment</th>
+                  <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">GPX Boundary</th>
                 </tr>
               </thead>
               <tbody>
@@ -550,7 +555,7 @@ export function SpatialAnalysisModule({
                     virtualization comment near ROW_HEIGHT/OVERSCAN above. */}
                 {topSpacerHeight > 0 && (
                   <tr aria-hidden style={{ height: topSpacerHeight }}>
-                    <td colSpan={12} />
+                    <td colSpan={15} />
                   </tr>
                 )}
                 {windowedFarms.map(f => (
@@ -578,21 +583,26 @@ export function SpatialAnalysisModule({
                     <td className="px-2.5 py-2 truncate" title={f.municipality ?? undefined}>{f.municipality ?? "—"}</td>
                     <td className="px-2.5 py-2 text-muted-foreground truncate" title={f.barangay ?? undefined}>{f.barangay ?? "—"}</td>
                     <td className="px-2.5 py-2 text-right whitespace-nowrap">{f.area_size != null ? f.area_size.toFixed(2) : "—"}</td>
+                    <td className="px-2.5 py-2 text-right font-medium truncate">
+                      {f.amount_cover != null ? `₱${f.amount_cover.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "—"}
+                    </td>
+                    <td className="px-2.5 py-2 font-mono truncate" title={f.policy_no ?? undefined}>{f.policy_no || "—"}</td>
+                    <td className="px-2.5 py-2 text-muted-foreground whitespace-nowrap">{f.effectivity_date ?? "—"}</td>
+                    <td className="px-2.5 py-2 text-muted-foreground whitespace-nowrap">{f.expiry_date ?? "—"}</td>
+                    <td className="px-2.5 py-2 truncate" title={f.program_type ?? undefined}>{f.program_type || "—"}</td>
+                    <td className="px-2.5 py-2 truncate" title={f.assessment?.crop_stage ?? undefined}>{f.assessment?.crop_stage ?? "Not yet assessed"}</td>
+                    <td className={`px-2.5 py-2 truncate ${f.used_for_typhoon ? "font-medium text-[#ca8a04]" : "text-muted-foreground"}`} title={f.used_for_typhoon ?? undefined}>
+                      {f.used_for_typhoon ?? "—"}
+                    </td>
+                    <td className={`px-2.5 py-2 whitespace-nowrap ${f.assessment?.wind_velocity ? signalColors[f.assessment.wind_velocity] ?? "" : "text-muted-foreground"}`}>
+                      {f.assessment?.wind_velocity ? `No. ${f.assessment.wind_velocity}` : "—"}
+                    </td>
+                    <td className="px-2.5 py-2 text-right whitespace-nowrap">{f.assessment?.period_of_exposure ?? "—"}</td>
                     <td className="px-2.5 py-2 whitespace-nowrap">
                       {f.has_geometry
                         ? <span className="text-emerald-600 flex items-center gap-0.5"><CheckCircle2 size={10} />Yes</span>
                         : <span className="text-muted-foreground">No</span>
                       }
-                    </td>
-                    <td className="px-2.5 py-2 text-muted-foreground whitespace-nowrap">{f.effectivity_date ?? "—"}</td>
-                    <td className="px-2.5 py-2 text-muted-foreground whitespace-nowrap">{f.expiry_date ?? "—"}</td>
-                    <td className="px-2.5 py-2 truncate" title={f.assessment?.crop_stage ?? undefined}>{f.assessment?.crop_stage ?? "Not yet assessed"}</td>
-                    <td className={`px-2.5 py-2 whitespace-nowrap ${f.assessment?.wind_velocity ? signalColors[f.assessment.wind_velocity] ?? "" : "text-muted-foreground"}`}>
-                      {f.assessment?.wind_velocity ? `No. ${f.assessment.wind_velocity}` : "—"}
-                    </td>
-                    <td className="px-2.5 py-2 text-right whitespace-nowrap">{f.assessment?.period_of_exposure ?? "—"}</td>
-                    <td className="px-2.5 py-2 text-right font-medium truncate">
-                      {f.assessment ? `₱${f.assessment.final_indemnity_payment.toLocaleString()}` : "—"}
                     </td>
                   </tr>
                 ))}
@@ -600,12 +610,12 @@ export function SpatialAnalysisModule({
                     yet scrolled to below the window. */}
                 {bottomSpacerHeight > 0 && (
                   <tr aria-hidden style={{ height: bottomSpacerHeight }}>
-                    <td colSpan={12} />
+                    <td colSpan={15} />
                   </tr>
                 )}
                 {hasMore && (
                   <tr ref={sentinelRef} className="h-9">
-                    <td colSpan={12} className="text-center text-[10px] text-muted-foreground">
+                    <td colSpan={15} className="text-center text-[10px] text-muted-foreground">
                       {isFetchingMore ? "Loading more…" : ""}
                     </td>
                   </tr>

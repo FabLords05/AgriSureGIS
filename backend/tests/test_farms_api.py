@@ -1,12 +1,13 @@
 import unittest
 from datetime import date, timedelta
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from sqlalchemy.orm import Query as SAQuery
 
 from app.api.farms import list_farms
-from app.models.models import Farm, InsuranceRecord
+from app.models.models import Farm, InsuranceRecord, InsuranceUsage
 
 
 class _ChainableQuery:
@@ -29,6 +30,9 @@ class _ChainableQuery:
         self._count_result = count_result
 
     def options(self, *a, **k):
+        return self
+
+    def join(self, *a, **k):
         return self
 
     def order_by(self, *a, **k):
@@ -75,16 +79,19 @@ def _fake_farm(farm_id, municipality="Talakag", province="Bukidnon", barangay="S
     )
 
 
-def _fake_insurance(farm_id, policy_no="POL-1", effectivity_date=None, expiry_date=None):
+def _fake_insurance(farm_id, policy_no="POL-1", effectivity_date=None, expiry_date=None, insurance_records_id=None):
     return SimpleNamespace(
         farm_id=farm_id,
+        insurance_records_id=insurance_records_id if insurance_records_id is not None else farm_id * 100,
         policy_no=policy_no,
+        program_type="RSBSA",
+        amount_cover=Decimal("16542.00"),
         effectivity_date=effectivity_date,
         expiry_date=expiry_date,
     )
 
 
-def _build_mock_db(farms_all_result=None, farms_count_result=0, insurance_all_result=None):
+def _build_mock_db(farms_all_result=None, farms_count_result=0, insurance_all_result=None, usage_all_result=None):
     """Returns (mock_db, farms_chain, insurance_chain). db.query() is routed
     by which model/column was queried, mirroring list_farms()'s possible
     db.query(...) call sites:
@@ -113,15 +120,20 @@ def _build_mock_db(farms_all_result=None, farms_count_result=0, insurance_all_re
     """
     farms_chain = _ChainableQuery(all_result=farms_all_result, count_result=farms_count_result)
     insurance_chain = _ChainableQuery(all_result=insurance_all_result)
+    # The "Used For Typhoon" lookup: rows of (insurance_records_id, name, year).
+    usage_chain = _ChainableQuery(all_result=usage_all_result)
 
     def query_side_effect(entity, *rest):
         if entity is Farm:
             return farms_chain
         if entity is InsuranceRecord:
             return insurance_chain
+        if entity is InsuranceUsage.insurance_records_id:
+            return usage_chain
         return SAQuery(entity, session=None)
 
     mock_db = MagicMock()
+    mock_db.usage_chain = usage_chain
     mock_db.query.side_effect = query_side_effect
     mock_db.execute.side_effect = Exception("no materialized view in tests -- forces the fallback path")
     return mock_db, farms_chain, insurance_chain
@@ -132,7 +144,7 @@ class ListFarmsUnpaginatedTests(unittest.TestCase):
         farms = [_fake_farm(1), _fake_farm(2), _fake_farm(3)]
         mock_db, farms_chain, insurance_chain = _build_mock_db(farms_all_result=farms)
 
-        result = list_farms(db=mock_db, limit=None, after_id=0, active_only=False)
+        result = list_farms(db=mock_db, municipality=None, farmer_id=None, limit=None, after_id=0, active_only=False)
 
         self.assertEqual(len(result["data"]), 3)
         self.assertIsNone(farms_chain.limit_arg)
@@ -150,7 +162,7 @@ class ListFarmsUnpaginatedTests(unittest.TestCase):
         farms = [_fake_farm(1)]
         mock_db, farms_chain, _ = _build_mock_db(farms_all_result=farms)
 
-        list_farms(db=mock_db, limit=None, after_id=0, active_only=False)
+        list_farms(db=mock_db, municipality=None, farmer_id=None, limit=None, after_id=0, active_only=False)
 
         self.assertEqual(farms_chain.filter_calls, [])
 
@@ -160,7 +172,7 @@ class ListFarmsPaginationTests(unittest.TestCase):
         page = [_fake_farm(1), _fake_farm(2)]
         mock_db, farms_chain, _ = _build_mock_db(farms_all_result=page, farms_count_result=5)
 
-        result = list_farms(db=mock_db, limit=2, after_id=0, active_only=False)
+        result = list_farms(db=mock_db, municipality=None, farmer_id=None, limit=2, after_id=0, active_only=False)
 
         self.assertEqual(farms_chain.limit_arg, 2)
         # First page (after_id == 0) is the only one that triggers the COUNT.
@@ -178,7 +190,7 @@ class ListFarmsPaginationTests(unittest.TestCase):
         page = [_fake_farm(5)]
         mock_db, farms_chain, _ = _build_mock_db(farms_all_result=page, farms_count_result=5)
 
-        result = list_farms(db=mock_db, limit=2, after_id=4, active_only=False)
+        result = list_farms(db=mock_db, municipality=None, farmer_id=None, limit=2, after_id=4, active_only=False)
 
         self.assertFalse(result["has_more"])  # 1 row came back, short of limit=2
         # after_id > 0 means no COUNT this page (only the first page counts).
@@ -195,7 +207,7 @@ class ListFarmsPaginationTests(unittest.TestCase):
             farms_all_result=[_fake_farm(1)], farms_count_result=1
         )
 
-        list_farms(db=mock_db, limit=100, after_id=0, active_only=False)
+        list_farms(db=mock_db, municipality=None, farmer_id=None, limit=100, after_id=0, active_only=False)
 
         # 1 farms SELECT (.all()) + 1 insurance SELECT (.all()) -- the
         # docstring's "2 queries per page" guarantee -- plus the 1 extra
@@ -212,7 +224,7 @@ class ListFarmsPaginationTests(unittest.TestCase):
         page = [_fake_farm(10), _fake_farm(20)]
         mock_db, _, insurance_chain = _build_mock_db(farms_all_result=page)
 
-        list_farms(db=mock_db, limit=2, after_id=0, active_only=False)
+        list_farms(db=mock_db, municipality=None, farmer_id=None, limit=2, after_id=0, active_only=False)
 
         self.assertEqual(len(insurance_chain.filter_calls), 1)
         self.assertEqual(_in_clause_values(insurance_chain.filter_calls[0]), [10, 20])
@@ -223,7 +235,7 @@ class ListFarmsActiveOnlyTests(unittest.TestCase):
         farms = [_fake_farm(1)]
         mock_db, farms_chain, _ = _build_mock_db(farms_all_result=farms)
 
-        list_farms(db=mock_db, limit=None, after_id=0, active_only=True)
+        list_farms(db=mock_db, municipality=None, farmer_id=None, limit=None, after_id=0, active_only=True)
 
         # The farms query gets one extra .filter(Farm.farm_id.in_(subquery)).
         self.assertEqual(len(farms_chain.filter_calls), 1)
@@ -252,7 +264,7 @@ class ListFarmsActiveOnlyTests(unittest.TestCase):
         farms = [_fake_farm(1)]
         mock_db, farms_chain, _ = _build_mock_db(farms_all_result=farms)
 
-        list_farms(db=mock_db, limit=None, after_id=0, active_only=False)
+        list_farms(db=mock_db, municipality=None, farmer_id=None, limit=None, after_id=0, active_only=False)
 
         self.assertEqual(farms_chain.filter_calls, [])
 
@@ -263,7 +275,7 @@ class ListFarmsActiveOnlyTests(unittest.TestCase):
         page = [_fake_farm(1)]
         mock_db, farms_chain, _ = _build_mock_db(farms_all_result=page, farms_count_result=1)
 
-        result = list_farms(db=mock_db, limit=50, after_id=0, active_only=True)
+        result = list_farms(db=mock_db, municipality=None, farmer_id=None, limit=50, after_id=0, active_only=True)
 
         self.assertEqual(farms_chain.count_call_count, 1)
         self.assertEqual(result["total"], 1)
@@ -293,13 +305,44 @@ class ListFarmsResponseShapeTests(unittest.TestCase):
             insurance_all_result=[newer, older],
         )
 
-        result = list_farms(db=mock_db, limit=None, after_id=0, active_only=False)
+        result = list_farms(db=mock_db, municipality=None, farmer_id=None, limit=None, after_id=0, active_only=False)
 
         self.assertEqual(result["data"][0]["policy_no"], "NEW")
         self.assertEqual(
             result["data"][0]["effectivity_date"],
             (today - timedelta(days=10)).strftime("%m/%d/%Y"),
         )
+
+    def test_data_row_carries_cover_program_type_and_locked_typhoons(self):
+        # Farm Records columns Amount of Cover, Program Type, and Used For
+        # Typhoon. Only export-locked usage reaches the usage query's result;
+        # several typhoons join in lock order.
+        insurance = _fake_insurance(farm_id=1, insurance_records_id=77)
+        mock_db, _, _ = _build_mock_db(
+            farms_all_result=[_fake_farm(1), _fake_farm(2)],
+            insurance_all_result=[insurance],
+            usage_all_result=[(77, "OPONG", 2025), (77, "ADA", 2026)],
+        )
+
+        result = list_farms(db=mock_db, municipality=None, farmer_id=None, limit=None, after_id=0, active_only=False)
+
+        insured, uninsured = result["data"]
+        self.assertEqual(insured["amount_cover"], 16542.0)
+        self.assertEqual(insured["program_type"], "RSBSA")
+        self.assertEqual(insured["used_for_typhoon"], "OPONG 2025, ADA 2026")
+        self.assertIsNone(uninsured["amount_cover"])
+        self.assertIsNone(uninsured["used_for_typhoon"])
+
+        compiled = " ".join(str(c) for c in mock_db.usage_chain.filter_calls)
+        self.assertIn("finalized_at IS NOT NULL", compiled)
+        self.assertIn("is_used IS true", compiled)
+
+    def test_no_usage_query_when_page_has_no_insurance(self):
+        mock_db, _, _ = _build_mock_db(farms_all_result=[_fake_farm(1)])
+
+        list_farms(db=mock_db, municipality=None, farmer_id=None, limit=None, after_id=0, active_only=False)
+
+        self.assertEqual(mock_db.usage_chain.all_call_count, 0)
 
 
 if __name__ == "__main__":

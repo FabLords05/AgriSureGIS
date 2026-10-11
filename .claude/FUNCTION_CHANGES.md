@@ -4,6 +4,50 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-11] - Farm Records: New Column Order, Cover/CIC/Program Type/Used For Typhoon (branch: develop)
+
+Spatial Analysis & Data Import's Farm Records table, reordered per Cristian:
+Farm ID > Farmer > Municipality > Barangay > Area (ha) > **Amount of Cover** >
+**CIC No.** > Effectivity Date > Expiry Date > **Program Type** > Crop Stage >
+**Used For Typhoon** > Signal > Exp (h) > GPX Boundary. The **Est. Payment**
+column is removed and replaced by Amount of Cover.
+
+### 1. File: `backend/app/api/farms.py`
+* **`list_farms()`**: each row also returns `amount_cover`, `program_type`
+  and `used_for_typhoon`. CIC No. reuses the existing `policy_no`, where CSV
+  ingestion already stores the newer export's `CIC NO` column.
+* **`_locked_typhoons_by_insurance_id()`** (new): one query per page that
+  returns the typhoons each policy was locked for by a final PABS export
+  (`tbl_insurance_usage.is_used` + `finalized_at`), formatted as
+  "OPONG 2025, ADA 2026". The provisional calculate-time mark is not shown.
+  Skipped when the page has no insurance.
+
+### 2. File: `backend/app/core/farms_view.py`
+* **`fetch_latest_insurance_from_view()`**: joins `tbl_insurance_records` on
+  the view's existing `insurance_records_id`, so it also returns
+  `insurance_records_id`, `program_type` and `amount_cover`. The materialized
+  view itself is unchanged, so no migration is needed.
+
+### 3. Files: `frontend/src/lib/api.ts`, `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* **`Farm`** type: `amount_cover`, `program_type`, `used_for_typhoon`.
+* Farm Records table: new column order and widths (table is now 2030px wide,
+  15 columns); "Effective Date" relabelled "Effectivity Date".
+
+### 4. File: `backend/tests/test_farms_api.py`
+* Fake insurance rows carry the new fields; the mock routes the usage query.
+* Every `list_farms()` call now passes `municipality=None, farmer_id=None`.
+  Called as a plain function, those defaulted to the truthy `Query(None)`
+  marker, which applied both filters; 5 tests failed on it (previously hidden
+  as `AttributeError`s, since the fake query had no `.join()`).
+* New **`test_data_row_carries_cover_program_type_and_locked_typhoons`** and
+  **`test_no_usage_query_when_page_has_no_insurance`**.
+
+### Note
+* If `REDIS_URL` is set, farm pages cached before this change lack the new
+  fields and show "—" until those cache entries expire.
+
+---
+
 ## [2026-10-11] - Final PABS Export Locks Policies as Used (branch: develop)
 
 After a specialist exports the final PABS CSV, every policy on it with a

@@ -45,9 +45,15 @@ export interface Farm {
   // type. See backend/app/api/farms.py's list_farms docstring (2026-08-18,
   // stage 2 of the on-demand-pagination redesign).
   has_geometry: boolean;
+  // Shown as "CIC No." -- the newer PCIC CSV's CIC NO ("Policy No." in the legacy one).
   policy_no: string | null;
+  amount_cover: number | null;
+  program_type: string | null;
   effectivity_date: string | null;
   expiry_date: string | null;
+  // Typhoon(s) this policy was locked as used for by a final PABS export,
+  // e.g. "OPONG 2025". null = not used yet.
+  used_for_typhoon: string | null;
 }
 
 export interface Assessment {
