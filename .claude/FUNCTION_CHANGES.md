@@ -4,6 +4,33 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-12] - Spatial Analysis: Hide/Show Farm Records (Sprint 3, branch: develop)
+
+By Cristian. The Farm Records panel can be hidden so the map fills the
+page, for viewing the full imagery (e.g. a typhoon track). Decisions: hide
+everything (toolbar and table); done with the existing resize handle, not a
+separate button: click it to hide/show, press-and-move to resize. (Earlier
+same-day versions, a toolbar button and then drag-to-hide, were replaced.)
+
+### 1. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* New `recordsHidden` state and `CLICK_MOVE_TOLERANCE_PX` (4). On the resize
+  handle, a press that moves under 4px before release toggles Farm Records;
+  more movement is a resize drag (30–70%, unchanged) that never hides.
+  Dragging while hidden reopens the panel at the dragged height.
+* Handle enlarged for easier grabbing: 6px → 12px tall, grip 32×2px →
+  48×4px.
+* While hidden, the map panel is `flex-1` (full height) and the handle stays
+  at the bottom, with a "Click to show" tooltip. The panel is hidden with
+  CSS, not unmounted, because the table's ResizeObserver/sentinel refs and
+  the hidden upload inputs attach once on mount.
+
+### 2. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* New **`MapResizeWatcher`**: calls `map.invalidateSize()` whenever the map
+  container resizes. Without it the newly exposed area stayed grey until the
+  map was panned (also affected dragging the resize handle).
+
+---
+
 ## [2026-10-12] - Spatial Analysis: Typhoon Track Overlay (Sprint 3, branch: develop)
 
 By Cristian. A new "Typhoon track overlay" toggle (next to "GeoServer farm

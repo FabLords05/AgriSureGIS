@@ -17,6 +17,10 @@ interface FarmRow extends Farm {
 type SortField = "farm_id" | "farmer_name" | "municipality" | "barangay" | "area_size";
 type SortDir   = "asc" | "desc";
 
+// Map/records handle: a press that moves less than this before release is a
+// click (hide/show Farm Records), anything more is a resize drag.
+const CLICK_MOVE_TOLERANCE_PX = 4;
+
 // ---------------------------------------------------------------------------
 // Farm Records table virtualization -- the shared farms cache can hold the
 // entire ~48,588-row table (see useFarmsData.ts), and rendering all of them
@@ -127,6 +131,11 @@ export function SpatialAnalysisModule({
   const [sortField, setSortField] = useState<SortField>("farm_id");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [topPanelH, setTopPanelH] = useState(55);
+  // Hide Farm Records (2026-10-12) by clicking the resize handle: the map
+  // takes the full height and only the handle remains. The
+  // panel is hidden with CSS, not unmounted -- the table's ResizeObserver/
+  // sentinel refs and the hidden upload inputs attach once on mount.
+  const [recordsHidden, setRecordsHidden] = useState(false);
   // csvUploadProgress/gpxUploadProgress (and the failure-details modal they
   // used to feed) now live in App.tsx -- see SpatialAnalysisModuleProps'
   // doc comment above.
@@ -312,7 +321,10 @@ export function SpatialAnalysisModule({
   return (
     <div className="h-full flex flex-col overflow-hidden">
       {/* Top Panel – GIS Map */}
-      <div style={{ height: `${topPanelH}%` }} className="flex flex-col overflow-hidden">
+      <div
+        style={recordsHidden ? undefined : { height: `${topPanelH}%` }}
+        className={`flex flex-col overflow-hidden ${recordsHidden ? "flex-1" : ""}`}
+      >
         {/* Map toolbar removed entirely (2026-08-18, per Fabio's request) --
             it only ever held the title, and the map canvas below now gets
             that space instead. Search/filter/upload controls already live
@@ -333,25 +345,36 @@ export function SpatialAnalysisModule({
         </div>
       </div>
 
-      {/* Resize Handle */}
+      {/* Resize Handle -- a click (no movement) hides/shows Farm Records; a
+          press-and-move only resizes (30-70%). Dragging while hidden reopens
+          the panel at the dragged height. The handle stays at the bottom of
+          the page while the panel is hidden. */}
       <div
-        className="h-1.5 bg-border cursor-row-resize hover:bg-[#166534]/50 transition-colors shrink-0 flex items-center justify-center"
+        title={recordsHidden ? "Click to show Farm Records" : "Click to hide Farm Records · drag to resize"}
+        className="h-3 bg-border cursor-row-resize hover:bg-[#166534]/50 transition-colors shrink-0 flex items-center justify-center"
         onMouseDown={e => {
           const startY = e.clientY;
-          const startH = topPanelH;
+          const startH = recordsHidden ? 100 : topPanelH;
+          let dragged = false;
           const move = (mv: MouseEvent) => {
+            if (!dragged && Math.abs(mv.clientY - startY) < CLICK_MOVE_TOLERANCE_PX) return;
+            dragged = true;
             const delta = ((mv.clientY - startY) / window.innerHeight) * 100;
+            setRecordsHidden(false);
             setTopPanelH(Math.max(30, Math.min(70, startH + delta)));
           };
           document.addEventListener("mousemove", move);
-          document.addEventListener("mouseup", () => document.removeEventListener("mousemove", move), { once:true });
+          document.addEventListener("mouseup", () => {
+            document.removeEventListener("mousemove", move);
+            if (!dragged) setRecordsHidden(hidden => !hidden);
+          }, { once:true });
         }}
       >
-        <div className="w-8 h-0.5 rounded bg-muted-foreground/40" />
+        <div className="w-12 h-1 rounded bg-muted-foreground/50" />
       </div>
 
       {/* Bottom Panel – Farm Records Table */}
-      <div className="flex-1 flex overflow-hidden">
+      <div className={`flex-1 flex overflow-hidden ${recordsHidden ? "hidden" : ""}`}>
         <div className="flex-1 flex flex-col overflow-hidden">
           <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-card shrink-0 flex-wrap gap-y-1.5">
             <div className="flex items-center gap-1.5">

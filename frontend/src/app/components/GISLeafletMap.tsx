@@ -261,6 +261,20 @@ function bboxIntersects(bbox: BBox, bounds: SimpleBounds): boolean {
   return maxLng >= bounds.west && minLng <= bounds.east && maxLat >= bounds.south && minLat <= bounds.north;
 }
 
+// Leaflet only measures its container on load, so when the map panel grows
+// (Farm Records hidden, or the resize handle dragged) the new area stayed
+// grey and untiled until the map was panned. Re-measures on every container
+// resize (2026-10-12).
+function MapResizeWatcher() {
+  const map = useMap();
+  useEffect(() => {
+    const observer = new ResizeObserver(() => map.invalidateSize());
+    observer.observe(map.getContainer());
+    return () => observer.disconnect();
+  }, [map]);
+  return null;
+}
+
 // Reports the map's current bounds on mount (the real, pixel-derived initial
 // viewport for MapContainer's center/zoom props -- not a guessed one, since
 // by the time this child mounts inside MapContainer the underlying Leaflet
@@ -477,6 +491,7 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
           onGeometryFetched={mergeGeomEntries}
         />
         <MapBoundsWatcher onBoundsChange={handleBoundsChange} />
+        <MapResizeWatcher />
 
         {/* Esri World Imagery -- free, no API key/billing required. High-resolution
             (often sub-meter in populated/agricultural areas), curated best-available
