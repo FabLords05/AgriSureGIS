@@ -80,6 +80,10 @@ the repo.
 
 ## 5. Blocker to resolve first on the new machine
 
+> **Update 2026-10-12 (second machine):** resolved here — `backend/.env`
+> exists with `JWT_SECRET_KEY` set, and the suite imports and runs. Steps
+> below kept for any other fresh checkout.
+
 `backend/.env` **does not exist**, so `JWT_SECRET_KEY` is unset and
 `pytest` dies at import:
 
@@ -99,7 +103,7 @@ Then the verification that was never run:
 
 ```bash
 cd backend && python -m pytest tests/test_farms_api.py -v
-cd frontend && npm run build        # TypeScript check on the 5 touched files
+cd frontend && npm run build        # syntax/import check only -- see note below
 ```
 
 ## 6. Pre-existing bug fixed in passing — verify this specifically
@@ -125,6 +129,22 @@ convention for `active_only`; the typhoon filter just didn't follow it. All
 **Expectation to confirm once the suite runs:** those tests were failing
 before this branch. If they were somehow passing, the diagnosis above is
 wrong and needs rechecking.
+
+> **Update 2026-10-12 (second machine):** first run of
+> `tests/test_farms_api.py` failed 3 tests, all `active_only=True`, with
+> `sqlalchemy.exc.ArgumentError: IN expression list ... got _ChainableQuery`.
+> This *supports* the diagnosis above: with `typhoon_id=None` now passed,
+> those tests reach `elif active_only:` for the first time and hit a second
+> latent harness gap — `_build_mock_db` routed `_locked_insurance_ids()`'s
+> single-column `InsuranceUsage.insurance_records_id` query (from `19c2bc4`)
+> to the fake `usage_chain`, which `.not_in()` rejects. Fixed test-side:
+> only the multi-column "Used For Typhoon" query gets `usage_chain` now.
+> Re-run: `tests/test_farms_api.py` — 15 passed. Full suite `tests/` —
+> 253 passed, 1 skipped. `npm run build` — built clean (only the
+> pre-existing >500 kB chunk warning). Note the build is plain `vite build`
+> and `typescript` isn't installed in `frontend/node_modules`, so it strips
+> types without checking them: it proves syntax/imports, not prop types.
+> Still outstanding: the manual click-through (§7 step 2).
 
 ## 7. Next steps, in order
 

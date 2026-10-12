@@ -114,10 +114,25 @@ Assessment has run.
 * `_build_mock_db`'s query fallback now forwards every queried entity
   (`SAQuery([entity, *rest])`), not just the first — `_affected_farm_ids`
   builds a two-column subquery and reads both columns back off it.
+* **Fixed a second harness gap the drift fix exposed:** `_build_mock_db`
+  routed *every* `db.query(InsuranceUsage.insurance_records_id, ...)` to the
+  fake `usage_chain`, including `_locked_insurance_ids()`'s single-column
+  query (added `19c2bc4`), which `_active_farm_ids()` embeds via
+  `.not_in()`. That raised `sqlalchemy.exc.ArgumentError` in the three
+  `active_only=True` tests. It was latent until now because the drifted
+  `typhoon_id` marker always took the `typhoon_id` branch and never reached
+  `elif active_only:`. Now only the multi-column "Used For Typhoon" lookup
+  gets `usage_chain`; the single-column one falls through to a real unbound
+  `SAQuery`. Test-only -- no production change.
 
 ### 9. File: `.claude/API_CONTRACT.md`
 * Documented `affected_bulletin_id` under Farms, including that matching is
   municipality-granular text matching rather than a geometric intersection.
+
+### 10. File: `backend/app/api/farms.py` (docstring only)
+* `_affected_farm_ids` docstring said "barangay-granular at best";
+  corrected to "municipality-granular" to match the API contract and the
+  actual join.
 
 ## [2026-10-12] - Spatial Analysis: Hide/Show Farm Records (Sprint 3, branch: develop)
 

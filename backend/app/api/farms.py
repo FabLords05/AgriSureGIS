@@ -114,8 +114,8 @@ def _affected_farm_ids(db: Session, tcb_id: int, min_signal_level: int = MIN_AFF
     ExposureCalculatorService.compute_for_typhoon already uses: PAGASA
     publishes TCWS areas as named municipality lists per bulletin (captured
     in tbl_tcb_signals), not as a radius, so there is no wind-footprint
-    polygon to intersect against. That makes this filter barangay-granular
-    at best -- every farm in a listed municipality is "affected" -- which is
+    polygon to intersect against. That makes this filter municipality-
+    granular -- every farm in a listed municipality is "affected" -- which is
     correct for gating a visual check but is NOT a geometric
     intersection. See docs/SAR_ISPLANTED_METHOD.md for what the filtered set
     then feeds.

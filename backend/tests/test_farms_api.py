@@ -128,7 +128,12 @@ def _build_mock_db(farms_all_result=None, farms_count_result=0, insurance_all_re
             return farms_chain
         if entity is InsuranceRecord:
             return insurance_chain
-        if entity is InsuranceUsage.insurance_records_id:
+        # Multi-column only: the "Used For Typhoon" lookup queries
+        # (insurance_records_id, name, year) and calls .all() on it.
+        # _locked_insurance_ids() queries insurance_records_id alone and is
+        # embedded in _active_farm_ids()'s .not_in() -- it needs a real
+        # construct (falls through below), or .not_in() raises ArgumentError.
+        if entity is InsuranceUsage.insurance_records_id and rest:
             return usage_chain
         # All entities, not just the first: _affected_farm_ids() builds a
         # two-column (province, area_name) subquery and then reads both
