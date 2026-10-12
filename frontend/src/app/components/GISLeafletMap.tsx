@@ -36,6 +36,11 @@ interface GISLeafletMapProps {
   // Farm Records typhoon filter (2026-10-12): polygons of farms used for
   // this typhoon only; overrides activeOnly server-side.
   typhoonId?: number | null;
+  // "Affected Only" (2026-10-12): polygons of farms inside this bulletin's
+  // TCWS signal >= 2 areas. AND's with activeOnly/focusMunicipality/
+  // focusFarmerId rather than overriding them, so the map always shows the
+  // same set as the Farm Records table. null = filter off.
+  affectedBulletinId?: number | null;
 }
 
 // Real, approximate town-center coordinates for the two municipalities actually
@@ -302,7 +307,7 @@ function approximateFarmPosition(municipality: string | null, indexInMunicipalit
   return [base[0] + row * step, base[1] + (col - 1) * step];
 }
 
-export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBulletin, darkMode, focusMunicipality, focusFarmerId, activeOnly, typhoonId = null }: GISLeafletMapProps) {
+export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBulletin, darkMode, focusMunicipality, focusFarmerId, activeOnly, typhoonId = null, affectedBulletinId = null }: GISLeafletMapProps) {
   const [affectedAreas, setAffectedAreas] = useState<TcbSignal[]>([]);
   const [regionXBoundaries, setRegionXBoundaries] = useState<FeatureCollection | null>(null);
   const [showFarmsWmsOverlay, setShowFarmsWmsOverlay] = useState(false);
@@ -403,7 +408,7 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
 
   useEffect(() => {
     setGeomCache(new Map());
-  }, [activeOnly, focusMunicipality, focusFarmerId, typhoonId]);
+  }, [activeOnly, focusMunicipality, focusFarmerId, typhoonId, affectedBulletinId]);
 
   const bboxString = mapBounds
     ? `${mapBounds.west},${mapBounds.south},${mapBounds.east},${mapBounds.north}`
@@ -418,17 +423,21 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
     // including the default activeOnly=true/focusMunicipality=null/
     // focusFarmerId=null, fetches normally (bounded by the viewport bbox
     // either way).
-    if (!activeOnly && !focusMunicipality && !focusFarmerId && typhoonId == null) return;
+    if (
+      !activeOnly && !focusMunicipality && !focusFarmerId &&
+      typhoonId == null && affectedBulletinId == null
+    ) return;
     getFarmsGeometry({
       bbox: bboxString,
       active_only: activeOnly,
       municipality: focusMunicipality ?? undefined,
       farmer_id: focusFarmerId ?? undefined,
       typhoon_id: typhoonId ?? undefined,
+      affected_bulletin_id: affectedBulletinId ?? undefined,
     })
       .then(res => mergeGeomEntries(res.data.map(d => ({ farmId: d.farm_id, geom: d.location_geom }))))
       .catch(() => { /* leave the cache as-is on failure -- next moveend/zoomend retries */ });
-  }, [bboxString, activeOnly, focusMunicipality, focusFarmerId, typhoonId, mergeGeomEntries]);
+  }, [bboxString, activeOnly, focusMunicipality, focusFarmerId, typhoonId, affectedBulletinId, mergeGeomEntries]);
 
   // Rendered-layer set -- viewport-culled subset of geomCache, used ONLY by
   // the polygon render loop below. Deliberately NOT used for `selectedFarm`,

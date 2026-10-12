@@ -1,7 +1,8 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import {
   ChevronUp, ChevronDown,
-  Filter, User, ArrowUpDown, UploadCloud, CheckCircle2, Table2, ShieldCheck, Loader2, Wind
+  Filter, User, ArrowUpDown, UploadCloud, CheckCircle2, Table2, ShieldCheck, Loader2, Wind,
+  Satellite
 } from "lucide-react";
 import { GISLeafletMap } from "./GISLeafletMap";
 import {
@@ -73,6 +74,16 @@ interface SpatialAnalysisModuleProps {
   // Insurance view). Scopes like filterMuni/filterFarmerId. null = none.
   filterTyphoonId: number | null;
   onFilterTyphoonIdChange: (value: number | null) => void;
+  // "Affected Only" (2026-10-12) -- farms inside the selected bulletin's
+  // TCWS signal >= 2 areas, i.e. the polygons the GIS Specialist then
+  // checks visually on SAR (docs/SAR_ISPLANTED_METHOD.md). Owned by
+  // App.tsx like every other filter here. `affectedBulletinId` is the
+  // resolved value actually sent to the backend (null whenever the toggle
+  // is off OR no bulletin is selected) -- the button reads it to show
+  // whether the filter is really in effect.
+  affectedOnly: boolean;
+  onAffectedOnlyChange: (value: boolean) => void;
+  affectedBulletinId: number | null;
   // CSV/GPX upload progress + handlers now live in App.tsx, not here --
   // this module is conditionally mounted (only while activeModule ===
   // "spatial"), so an in-flight upload's progress/polling used to freeze
@@ -91,6 +102,7 @@ export function SpatialAnalysisModule({
   darkMode, selectedBulletin, farmsData,
   activeInsuranceOnly, onActiveInsuranceOnlyChange, filterMuni, onFilterMuniChange,
   filterFarmerId, onFilterFarmerIdChange, filterTyphoonId, onFilterTyphoonIdChange,
+  affectedOnly, onAffectedOnlyChange, affectedBulletinId,
   csvUploadProgress, gpxUploadProgress, onCsvFileSelected, onGpxFilesSelected,
 }: SpatialAnalysisModuleProps) {
   const {
@@ -341,6 +353,7 @@ export function SpatialAnalysisModule({
             focusFarmerId={filterFarmerId}
             activeOnly={activeInsuranceOnly}
             typhoonId={filterTyphoonId}
+            affectedBulletinId={affectedBulletinId}
           />
         </div>
       </div>
@@ -398,6 +411,27 @@ export function SpatialAnalysisModule({
               className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors border disabled:opacity-50 disabled:cursor-not-allowed ${activeInsuranceOnly ? "bg-[#166534] text-white border-[#166534]" : "border-[#166534] text-[#166534] hover:bg-[#166534]/10"}`}
             >
               <ShieldCheck size={11} /> Active Insurance Only
+            </button>
+
+            {/* Affected Only (2026-10-12) -- narrows table + map to the
+                insured farms inside the selected bulletin's TCWS signal >= 2
+                areas, which is the AOI the GIS Specialist then checks
+                visually on SAR (docs/SAR_ISPLANTED_METHOD.md). Distinct from
+                the "Used for typhoon" dropdown below: that one lists
+                already-exported/spent policies, this one lists farms the
+                storm actually hit, and works as soon as a bulletin is parsed
+                -- no assessment run needed. */}
+            <button
+              onClick={() => onAffectedOnlyChange(!affectedOnly)}
+              disabled={selectedBulletin == null}
+              title={
+                selectedBulletin == null
+                  ? "Select a bulletin first -- this filter scopes to that bulletin's TCWS signal areas"
+                  : `Only farms under TCWS signal 2+ in ${selectedBulletin.typhoon_name} bulletin #${selectedBulletin.bulletin_count}`
+              }
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors border disabled:opacity-50 disabled:cursor-not-allowed ${affectedBulletinId != null ? "bg-[#c2410c] text-white border-[#c2410c]" : "border-[#c2410c] text-[#c2410c] hover:bg-[#c2410c]/10"}`}
+            >
+              <Satellite size={11} /> Affected Only
             </button>
 
             {/* Municipality search -- moved down from the map toolbar

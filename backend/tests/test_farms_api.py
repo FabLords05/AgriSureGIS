@@ -128,9 +128,18 @@ def _build_mock_db(farms_all_result=None, farms_count_result=0, insurance_all_re
             return farms_chain
         if entity is InsuranceRecord:
             return insurance_chain
-        if entity is InsuranceUsage.insurance_records_id:
+        # Multi-column only: the "Used For Typhoon" lookup queries
+        # (insurance_records_id, name, year) and calls .all() on it.
+        # _locked_insurance_ids() queries insurance_records_id alone and is
+        # embedded in _active_farm_ids()'s .not_in() -- it needs a real
+        # construct (falls through below), or .not_in() raises ArgumentError.
+        if entity is InsuranceUsage.insurance_records_id and rest:
             return usage_chain
-        return SAQuery(entity, session=None)
+        # All entities, not just the first: _affected_farm_ids() builds a
+        # two-column (province, area_name) subquery and then reads both
+        # columns back off it via .c -- dropping `rest` would make that
+        # second column vanish and raise AttributeError.
+        return SAQuery([entity, *rest], session=None)
 
     mock_db = MagicMock()
     mock_db.usage_chain = usage_chain
@@ -144,7 +153,7 @@ class ListFarmsUnpaginatedTests(unittest.TestCase):
         farms = [_fake_farm(1), _fake_farm(2), _fake_farm(3)]
         mock_db, farms_chain, insurance_chain = _build_mock_db(farms_all_result=farms)
 
-        result = list_farms(db=mock_db, municipality=None, farmer_id=None, limit=None, after_id=0, active_only=False)
+        result = list_farms(db=mock_db, municipality=None, farmer_id=None, typhoon_id=None, affected_bulletin_id=None, limit=None, after_id=0, active_only=False)
 
         self.assertEqual(len(result["data"]), 3)
         self.assertIsNone(farms_chain.limit_arg)
@@ -162,7 +171,7 @@ class ListFarmsUnpaginatedTests(unittest.TestCase):
         farms = [_fake_farm(1)]
         mock_db, farms_chain, _ = _build_mock_db(farms_all_result=farms)
 
-        list_farms(db=mock_db, municipality=None, farmer_id=None, limit=None, after_id=0, active_only=False)
+        list_farms(db=mock_db, municipality=None, farmer_id=None, typhoon_id=None, affected_bulletin_id=None, limit=None, after_id=0, active_only=False)
 
         self.assertEqual(farms_chain.filter_calls, [])
 
@@ -172,7 +181,7 @@ class ListFarmsPaginationTests(unittest.TestCase):
         page = [_fake_farm(1), _fake_farm(2)]
         mock_db, farms_chain, _ = _build_mock_db(farms_all_result=page, farms_count_result=5)
 
-        result = list_farms(db=mock_db, municipality=None, farmer_id=None, limit=2, after_id=0, active_only=False)
+        result = list_farms(db=mock_db, municipality=None, farmer_id=None, typhoon_id=None, affected_bulletin_id=None, limit=2, after_id=0, active_only=False)
 
         self.assertEqual(farms_chain.limit_arg, 2)
         # First page (after_id == 0) is the only one that triggers the COUNT.
@@ -190,7 +199,7 @@ class ListFarmsPaginationTests(unittest.TestCase):
         page = [_fake_farm(5)]
         mock_db, farms_chain, _ = _build_mock_db(farms_all_result=page, farms_count_result=5)
 
-        result = list_farms(db=mock_db, municipality=None, farmer_id=None, limit=2, after_id=4, active_only=False)
+        result = list_farms(db=mock_db, municipality=None, farmer_id=None, typhoon_id=None, affected_bulletin_id=None, limit=2, after_id=4, active_only=False)
 
         self.assertFalse(result["has_more"])  # 1 row came back, short of limit=2
         # after_id > 0 means no COUNT this page (only the first page counts).
@@ -207,7 +216,7 @@ class ListFarmsPaginationTests(unittest.TestCase):
             farms_all_result=[_fake_farm(1)], farms_count_result=1
         )
 
-        list_farms(db=mock_db, municipality=None, farmer_id=None, limit=100, after_id=0, active_only=False)
+        list_farms(db=mock_db, municipality=None, farmer_id=None, typhoon_id=None, affected_bulletin_id=None, limit=100, after_id=0, active_only=False)
 
         # 1 farms SELECT (.all()) + 1 insurance SELECT (.all()) -- the
         # docstring's "2 queries per page" guarantee -- plus the 1 extra
@@ -224,7 +233,7 @@ class ListFarmsPaginationTests(unittest.TestCase):
         page = [_fake_farm(10), _fake_farm(20)]
         mock_db, _, insurance_chain = _build_mock_db(farms_all_result=page)
 
-        list_farms(db=mock_db, municipality=None, farmer_id=None, limit=2, after_id=0, active_only=False)
+        list_farms(db=mock_db, municipality=None, farmer_id=None, typhoon_id=None, affected_bulletin_id=None, limit=2, after_id=0, active_only=False)
 
         self.assertEqual(len(insurance_chain.filter_calls), 1)
         self.assertEqual(_in_clause_values(insurance_chain.filter_calls[0]), [10, 20])
@@ -235,7 +244,7 @@ class ListFarmsActiveOnlyTests(unittest.TestCase):
         farms = [_fake_farm(1)]
         mock_db, farms_chain, _ = _build_mock_db(farms_all_result=farms)
 
-        list_farms(db=mock_db, municipality=None, farmer_id=None, limit=None, after_id=0, active_only=True)
+        list_farms(db=mock_db, municipality=None, farmer_id=None, typhoon_id=None, affected_bulletin_id=None, limit=None, after_id=0, active_only=True)
 
         # The farms query gets one extra .filter(Farm.farm_id.in_(subquery)).
         self.assertEqual(len(farms_chain.filter_calls), 1)
@@ -264,7 +273,7 @@ class ListFarmsActiveOnlyTests(unittest.TestCase):
         farms = [_fake_farm(1)]
         mock_db, farms_chain, _ = _build_mock_db(farms_all_result=farms)
 
-        list_farms(db=mock_db, municipality=None, farmer_id=None, limit=None, after_id=0, active_only=False)
+        list_farms(db=mock_db, municipality=None, farmer_id=None, typhoon_id=None, affected_bulletin_id=None, limit=None, after_id=0, active_only=False)
 
         self.assertEqual(farms_chain.filter_calls, [])
 
@@ -275,7 +284,7 @@ class ListFarmsActiveOnlyTests(unittest.TestCase):
         page = [_fake_farm(1)]
         mock_db, farms_chain, _ = _build_mock_db(farms_all_result=page, farms_count_result=1)
 
-        result = list_farms(db=mock_db, municipality=None, farmer_id=None, limit=50, after_id=0, active_only=True)
+        result = list_farms(db=mock_db, municipality=None, farmer_id=None, typhoon_id=None, affected_bulletin_id=None, limit=50, after_id=0, active_only=True)
 
         self.assertEqual(farms_chain.count_call_count, 1)
         self.assertEqual(result["total"], 1)
@@ -305,7 +314,7 @@ class ListFarmsResponseShapeTests(unittest.TestCase):
             insurance_all_result=[newer, older],
         )
 
-        result = list_farms(db=mock_db, municipality=None, farmer_id=None, limit=None, after_id=0, active_only=False)
+        result = list_farms(db=mock_db, municipality=None, farmer_id=None, typhoon_id=None, affected_bulletin_id=None, limit=None, after_id=0, active_only=False)
 
         self.assertEqual(result["data"][0]["policy_no"], "NEW")
         self.assertEqual(
@@ -324,7 +333,7 @@ class ListFarmsResponseShapeTests(unittest.TestCase):
             usage_all_result=[(77, "OPONG", 2025), (77, "ADA", 2026)],
         )
 
-        result = list_farms(db=mock_db, municipality=None, farmer_id=None, limit=None, after_id=0, active_only=False)
+        result = list_farms(db=mock_db, municipality=None, farmer_id=None, typhoon_id=None, affected_bulletin_id=None, limit=None, after_id=0, active_only=False)
 
         insured, uninsured = result["data"]
         self.assertEqual(insured["amount_cover"], 16542.0)
@@ -340,9 +349,73 @@ class ListFarmsResponseShapeTests(unittest.TestCase):
     def test_no_usage_query_when_page_has_no_insurance(self):
         mock_db, _, _ = _build_mock_db(farms_all_result=[_fake_farm(1)])
 
-        list_farms(db=mock_db, municipality=None, farmer_id=None, limit=None, after_id=0, active_only=False)
+        list_farms(db=mock_db, municipality=None, farmer_id=None, typhoon_id=None, affected_bulletin_id=None, limit=None, after_id=0, active_only=False)
 
         self.assertEqual(mock_db.usage_chain.all_call_count, 0)
+
+
+class ListFarmsAffectedOnlyTests(unittest.TestCase):
+    """`affected_bulletin_id` -- the Spatial Analysis "Affected Only" button
+    (2026-10-12). Scopes to farms inside one bulletin's TCWS signal areas,
+    which is the AOI the GIS Specialist then checks visually on SAR (see
+    docs/SAR_ISPLANTED_METHOD.md)."""
+
+    def test_affected_filter_matches_signal_areas_at_level_2_and_above(self):
+        mock_db, farms_chain, _ = _build_mock_db(farms_all_result=[_fake_farm(1)])
+
+        list_farms(
+            db=mock_db, municipality=None, farmer_id=None, typhoon_id=None,
+            affected_bulletin_id=42, limit=None, after_id=0, active_only=False,
+        )
+
+        self.assertEqual(len(farms_chain.filter_calls), 1)
+        criterion = farms_chain.filter_calls[0]
+        self.assertEqual(getattr(criterion.operator, "__name__", ""), "in_op")
+
+        # Compile the embedded subquery rather than poking at ScalarSelect
+        # internals -- same approach as the active_only test above.
+        compiled = str(criterion.compile(compile_kwargs={"literal_binds": True}))
+        self.assertIn("tbl_tcb_signals", compiled)
+        self.assertIn("tbl_admin_boundaries", compiled)
+        # Scoped to this one bulletin, at signal 2+ (the assessment engine's
+        # own eligibility floor -- not signal == 2).
+        self.assertIn("= 42", compiled)
+        self.assertIn(">= 2", compiled)
+        # Province-qualified match, so a same-named municipality in another
+        # province can't be pulled in (mirrors ExposureCalculatorService).
+        self.assertIn("province", compiled)
+        # Signals predating the province column are skipped, never matched
+        # on municipality alone.
+        self.assertIn("IS NOT NULL", compiled)
+
+    def test_affected_filter_ands_with_active_only_rather_than_replacing_it(self):
+        # Unlike typhoon_id (which overrides active_only, since a spent
+        # policy is never active), "affected" and "active" are independent
+        # questions -- a farm can be hit by the storm AND still hold usable
+        # cover. Both filters must survive.
+        mock_db, farms_chain, _ = _build_mock_db(farms_all_result=[_fake_farm(1)])
+
+        list_farms(
+            db=mock_db, municipality=None, farmer_id=None, typhoon_id=None,
+            affected_bulletin_id=7, limit=None, after_id=0, active_only=True,
+        )
+
+        self.assertEqual(len(farms_chain.filter_calls), 2)
+        all_compiled = " ".join(
+            str(c.compile(compile_kwargs={"literal_binds": True})) for c in farms_chain.filter_calls
+        )
+        self.assertIn("tbl_tcb_signals", all_compiled)   # affected
+        self.assertIn("effectivity_date", all_compiled)  # active
+
+    def test_no_affected_filter_when_omitted(self):
+        mock_db, farms_chain, _ = _build_mock_db(farms_all_result=[_fake_farm(1)])
+
+        list_farms(
+            db=mock_db, municipality=None, farmer_id=None, typhoon_id=None,
+            affected_bulletin_id=None, limit=None, after_id=0, active_only=False,
+        )
+
+        self.assertEqual(farms_chain.filter_calls, [])
 
 
 if __name__ == "__main__":

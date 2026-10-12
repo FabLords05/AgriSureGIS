@@ -121,3 +121,55 @@ existing rows come back as skipped.
 - **`crop_stage_no` NULL on ~312 rows** of the PCIC10 export
   (`Panicle Initiation/Booting`, `Harvested`, `Vegetative/Tillering`) — by design,
   pending PCIC's days-per-stage table. See `HANDOFF_2026-10-09_CSV_CROP_STAGE.md` §4.
+
+## 9. Public deployment (Tailscale Funnel)
+
+PLDT puts this PC behind CGNAT (router WAN IP `100.83.x.x`), so router port
+forwarding cannot work. Tailscale Funnel gives a public HTTPS address,
+`https://<pc-name>.<tailnet>.ts.net`, through an outbound connection instead.
+
+```
+Browser → https://<pc-name>.<tailnet>.ts.net  (Funnel, :443)
+        → Caddy 127.0.0.1:8090  (deploy/Caddyfile)
+            ├─ /api/*                          → uvicorn 127.0.0.1:8000
+            ├─ /geoserver-proxy/agrisuregis/*  → GeoServer 127.0.0.1:8080/geoserver/agrisuregis/*
+            └─ everything else                 → frontend/dist (SPA fallback to index.html)
+```
+
+One origin, so no CORS change is needed. Not exposed: FastAPI `/docs` and
+`/openapi.json`, the GeoServer admin UI, PostgreSQL. Ports 8000/8080/5432 stay
+off the public internet (Funnel only reaches 8090).
+
+**One-time setup**
+
+1. Install Caddy: `winget install CaddyServer.Caddy` (new terminal afterwards so `caddy` is on PATH).
+2. Tailnet owner, in the Tailscale admin console: enable HTTPS certificates
+   (DNS page) and grant this PC the `funnel` node attribute (Access controls).
+3. Before going public: `JWT_SECRET_KEY` in `backend/.env` must be a strong
+   random value, and the seeded test accounts must have their default
+   passwords changed or be disabled — anyone on the internet sees the login page.
+
+**Build the frontend** (again after every frontend change), from `frontend\`:
+
+```powershell
+npm run build
+```
+
+Uses `frontend/.env.production` (`VITE_API_BASE_URL` empty → same-origin `/api`
+calls). `npm run dev` ignores that file, so development is unchanged.
+
+**Start** (every reboot): PostgreSQL service, then `start-servers.bat prod`
+(GeoServer, backend without `--reload`, Caddy). Check `http://127.0.0.1:8090`
+locally first. Plain `start-servers.bat` (dev) starts Caddy too -- it serves the
+last build, not live source (Vite on :5173 is still where you develop). Caddy is
+skipped if 8090 is already listening.
+
+**Publish** (once — `--bg` keeps it on across reboots):
+
+```powershell
+tailscale funnel --bg 8090
+```
+
+`tailscale funnel status` shows the public URL; `tailscale funnel --https=443 off`
+stops public access. The site is only up while this PC is on and awake —
+turn off Windows sleep while hosting.
