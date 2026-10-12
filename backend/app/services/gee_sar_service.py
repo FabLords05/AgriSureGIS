@@ -3,10 +3,15 @@ Google Earth Engine (GEE) Sentinel-1 layer for the "Verify Farm Planted" use
 case -- Phase 1 of docs/SAR_ISPLANTED_METHOD.md (2026-10-12).
 
 Phase 1 is visual only: a pre-event VV/VH-ratio colour layer clipped to the
-"Affected Only" farm polygons, which the GIS Specialist reads by eye (green =
+"Affected by" typhoon's farm polygons, which the GIS Specialist reads by eye (green =
 canopy closed = planted; tan/brown = sparse/bare/flooded) and then records a
-verdict via app/api/sar.py. The per-farm 5-condition isPlanted rule and the
-area-planted percentage (method doc §3, §3.2) are Phase 2 and are NOT here.
+verdict via app/api/sar.py.
+
+Phase 2 (2026-10-12): fetch_backscatter_series() pulls the per-farm
+polygon-mean VV/VH time series the automatic planted check classifies
+(sar_planted_classifier.py). app/api/sar.py stores what it returns in
+tbl_sar_observation so the same farm and dates are never fetched twice.
+The area-planted percentage (method doc §3.2) is still not here.
 
 Same "no-op unless configured" philosophy as email_alert_service.py's SMTP:
 without GEE_SERVICE_ACCOUNT_KEY_PATH in backend/.env nothing here touches
@@ -45,6 +50,11 @@ FOCAL_MEDIAN_RADIUS_M = 30
 RATIO_MIN_DB = 4.5
 RATIO_MAX_DB = 7.5
 RATIO_PALETTE = ["14532d", "22c55e", "d2b48c", "7c4a1e"]  # deep green -> green -> tan -> brown
+
+# Upper bound on rows (farm x scene) one getInfo() pulls back in
+# fetch_backscatter_series -- keeps each Earth Engine response well inside
+# its payload limits; farms are chunked to fit.
+MAX_ROWS_PER_REQUEST = 4000
 
 # getMapId tile URLs expire after a while; reuse one for an hour so reopening
 # the panel doesn't re-run (and re-bill) the same composite.
@@ -166,6 +176,80 @@ def pick_relative_orbit(histogram: dict) -> int | None:
     return min(counts, key=lambda orbit: (-counts[orbit], orbit))
 
 
+def _descending_scenes(ee, region, start: date, end: date):
+    """Descending IW VV+VH Sentinel-1 GRD scenes over `region`, [start, end)."""
+    return (
+        ee.ImageCollection("COPERNICUS/S1_GRD")
+        .filterBounds(region)
+        .filterDate(start.isoformat(), end.isoformat())
+        .filter(ee.Filter.eq("instrumentMode", "IW"))
+        .filter(ee.Filter.eq("orbitProperties_pass", "DESCENDING"))
+        .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VV"))
+        .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH"))
+    )
+
+
+def fetch_backscatter_series(farms: list[tuple[int, dict]], start: date, end: date) -> dict[int, list[dict]]:
+    """
+    Polygon-mean VV and VH (dB) per farm per scene, for the planted check
+    (sar_planted_classifier.py). `farms` is (farm_id, GeoJSON); [start, end)
+    like filterDate. Every descending relative orbit is kept -- the
+    classifier picks one orbit per farm, so a farm outside one orbit's
+    footprint is still covered by its neighbour.
+
+    Each polygon is buffered inward INWARD_BUFFER_M and each scene gets the
+    same FOCAL_MEDIAN_RADIUS_M speckle filter as the visual layer. Scenes
+    where a polygon has no valid pixel are dropped, not zero-filled.
+
+    Returns {farm_id: [{scene_date, relative_orbit, vv_db, vh_db}]}; a farm
+    with no scenes is absent. Farms go to Earth Engine in chunks sized so
+    no single getInfo() returns more than MAX_ROWS_PER_REQUEST rows.
+    Raises GeeNotConfiguredError.
+    """
+    ee = _ensure_initialized()
+    out: dict[int, list[dict]] = {}
+    if not farms:
+        return out
+
+    region = ee.FeatureCollection([ee.Feature(ee.Geometry(g)) for _, g in farms]).geometry().bounds()
+    scene_count = _descending_scenes(ee, region, start, end).size().getInfo()
+    if scene_count == 0:
+        return out
+    chunk_size = max(1, MAX_ROWS_PER_REQUEST // scene_count)
+
+    for i in range(0, len(farms), chunk_size):
+        chunk = farms[i:i + chunk_size]
+        polygons = ee.FeatureCollection([
+            ee.Feature(ee.Geometry(g), {"farm_id": farm_id}).buffer(-INWARD_BUFFER_M)
+            for farm_id, g in chunk
+        ])
+        scenes = _descending_scenes(ee, polygons.geometry().bounds(), start, end)
+
+        def per_scene(img, polygons=polygons):
+            smoothed = img.select(["VV", "VH"]).focal_median(FOCAL_MEDIAN_RADIUS_M, "circle", "meters")
+            stats = smoothed.reduceRegions(collection=polygons, reducer=ee.Reducer.mean(), scale=10)
+            return stats.map(lambda f: f.set({
+                "t": img.get("system:time_start"),
+                "orbit": img.get("relativeOrbitNumber_start"),
+            }))
+
+        rows = (
+            scenes.map(per_scene).flatten()
+            .filter(ee.Filter.notNull(["VV", "VH"]))
+            .reduceColumns(ee.Reducer.toList(5), ["farm_id", "t", "orbit", "VV", "VH"])
+            .get("list")
+            .getInfo()
+        )
+        for farm_id, t, orbit, vv, vh in rows or []:
+            out.setdefault(int(farm_id), []).append({
+                "scene_date": datetime.fromtimestamp(t / 1000, tz=timezone.utc).date(),
+                "relative_orbit": int(orbit),
+                "vv_db": float(vv),
+                "vh_db": float(vh),
+            })
+    return out
+
+
 def build_planted_layer(cache_key: tuple, farm_geojsons: list[dict], event_date: date) -> dict:
     """
     Pre-event Sentinel-1 VV/VH-ratio composite clipped to the given farm
@@ -184,15 +268,7 @@ def build_planted_layer(cache_key: tuple, farm_geojsons: list[dict], event_date:
     farms = ee.FeatureCollection([ee.Feature(ee.Geometry(g)) for g in farm_geojsons])
     region = farms.geometry().bounds()
 
-    scenes = (
-        ee.ImageCollection("COPERNICUS/S1_GRD")
-        .filterBounds(region)
-        .filterDate(start.isoformat(), end.isoformat())
-        .filter(ee.Filter.eq("instrumentMode", "IW"))
-        .filter(ee.Filter.eq("orbitProperties_pass", "DESCENDING"))
-        .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VV"))
-        .filter(ee.Filter.listContains("transmitterReceiverPolarisation", "VH"))
-    )
+    scenes = _descending_scenes(ee, region, start, end)
 
     orbit = pick_relative_orbit(scenes.aggregate_histogram("relativeOrbitNumber_start").getInfo())
     if orbit is None:

@@ -78,6 +78,15 @@ rice planting window; Villano et al. 2019 on TP/DS separability, both
 PhilGEOS x GeoAdvances 2019, IRRI/PhilRice). No GEE code exists anywhere in
 the repo.
 
+> **Update 2026-10-12 (later the same day): out of date.** Both phases are
+> now built:
+> - Phase 1: the visual VV/VH layer.
+> - Phase 2 (branch `cristian/backend/sar-planted-check`): the automatic
+>   GREEN planted / YELLOW field-verify check, with a Sentinel-1 cache.
+>
+> See the status block at the top of `docs/SAR_ISPLANTED_METHOD.md` and
+> `.claude/FUNCTION_CHANGES.md`.
+
 ## 5. Blocker to resolve first on the new machine
 
 > **Update 2026-10-12 (second machine):** resolved here — `backend/.env`

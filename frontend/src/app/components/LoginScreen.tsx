@@ -46,11 +46,7 @@ function RegistrationPanel({ onBack }: { onBack: () => void }) {
     setError(null);
 
     if (!form.fullName.trim() || !form.email.trim() || !form.employeeId.trim()) {
-      setError("Full name, institutional email, and employee ID are required.");
-      return;
-    }
-    if (!form.email.toLowerCase().endsWith("@pcic.gov.ph")) {
-      setError("Registration is restricted to @pcic.gov.ph institutional email addresses.");
+      setError("Full name, email, and employee ID are required.");
       return;
     }
     if (form.password.length < 8) {
@@ -190,12 +186,12 @@ function RegistrationPanel({ onBack }: { onBack: () => void }) {
 
           {/* Email */}
           <div>
-            <label className="block text-[11px] font-semibold text-gray-600 mb-1">Institutional Email</label>
+            <label className="block text-[11px] font-semibold text-gray-600 mb-1">Email</label>
             <input
               type="email"
               value={form.email}
               onChange={e => update("email", e.target.value)}
-              placeholder="yourname@pcic.gov.ph"
+              placeholder="yourname@gmail.com"
               className="w-full border border-gray-200 rounded-xl px-3.5 py-2 text-[11px] focus:outline-none focus:border-[#166534] focus:ring-1 focus:ring-[#166534]/30 transition-all placeholder:text-gray-300"
             />
           </div>

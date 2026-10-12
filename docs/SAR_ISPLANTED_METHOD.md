@@ -1,18 +1,45 @@
 # SAR `isPlanted` Detection Method
 
-**Status:** Phase 1 implemented (2026-10-12) — the §7 primary VV/VH colour
-render over the affected polygons, plus a recorded Specialist verdict
-(`tbl_planted_verification`; never gates a payout). Code:
-`backend/app/services/gee_sar_service.py`, `backend/app/api/sar.py`,
-`frontend/src/app/components/SarAnalysisPanel.tsx`. **Not yet implemented
-(Phase 2):** the §3 rule, the §3.2 percentage, the §7 sparkline, and the §6
-calibration.
+**Status:**
+- **Phase 1 (2026-10-12):** the §7 primary VV/VH colour render over the
+  affected polygons. It is now an optional overlay. It uses a 24-day
+  pre-event median from a single orbit, so it is weaker evidence than §3.
+- **Phase 2 (2026-10-12, Cristian):** the §3 rule runs automatically on
+  every affected farm. Each farm comes back **GREEN `planted`** (all five
+  conditions pass, so no field visit) or **YELLOW `field_verify`**
+  (anything else, with the first failed condition as the reason). SAR never
+  declares "not planted" on its own. The per-farm Sentinel-1 series is
+  cached in `tbl_sar_observation`, so Earth Engine is queried once per farm
+  and date range. The manual Planted / Not planted buttons were removed from
+  the UI, and yellow farms go to field verification outside the app.
+- **Code:** `backend/app/services/sar_planted_classifier.py` (rule),
+  `backend/app/services/gee_sar_service.py` (Earth Engine),
+  `backend/app/api/sar.py` (`POST /sar/check`, cache),
+  `frontend/src/app/components/SarAnalysisPanel.tsx`.
+- **Not yet implemented:** the §3.2 percentage, the §7 sparkline, and the §6
+  calibration.
 
-Phase 1 deviations from this spec, stated plainly: the composite is the
-temporal median of the pre-event scenes in the 24 days before the typhoon's
-first bulletin (≈ two acquisitions), not the 150-day series §3 needs; and a
-single relative orbit is chosen per request across all affected farms, so
-farms outside that orbit's footprint get no colour.
+Implementation choices for Phase 2:
+- **Per typhoon, not per bulletin** (Cristian, 2026-10-12). The AOI is every
+  insured farm in a municipality under TCWS signal 2+ in **any** of the
+  typhoon's bulletins. It is picked in Spatial Analysis through an
+  "Affected by" typhoon dropdown, which replaced the bulletin-scoped
+  "Affected Only" toggle.
+- **One orbit per farm, not per request** (§5.1). Every descending relative
+  orbit is fetched, and each farm uses the orbit with the most scenes over
+  it.
+- **Farms dropped before Earth Engine is called.** A farm with nothing left
+  after the 20 m inward buffer is yellow `too_small` (§5.2). A farm with no
+  GPX polygon is yellow `no_boundary`.
+- **C4 is implemented as [A]'s SoS agreement.** VV's minimum must fall
+  within 24 days (two acquisitions) of VH's `t0`. It is not "VV rises",
+  because [B] shows field-mean VV nearly flat (~−10 dB) across the season.
+- **C5's Region X window** is [A]'s Northern Mindanao start months (June for
+  Semester 2, September for Semester 1) plus their planting durations (76
+  and 122 days), padded each side by [A]'s 23-day SoS deviation.
+- **A farm whose flood minimum is under 30 days before the typhoon** has no
+  biomass-peak scene yet. It is yellow `crop_too_young`, not scored as
+  unplanted.
 **Purpose:** Defines how AgriSureGIS determines whether an insured farm polygon
 carried a standing rice crop at the time of a typhoon, using Sentinel-1 SAR via
 Google Earth Engine.
@@ -87,10 +114,14 @@ Two consequences drive the design:
   season. This is far tighter than the 6–10 dB often quoted for C-band
   vegetation generally, and it rules out a simple single-date VH threshold as
   a reliable discriminator.
-- **The VV/VH ratio is the stronger signal.** Per [B] Table 4 (Mann-Whitney U),
-  the ratio shows significant differences at *every* stage except harvest, and
-  it drops ~1.8 dB at canopy closure. A ratio also partially cancels
-  incidence-angle and calibration differences between passes.
+- **The VV/VH ratio carries the canopy-closure signal.** It drops ~1.8 dB
+  from establishment to heading in [B]'s Fig. 3, and a ratio also partially
+  cancels incidence-angle and calibration differences between passes.
+  (Correction, 2026-10-12: an earlier revision cited [B] Table 4 for this.
+  That table's Mann-Whitney U tests compare **transplanted vs. direct-seeded**
+  rice at each stage, not one growth stage against another, so it says
+  nothing about planted vs. unplanted. [B] sampled no unplanted fields at
+  all, which is why no threshold here is a published cut-off.)
 
 ## 3. Definition of `isPlanted`
 
@@ -105,11 +136,14 @@ Let tp  = argmax(VH) over [t0 + 30d, t0 + 90d]    # biomass peak
 C1  Flood minimum found    t0 exists within W, and t0 is not at the window edge
 C2  Biomass rise           VH[tp] − VH[t0]            >= RISE_VH_DB     (~2.0)
 C3  Canopy closure         (VV/VH)[t0] − (VV/VH)[tp]  >= DROP_RATIO_DB  (~1.5)
-C4  Dual-pol agreement     VV also rises from t0 to tp                  [A] cond. 3
+C4  Dual-pol agreement     argmin(VV) within 24d of t0                  [A] cond. 3
 C5  Timing plausibility    t0 within the Region X planting window (§4)
                            AND typhoon_date ∈ [t0, t0 + 120d]
 
 isPlanted = C1 ∧ C2 ∧ C3 ∧ C4 ∧ C5
+
+GREEN  planted        isPlanted is true -- no field visit
+YELLOW field_verify   anything else, with the first failed condition as the reason
 ```
 
 `120d` in C5 comes from [B]: Philippine varieties have 100–120 day maturity
@@ -270,15 +304,17 @@ is shown alongside, not instead.
 - The pre-event scene requirement in §3 is not optional. A post-event image
   conflates "never planted" with "flattened by the storm" — both can depress
   VH — which would invert the meaning of the check.
-- No automated approve/reject. The system computes, renders and flags; the GIS
-  Specialist decides.
+- No automated approve/reject. The system computes, renders and flags. Green
+  only spares a field visit; yellow sends the farm to field verification. SAR
+  alone never rules a farm unplanted.
 - `isPlanted` does not feed the indemnity formula. `I = (AC / 1000) * IF`
   is unchanged.
 
 ## 9. Open items
 
 - [ ] Verify current Sentinel-1 revisit over Region X (§5.1).
-- [ ] Select the relative orbit covering Claveria and Talakag.
+- [x] ~~Select the relative orbit covering Claveria and Talakag.~~ Done per
+      farm automatically in Phase 2: each farm uses its best-covered orbit.
 - [ ] Run the calibration in §6 and record measured thresholds.
 - [ ] Confirm GEE service account `agrisure-ee@webgis-pcic.iam.gserviceaccount.com`
       quota against expected per-typhoon polygon counts.
