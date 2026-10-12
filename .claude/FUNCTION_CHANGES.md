@@ -208,6 +208,50 @@ unchanged. The only behaviour removed is the demo Auto-fill shortcut.
 
 ---
 
+## [2026-10-12] - Self-naming CSV export filenames (Sprint 3)
+
+Both CSV exports used a fixed filename (`pabs_indemnity_export.csv`,
+`pcic_payout_export.csv`), so every download landed as the same name and a
+second one became `... (1).csv`. A saved file now says which typhoon it covers
+and when it was pulled: `{TYPHOON}_{YYYYMMDD-HHMM}_{Purpose}.csv`, e.g.
+`PEPITO_20261012-1435_Final_Indemnity_Payout.csv`. Content is unchanged — same
+columns, same rows, same export-locking behaviour.
+
+### 1. `backend/app/api/assessments.py`
+* **New `_export_filename(typhoon_names, purpose)`** builds the name. The
+  timestamp is `Asia/Manila` (`EXPORT_TIMEZONE`), since a UTC server clock would
+  stamp an early-morning PHT export with the previous day's date, and the
+  compact `YYYYMMDD-HHMM` form avoids the slashes/colons Windows rejects while
+  still sorting chronologically in Explorer. The typhoon token is the name
+  uppercased with non-alphanumerics collapsed to `_`; an export spanning several
+  typhoons gets `MULTI-<n>-TYPHOONS` instead of one typhoon's name, because
+  `/export-pabs` combines every typhoon (see `_build_pabs_rows`) and a combined
+  file named after a single typhoon would be a misfiled PCIC submission. No
+  typhoon at all yields `NO-TYPHOON`.
+* **New `_typhoon_names_for_summaries(summary_ids, db)`** returns the distinct
+  typhoon names behind a set of exposure summaries — what the PCIC detail export
+  needs, since its rows don't already carry the name.
+* **`export_assessments_csv`** and **`export_assessments_pabs_csv`** now build
+  their `Content-Disposition` from `_export_filename` (purposes `PCIC_Payout`
+  and `Final_Indemnity_Payout`), with the filename quoted. The PABS endpoint
+  reads the names straight off the rows it already built.
+
+### 2. `backend/app/main.py`
+* `CORSMiddleware` gained **`expose_headers=["Content-Disposition"]`**. It is not
+  a CORS-safelisted response header, so without this the browser hides it from
+  the frontend and every file would still save under the fallback name.
+
+### 3. `frontend/src/lib/api.ts`
+* **New `filenameFromResponse(response, fallback)`** parses the filename out of
+  `Content-Disposition`, falling back to the caller's name when the header is
+  absent.
+* **`downloadCsv`** uses it for `anchor.download`; its second parameter is
+  renamed `fallbackFilename` to reflect that the server's name now wins. The
+  hardcoded names in `downloadAssessmentsCsv`/`downloadAssessmentsPabsCsv` are
+  kept as fallbacks.
+
+---
+
 ## [2026-10-12] - Installable PWA + post-login install prompt (Sprint 3)
 
 The app can now be installed from the browser as **AgriSureGIS**: its own

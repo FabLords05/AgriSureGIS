@@ -68,6 +68,11 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    # CSV exports name themselves after their typhoon via Content-Disposition
+    # (see app/api/assessments.py's _export_filename). It isn't a CORS-safelisted
+    # response header, so without this the browser hides it from the frontend's
+    # download helper and every file saves under the fallback name (2026-10-12).
+    expose_headers=["Content-Disposition"],
 )
 
 

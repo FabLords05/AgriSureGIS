@@ -1,4 +1,8 @@
 import io
+import re
+from collections.abc import Iterable
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -260,6 +264,51 @@ def get_assessments_summary(db: Session = Depends(get_db)):
     }
 
 
+# Export filenames are built per download rather than fixed, so a saved file says
+# which typhoon it covers and when it was pulled:
+# '{TYPHOON}_{YYYYMMDD-HHMM}_{Purpose}.csv' (2026-10-12, per Fabio). The
+# timestamp is Asia/Manila -- a UTC server clock would stamp an early-morning
+# PHT export with the previous day's date. The compact form also avoids the
+# slashes and colons Windows rejects in filenames, and sorts chronologically in
+# Explorer, which MM-DD-YYYY does not.
+EXPORT_TIMEZONE = ZoneInfo("Asia/Manila")
+
+
+def _export_filename(typhoon_names: Iterable[str | None], purpose: str) -> str:
+    """
+    Builds '{TOKEN}_{YYYYMMDD-HHMM}_{purpose}.csv'. TOKEN is the typhoon's name
+    when the export covers exactly one; an export spanning several gets
+    'MULTI-<n>-TYPHOONS' instead, since naming a combined file after a single
+    typhoon would be a misfiled submission to PCIC. Names are uppercased (PCIC
+    writes them that way) and stripped of anything outside A-Z/0-9, so a name
+    carrying a space or parenthesis can't produce an unusable filename.
+    """
+    distinct = sorted({name for name in typhoon_names if name})
+    if len(distinct) == 1:
+        token = re.sub(r"[^A-Z0-9]+", "_", distinct[0].upper()).strip("_") or "NO-TYPHOON"
+    elif distinct:
+        token = f"MULTI-{len(distinct)}-TYPHOONS"
+    else:
+        token = "NO-TYPHOON"
+    return f"{token}_{datetime.now(EXPORT_TIMEZONE).strftime('%Y%m%d-%H%M')}_{purpose}.csv"
+
+
+def _typhoon_names_for_summaries(summary_ids: set[int], db: Session) -> list[str]:
+    """Distinct typhoon names behind a set of exposure summaries -- what
+    _export_filename needs from an export whose rows don't already carry the
+    name."""
+    if not summary_ids:
+        return []
+    return [
+        name
+        for (name,) in db.query(Typhoon.name)
+        .join(AreaExposureSummary, AreaExposureSummary.typhoon_id == Typhoon.typhoon_id)
+        .filter(AreaExposureSummary.summary_id.in_(summary_ids))
+        .distinct()
+        .all()
+    ]
+
+
 @router.get("/export")
 def export_assessments_csv(
     typhoon_id: int | None = Query(default=None),
@@ -327,10 +376,15 @@ def export_assessments_csv(
     dataframe.to_csv(buffer, index=False)
     buffer.seek(0)
 
+    filename = _export_filename(
+        _typhoon_names_for_summaries({a.summary_id for a in assessments if a.summary_id}, db),
+        "PCIC_Payout",
+    )
+
     return StreamingResponse(
         iter([buffer.getvalue()]),
         media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=pcic_payout_export.csv"},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -510,8 +564,12 @@ def export_assessments_pabs_csv(db: Session = Depends(get_db)):
     dataframe.to_csv(buffer, index=False, float_format="%.2f")
     buffer.seek(0)
 
+    filename = _export_filename(
+        (row["TYPHOON_NAME"] for row in rows), "Final_Indemnity_Payout"
+    )
+
     return StreamingResponse(
         iter([buffer.getvalue()]),
         media_type="text/csv",
-        headers={"Content-Disposition": "attachment; filename=pabs_indemnity_export.csv"},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
