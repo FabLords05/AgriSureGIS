@@ -4,6 +4,40 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-12] - PABS REMARKS Follow PCIC's Per-Signal Remark Tables (Sprint 3)
+
+Per Cristian, from `USTP CAPSTONE/Remarks/Signal no2.png`, `no3.png` and
+`no4.png` ("Remarks on the Effect of Typhoon-Induced Strong Winds (Rice)").
+REMARKS is no longer one fixed sentence on every row.
+
+### 1. File: `backend/app/api/assessments.py`
+* `PABS_REMARKS` is replaced by **`PABS_REMARKS_BY_MATRIX`**: 27 remarks
+  keyed `(wind_signal_tcws, crop_stage_no, exposure_hours)`, the same key as
+  `tbl_recsap_matrix`. The tables' rows match the seeded matrix's 6/12/24h
+  yield-loss cells exactly; for example, signal 2 Booting is 10/15/20%.
+  * The text is copied as PCIC wrote it, including their inconsistent final
+    periods.
+  * The bottom edge of `Signal no2.png` cuts off the signal-2 24h Booting and
+    Maturity remarks. Their ending ("reduction") follows the visible signal-2
+    24h Flowering remark.
+* New **`_pabs_remarks()`** looks up the assessment's RECSAP matrix row.
+  Signal 5 (>184 kph) uses the signal-4 table, whose header covers "118-184 KPH
+  AND MORE THAN 184 KPH". It returns `None` (a blank cell) when there is no
+  matrix row or no matching remark.
+* `_build_pabs_rows()`: `REMARKS` now comes from `_pabs_remarks(a)`.
+
+### 2. Files: `frontend/src/lib/api.ts`, `frontend/src/app/components/AssessmentModule.tsx`
+* `PabsAssessmentRow.REMARKS` is now `string | null`.
+* The blue explanatory notice at the top of "Review CSV Before Downloading"
+  is removed (per Cristian). The modal goes straight from its title bar to the
+  table. `AlertCircle` stays imported because it is still used elsewhere in
+  the module.
+
+### 3. File: `.claude/API_CONTRACT.md`
+* REMARKS description updated.
+
+---
+
 ## [2026-10-12] - Farm ID Shows PCIC's FARMID Everywhere; Farmer Names Left-Aligned (Sprint 3)
 
 Per Fabio: every on-screen Farm ID now follows the PABS-given FARMID

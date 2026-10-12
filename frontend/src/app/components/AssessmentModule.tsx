@@ -77,13 +77,6 @@ function CSVPreviewModal({ rows, onClose }: { rows: PabsAssessmentRow[]; onClose
           <button onClick={onClose} className="w-7 h-7 rounded flex items-center justify-center hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">✕</button>
         </div>
 
-        <div className="flex items-center gap-2 px-5 py-2 bg-blue-50 dark:bg-blue-950/30 border-b border-blue-100 shrink-0">
-          <AlertCircle size={11} className="text-blue-600 shrink-0" />
-          <p className="text-[10px] text-blue-700 dark:text-blue-300">
-            These {rows.length} records are exactly what the downloaded CSV will contain. P is PCIC's fixed 100% prevalence (1.0), S is the estimated yield loss as a fraction (30% = 0.3), and Remarks is PCIC's fixed remark. WIND_VELOCITY is the typhoon's maximum sustained winds (km/h) from its PAGASA bulletins. IRID is blank (no source yet).
-          </p>
-        </div>
-
         <div className="overflow-auto flex-1 px-1">
           <table className="w-full text-[10px]">
             <thead className="sticky top-0 z-10">

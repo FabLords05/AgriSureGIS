@@ -679,7 +679,8 @@ export interface PabsAssessmentRow {
   FINAL_INDEMNITY_PAYMENT: number | null;
   P: string;
   S: string | null;
-  REMARKS: string;
+  // PCIC's remark for the RECSAP cell; null when there is none.
+  REMARKS: string | null;
   municipality: string | null;
   province: string | null;
   // TCWS signal number (not exported) -- drives the on-screen Wind column.
