@@ -4,6 +4,92 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-12] - Installable PWA + post-login install prompt (Sprint 3)
+
+The app can now be installed from the browser as **AgriSureGIS**: its own
+window and a home-screen/desktop icon. It is install-only. The
+service worker caches nothing, because `.claude/Initial Documentations.md`
+rules out mobile-offline capability, and cached `/api`/GeoServer responses
+would show stale data.
+
+### 1. New file: `frontend/src/lib/pwaInstall.ts`
+* **`initPwaInstall()`** captures Chrome/Edge's one-time `beforeinstallprompt`
+  event at startup (it fires before login) and registers `/sw.js` in
+  production builds only.
+* **`promptInstall()`**, **`canPromptInstall()`** and **`subscribePwaInstall()`**
+  hand the captured event to the UI. **`isStandalone()`** detects the installed
+  app and **`isIos()`** detects iPhone/iPad (including iPadOS reporting as Mac).
+
+### 2. New file: `frontend/src/app/components/InstallAppPrompt.tsx`
+* A soft gate: an AlertDialog (same pattern as `LoggedOutNotice`) shown after
+  login whenever the app runs in a browser tab. It has an **Install** button
+  where the browser supports it, Share → Add to Home Screen steps on iOS, and
+  browser-menu steps elsewhere. "Continue in browser" hides it for that tab
+  session, so it returns on the next login. It is not a hard block, because
+  Firefox cannot install PWAs and Chrome withholds its prompt after a dismissal.
+
+### 3. Modified files
+* **`frontend/src/main.tsx`** calls `initPwaInstall()` before render.
+* **`frontend/src/app/App.tsx`** renders `<InstallAppPrompt />` in the
+  logged-in branch only.
+* **`frontend/index.html`**: the title and description replace the Figma
+  placeholders ("Desktop App Development"). It adds the manifest link, theme
+  colour, favicon, apple-touch-icon and iOS web-app meta tags.
+* **`deploy/Caddyfile`** sends `Cache-Control: no-cache` on every frontend
+  path except Vite's content-hashed `/assets/*`. That covers `index.html` (and
+  SPA routes falling back to it), `sw.js` and the manifest, so a redeploy
+  reaches the installed app on its next launch, with no reinstall.
+
+### 4. New static files (`frontend/public/`)
+* **`manifest.webmanifest`**: name/short_name AgriSureGIS, standalone, theme `#166534`.
+* **`sw.js`**: only install/activate handlers. No fetch handler, no caching.
+* **`icons/`** holds `icon-192.png`, `icon-512.png`, `icon-maskable-512.png`
+  (white background, art inside the 80% safe zone) and `apple-touch-icon.png`
+  (180px, white background). They are generated from `docs/AgriSureGIS LOGO.png`
+  (the 2000px source, kept so the icons can be regenerated).
+
+---
+
+## [2026-10-12] - One-click ingestion demo reset (Sprint 3)
+
+Demo support only, no app code changed. Resets the DB to a "half already
+ingested, half still to upload" starting state from the client's real Typhoon
+Tino export (`PCIC10 ... AFFECTED BY TY.csv` + `PCICX GPX_EXISTING IC ...
+TINO_11-05-2025.gpkg`), so the CSV → GeoPackage ingestion can be shown live
+against a database that already holds data.
+
+### 1. New file: `backend/prepare_ingestion_demo.py`
+* **`split_source_files()`** writes both files' halves to
+  `USTP CAPSTONE/DEMO/{already_ingested,to_ingest}/`, keeping the original file
+  names (gitignored with the rest of that folder, since it holds real farmer
+  names). Result: 557/557 CSV rows, 556/557 GPKG features. The split is
+  **per farmer**, not per row. A **`_UnionFind`** links FARMERSID, FARMID and
+  normalized FARMER NAME across both files. This is needed because
+  `GpxFarmerMatcherService` falls back to "farmer's only farm" and to name
+  matches, so a farmer split across halves could have a `to_ingest` polygon
+  overwrite an `already_ingested` farm. CSV rows are written back
+  byte-identical (same encoding, no added BOM). Each GPKG half is a copy of
+  the source with the other half's features deleted. The rtree and
+  feature-count triggers stay consistent, and the layer extent is recomputed.
+* **`clear_farmer_data()`** runs `TRUNCATE ... RESTART IDENTITY CASCADE` on
+  `tbl_planted_verification`, `tbl_insurance_usage`, `tbl_risk_assessment`,
+  `tbl_insurance_records`, `tbl_farms`, `tbl_farmers_profile` and
+  `tbl_area_exposure_summary`, then refreshes `mv_farm_latest_insurance` and
+  the farms cache. Users, boundaries, matrices, crop-stage mapping, typhoons,
+  bulletins, parser settings and the activity log are kept.
+* **`ingest_csv()`** / **`ingest_gpkg()`** pre-ingest the `already_ingested`
+  half through the same code as the upload endpoints:
+  `upload._run_csv_ingestion()` inline, and `upload.upload_gpkg()` with the
+  file wrapped in an `UploadFile`.
+* There is a confirmation prompt (type `YES`), plus `--yes` and `--split-only`
+  flags.
+
+### 2. New file: `reset-demo-data.bat`
+* A one-click wrapper next to `start-servers.bat`. It runs the script with
+  `backend\.venv\Scripts\python.exe` and passes its arguments through.
+
+---
+
 ## [2026-10-12] - Verify Farm Planted: SAR via Google Earth Engine, Phase 1 (Sprint 3, branch: develop)
 
 The Use Case Diagram's **Verify Farm Planted** (an `<<include>>` of Conduct

@@ -33,6 +33,13 @@
 	}
 
 	handle {
+		# Revalidate everything except Vite's content-hashed /assets/* on every
+		# load, so a redeploy reaches the installed PWA on its next launch.
+		# Matched on the request path, not the file served: header runs before
+		# try_files, so SPA routes falling back to index.html are covered too.
+		# Unchanged files still come back as a cheap 304.
+		@revalidate not path /assets/*
+		header @revalidate Cache-Control "no-cache"
 		root * frontend/dist
 		try_files {path} /index.html
 		file_server
