@@ -3,6 +3,7 @@ import { Toaster, toast } from "sonner";
 import { AlertCircle, X } from "lucide-react";
 import { LoginScreen } from "./components/LoginScreen";
 import { LoggedOutNotice, LogoutReason } from "./components/LoggedOutNotice";
+import { InstallAppPrompt } from "./components/InstallAppPrompt";
 import { Header, ModuleId } from "./components/Header";
 import { MonitoringModule } from "./components/MonitoringModule";
 import { SpatialAnalysisModule } from "./components/SpatialAnalysisModule";
@@ -615,6 +616,9 @@ export default function App() {
         {showUploadDetails && uploadFailureDetails && (
           <UploadFailuresModal failures={uploadFailureDetails} onClose={() => setShowUploadDetails(false)} />
         )}
+        {/* Post-login only -- never on LoginScreen, so the first visit is
+            always a plain browser login (see InstallAppPrompt.tsx). */}
+        <InstallAppPrompt />
         <Toaster position="bottom-right" richColors />
       </div>
     </div>

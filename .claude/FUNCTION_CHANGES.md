@@ -4,6 +4,52 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-12] - Installable PWA + post-login install prompt (Sprint 3)
+
+The app can now be installed from the browser as **AgriSureGIS**: its own
+window and a home-screen/desktop icon. It is install-only. The
+service worker caches nothing, because `.claude/Initial Documentations.md`
+rules out mobile-offline capability, and cached `/api`/GeoServer responses
+would show stale data.
+
+### 1. New file: `frontend/src/lib/pwaInstall.ts`
+* **`initPwaInstall()`** captures Chrome/Edge's one-time `beforeinstallprompt`
+  event at startup (it fires before login) and registers `/sw.js` in
+  production builds only.
+* **`promptInstall()`**, **`canPromptInstall()`** and **`subscribePwaInstall()`**
+  hand the captured event to the UI. **`isStandalone()`** detects the installed
+  app and **`isIos()`** detects iPhone/iPad (including iPadOS reporting as Mac).
+
+### 2. New file: `frontend/src/app/components/InstallAppPrompt.tsx`
+* A soft gate: an AlertDialog (same pattern as `LoggedOutNotice`) shown after
+  login whenever the app runs in a browser tab. It has an **Install** button
+  where the browser supports it, Share → Add to Home Screen steps on iOS, and
+  browser-menu steps elsewhere. "Continue in browser" hides it for that tab
+  session, so it returns on the next login. It is not a hard block, because
+  Firefox cannot install PWAs and Chrome withholds its prompt after a dismissal.
+
+### 3. Modified files
+* **`frontend/src/main.tsx`** calls `initPwaInstall()` before render.
+* **`frontend/src/app/App.tsx`** renders `<InstallAppPrompt />` in the
+  logged-in branch only.
+* **`frontend/index.html`**: the title and description replace the Figma
+  placeholders ("Desktop App Development"). It adds the manifest link, theme
+  colour, favicon, apple-touch-icon and iOS web-app meta tags.
+* **`deploy/Caddyfile`** sends `Cache-Control: no-cache` on every frontend
+  path except Vite's content-hashed `/assets/*`. That covers `index.html` (and
+  SPA routes falling back to it), `sw.js` and the manifest, so a redeploy
+  reaches the installed app on its next launch, with no reinstall.
+
+### 4. New static files (`frontend/public/`)
+* **`manifest.webmanifest`**: name/short_name AgriSureGIS, standalone, theme `#166534`.
+* **`sw.js`**: only install/activate handlers. No fetch handler, no caching.
+* **`icons/`** holds `icon-192.png`, `icon-512.png`, `icon-maskable-512.png`
+  (white background, art inside the 80% safe zone) and `apple-touch-icon.png`
+  (180px, white background). They are generated from `docs/AgriSureGIS LOGO.png`
+  (the 2000px source, kept so the icons can be regenerated).
+
+---
+
 ## [2026-10-12] - One-click ingestion demo reset (Sprint 3)
 
 Demo support only, no app code changed. Resets the DB to a "half already
