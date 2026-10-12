@@ -18,7 +18,7 @@ interface FarmRow extends Farm {
   assessment: Assessment | null;
 }
 
-type SortField = "farm_id" | "farmer_name" | "municipality" | "barangay" | "area_size";
+type SortField = "csv_farm_reference" | "farmer_name" | "municipality" | "barangay" | "area_size";
 type SortDir   = "asc" | "desc";
 
 // Map/records handle: a press that moves less than this before release is a
@@ -143,7 +143,7 @@ export function SpatialAnalysisModule({
   useEffect(() => {
     getUsedTyphoons().then(res => setUsedTyphoons(res.data)).catch(() => setUsedTyphoons([]));
   }, []);
-  const [sortField, setSortField] = useState<SortField>("farm_id");
+  const [sortField, setSortField] = useState<SortField>("csv_farm_reference");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [topPanelH, setTopPanelH] = useState(55);
   // Hide Farm Records (2026-10-12) by clicking the resize handle: the map
@@ -358,7 +358,8 @@ export function SpatialAnalysisModule({
         const vb = b[sortField] ?? "";
         const cmp = typeof va === "number" && typeof vb === "number"
           ? va - vb
-          : String(va).localeCompare(String(vb));
+          // numeric: PCIC FARMIDs are digit strings, so "993121" < "1347041".
+          : String(va).localeCompare(String(vb), undefined, { numeric: true });
         return sortDir === "asc" ? cmp : -cmp;
       }),
     [farmRows, filterMuni, filterFarmerId, filterTyphoonId, activeInsuranceOnly, sortField, sortDir]
@@ -720,7 +721,7 @@ export function SpatialAnalysisModule({
               <thead className="sticky top-0 z-10">
                 <tr className="bg-[#166534] text-white">
                   {[
-                    { label:"Farm ID",     field:"farm_id"     as SortField },
+                    { label:"Farm ID",     field:"csv_farm_reference" as SortField },
                     { label:"Farmer",      field:"farmer_name" as SortField },
                     { label:"Municipality",field:"municipality" as SortField },
                     { label:"Barangay",    field:"barangay"    as SortField },
@@ -731,7 +732,7 @@ export function SpatialAnalysisModule({
                       // Farm ID is pinned left (sticky) while scrolling
                       // horizontally; needs its own opaque bg + higher z so
                       // the other header cells slide underneath it.
-                      className={`px-2.5 py-2 text-left font-semibold cursor-pointer hover:bg-white/10 whitespace-nowrap ${col.field === "farm_id" ? "sticky left-0 z-20 bg-[#166534] shadow-[inset_-1px_0_0_rgba(255,255,255,0.15)]" : ""}`}
+                      className={`px-2.5 py-2 text-left font-semibold cursor-pointer hover:bg-white/10 whitespace-nowrap ${col.field === "csv_farm_reference" ? "sticky left-0 z-20 bg-[#166534] shadow-[inset_-1px_0_0_rgba(255,255,255,0.15)]" : ""}`}
                       onClick={() => handleSort(col.field)}
                     >
                       <span className={`flex items-center gap-1 ${col.field === "area_size" ? "justify-center" : ""}`}>
@@ -780,7 +781,7 @@ export function SpatialAnalysisModule({
                       f.farm_id === selectedFarmId
                         ? "bg-[color-mix(in_srgb,#166534_10%,var(--card))] shadow-[inset_2px_0_0_#166534,inset_-1px_0_0_var(--border)]"
                         : "bg-card group-hover:bg-[color-mix(in_srgb,var(--muted)_50%,var(--card))] shadow-[inset_-1px_0_0_var(--border)]"
-                    }`}>#{f.farm_id}</td>
+                    }`}>{f.csv_farm_reference ?? "—"}</td>
                     {/* `||` not `??` -- a farmer with no name on file can reach
                         the client as "" (tbl_farmers_profile.last_name/first_name
                         are NOT NULL, so ingestion can store blanks), and `??`

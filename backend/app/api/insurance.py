@@ -17,8 +17,12 @@ def get_insurance_summary(db: Session = Depends(get_db)):
     """
     Counts insurance policies currently within their effectivity/expiry window
     ("active" = today's date falls between effectivity_date and expiry_date,
-    inclusive) against the total policy count. Backs Monitoring's "Active
-    Insurance Policies" stat card.
+    inclusive) against the total policy count. Backs the Main Dashboard's
+    "Active Insurance" stat card.
+
+    2026-10-12 (per Fabio): a policy marked as used (is_used, set when an
+    assessment gives it a payout -- before any PABS export) no longer counts
+    as active, so only insurance that is in coverage AND still usable shows.
     """
     today = date.today()
     total = db.query(InsuranceRecord).count()
@@ -29,6 +33,7 @@ def get_insurance_summary(db: Session = Depends(get_db)):
             InsuranceRecord.expiry_date.isnot(None),
             InsuranceRecord.effectivity_date <= today,
             InsuranceRecord.expiry_date >= today,
+            InsuranceRecord.is_used.is_(False),
         )
         .count()
     )

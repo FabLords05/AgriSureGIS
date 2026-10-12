@@ -51,7 +51,7 @@
 * **GET `/api/assessments/export`**
   - **Description:** Download payout-ready PCIC-formatted CSV file.
 * **GET `/api/assessments/pabs-summary`** / **POST `/api/assessments/export-pabs`**
-  - **Description:** Combined PABS-format rows (JSON preview / CSV download; the POST also locks exported policies as used). Columns: `FARMER_NAME, FARMERID, FARMID, AREA, TYPHOON_NAME, PERIOD_OF_EXPOSURE, WIND_VELOCITY, DATE_FILED, DATE_OF_OCCURRENCE, P, S, AC, FINAL_INDEMNITY_PAYMENT, REMARKS`. No IRID (2026-10-12). `FINAL_INDEMNITY_PAYMENT` is blank until the revised payout calculation lands. `P` is always `"1.0"` (100% prevalence); `S` is the RECSAP estimated yield loss as a fraction (`"0.3"` = 30%); `REMARKS` is PCIC's fixed sentence. `WIND_VELOCITY` is the TCWS signal number.
+  - **Description:** Combined PABS-format rows (JSON preview / CSV download; the POST also locks exported policies as used). JSON row keys (PCIC's final order, 2026-10-12): `FARMER_NAME, FARMERID, FARMID, IRID, CIC_NO, AREA, TYPHOON_NAME, PERIOD_OF_EXPOSURE, WIND_VELOCITY, AC, FINAL_INDEMNITY_PAYMENT, P, S, REMARKS`. The CSV writes them under PCIC's exact "final output" headers: `FARMER NAME, FARMERSID, FARMID, IRID, CIC NO, AREA, TYPHOON_NAME, PERIOD_OF_EXPOSURE, WIND_VELOCITY, AC, FINAL_INDEMNITY_PAYMENT, P, S, REMARKS`. `FARMID` is PCIC's own farm ID (`csv_farm_reference`); the JSON also carries non-exported `crop_stage`. `IRID` is always blank (no source yet). `CIC_NO` is the insurance record's `policy_no`. `FINAL_INDEMNITY_PAYMENT` is the assessment's stored payout. `P` is always `"1.0"` (100% prevalence); `S` is the RECSAP estimated yield loss as a fraction (`"0.3"` = 30%); `REMARKS` is PCIC's fixed sentence. `WIND_VELOCITY` is the typhoon's highest bulletin `max_sustained_winds` (km/h, storm-wide). The JSON rows also carry `wind_signal` (TCWS signal number, not exported) for the on-screen table.
 
 ## 4b. Farms (Farm Records)
 * **GET `/api/farms/`** and **GET `/api/farms/geometry`**
@@ -74,6 +74,6 @@ Phase 1 of `docs/SAR_ISPLANTED_METHOD.md`: a visual layer plus the GIS Specialis
 * **DELETE `/api/sar/verifications/{farm_id}?typhoon_id=7`** -- back to unchecked; `{ "status": "success", "deleted": 1 }`.
 
 ## 5. Insurance
-* **GET `/api/insurance/summary`** - Counts date-window-active vs. total policies.
+* **GET `/api/insurance/summary`** - Counts active policies (inside their effectivity/expiry window today **and** `is_used = false`, 2026-10-12) vs. total policies.
 * **GET `/api/insurance/usage`**
   - **Description:** Per-typhoon insurance usage status from `tbl_insurance_usage`. Optional `typhoon_id` and `insurance_records_id` query filters. Without `typhoon_id`, returns every typhoon a policy has been assessed against — the same policy can be used for one typhoon and unused for another, tracked independently.\n

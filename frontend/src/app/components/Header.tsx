@@ -34,7 +34,7 @@ interface HeaderProps {
 const AUTO_HIDE_DELAY_MS = 900;
 
 const SPECIALIST_MODULES: { id: ModuleId; label: string; icon: React.ReactNode; shortLabel: string }[] = [
-  { id:"monitoring",   label:"Monitoring & Extraction",        shortLabel:"Monitoring",    icon:<Home size={15} /> },
+  { id:"monitoring",   label:"Main Dashboard",                 shortLabel:"Dashboard",    icon:<Home size={15} /> },
   { id:"spatial",      label:"Spatial Analysis & Data Import", shortLabel:"Spatial",       icon:<Map size={15} /> },
   { id:"assessment",   label:"Assessment & Reporting",         shortLabel:"Assessment",    icon:<FileText size={15} /> },
 ];

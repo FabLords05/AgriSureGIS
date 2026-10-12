@@ -1,19 +1,12 @@
 import { useState } from "react";
-import { Eye, EyeOff, LogIn, Shield, User, AlertCircle, Leaf, UserPlus, ArrowLeft, CheckCircle2 } from "lucide-react";
+import { Eye, EyeOff, LogIn, Shield, User, AlertCircle, UserPlus, ArrowLeft, CheckCircle2 } from "lucide-react";
 import { loginUser, registerUser } from "@/lib/api";
+import agrisureLogo from "@/assets/agrisuregis-logo.png";
+import pcicLogo from "@/assets/pcic-logo.webp";
 
 interface LoginScreenProps {
   onLogin: (user: { name: string; role: string; email: string; session_timeout_minutes: number }, token: string) => void;
 }
-
-// No more role selection at login -- the account's real role now comes back
-// from the server (GET /api/users/login), not a client-side toggle. These
-// two entries just drive the "Demo Credentials" hint box, matching the
-// accounts seeded by backend/seed_system_users.py.
-const DEMO_ACCOUNTS: { email: string; password: string; label: string }[] = [
-  { email: "a.reyes@pcic.gov.ph", password: "pcic1234", label: "GIS Specialist" },
-  { email: "r.santos@pcic.gov.ph", password: "pcic1234", label: "System Administrator" },
-];
 
 type RegRole = "GIS Specialist" | "System Administrator";
 
@@ -294,12 +287,6 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
       .finally(() => setLoading(false));
   };
 
-  const fillDemo = (demo: { email: string; password: string }) => {
-    setEmail(demo.email);
-    setPassword(demo.password);
-    setError(null);
-  };
-
   return (
     <div
       className="h-screen overflow-hidden flex flex-col"
@@ -310,13 +297,18 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
       {/* Top bar */}
       <div className="flex items-center justify-between px-8 py-[clamp(0.4rem,1.5vh,0.75rem)] shrink-0">
         <div className="flex items-center gap-2.5">
-          <div className="w-8 h-8 rounded-lg bg-white/15 flex items-center justify-center">
-            <Leaf size={16} className="text-white" />
-          </div>
-          <div>
-            <p className="text-white text-xs font-bold leading-tight tracking-widest uppercase">Philippine Crop Insurance Corporation</p>
-            <p className="text-white/50 text-[9px] leading-tight">Bicol Regional Office — GIS Risk Assessment Division</p>
-          </div>
+          {/* Stacked drop-shadows trace a white outline around the logo's shape
+              so the dark-green mark stays visible on the green gradient. */}
+          <img
+            src={pcicLogo}
+            alt="PCIC logo"
+            className="h-9 w-auto"
+            style={{
+              filter:
+                "drop-shadow(1px 0 0 #fff) drop-shadow(-1px 0 0 #fff) drop-shadow(0 1px 0 #fff) drop-shadow(0 -1px 0 #fff)",
+            }}
+          />
+          <p className="text-white text-xs font-bold leading-tight tracking-widest uppercase">Philippine Crop Insurance Corporation</p>
         </div>
         <span className="text-white/30 text-[10px]">v2.1.0-beta</span>
       </div>
@@ -330,9 +322,14 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
           <div className="w-full max-w-md">
             {/* App Title */}
             <div className="text-center mb-[clamp(0.5rem,1.5vh,1rem)]">
+              <img
+                src={agrisureLogo}
+                alt="AgriSureGIS logo"
+                className="h-[clamp(3rem,8vh,4rem)] w-auto mx-auto mb-[clamp(0.25rem,1vh,0.5rem)]"
+              />
               <h1 className="text-white text-2xl font-black tracking-tight">AgriSureGIS</h1>
-              <p className="text-white/60 text-xs mt-1">Automated Disaster Risk Assessment System</p>
-              <p className="text-white/40 text-[10px] mt-0.5">Parametric Indemnification · PAGASA TCB Integration · Google Earth Engine</p>
+              <p className="text-white/80 text-sm mt-1">Automated Disaster Risk Assessment System</p>
+              <p className="text-white/60 text-xs mt-0.5">Parametric Indemnification · PAGASA TCB Integration · Google Earth Engine</p>
             </div>
 
             {/* Login Card */}
@@ -394,45 +391,25 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
                 >
                   {loading
                     ? <><div className="w-4 h-4 rounded-full border-2 border-white/30 border-t-white animate-spin" />Signing in…</>
-                    : <><LogIn size={15} />Sign In to Dashboard</>
+                    : <><LogIn size={15} />Sign In</>
                   }
                 </button>
 
-                {/* Demo hint */}
-                <div className="mt-[clamp(0.4rem,1.2vh,0.75rem)] p-[clamp(0.4rem,1vh,0.625rem)] rounded-xl bg-amber-50 border border-amber-100 space-y-1.5">
-                  <p className="text-[10px] font-semibold text-amber-700">Demo Credentials</p>
-                  {DEMO_ACCOUNTS.map(demo => (
-                    <div key={demo.email} className="flex items-center justify-between gap-2">
-                      <div>
-                        <p className="text-[10px] text-amber-600 font-mono leading-tight">{demo.email}</p>
-                        <p className="text-[9px] text-amber-500 leading-tight">{demo.label} · Password: {demo.password}</p>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => fillDemo(demo)}
-                        className="shrink-0 text-[10px] text-amber-700 underline hover:text-amber-900"
-                      >
-                        Auto-fill
-                      </button>
-                    </div>
-                  ))}
-                </div>
-
                 {/* Register link */}
-                <div className="mt-[clamp(0.3rem,1vh,0.5rem)] text-center">
+                <div className="mt-[clamp(0.6rem,1.8vh,1rem)] text-center">
                   <button
                     type="button"
                     onClick={() => setView("register")}
-                    className="text-[10px] text-gray-400 hover:text-[#166534] transition-colors inline-flex items-center gap-1"
+                    className="text-xs font-semibold text-[#166534] hover:text-[#14532d] hover:underline underline-offset-2 transition-colors inline-flex items-center gap-1"
                   >
-                    <UserPlus size={11} /> Request system access (new staff)
+                    <UserPlus size={12} /> Request system access (new staff)
                   </button>
                 </div>
               </form>
             </div>
 
             {/* Footer note */}
-            <p className="text-center text-white/30 text-[10px] mt-[clamp(0.4rem,1vh,0.75rem)]">
+            <p className="text-center text-white/50 text-[11px] mt-[clamp(0.4rem,1vh,0.75rem)]">
               Authorized Personnel Only · PCIC-GIS AgriSureGIS System · For technical support contact the ICT Division
             </p>
           </div>

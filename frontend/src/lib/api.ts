@@ -654,21 +654,27 @@ export interface PabsAssessmentRow {
   assessment_id: number;
   FARMER_NAME: string | null;
   FARMERID: string | null;
-  FARMID: number | null;
+  // PCIC's own FARMID from the uploaded CSV (e.g. "1979999"), not farm_id.
+  FARMID: string | null;
+  // No source yet -- always blank (2026-10-12).
+  IRID: string | null;
+  CIC_NO: string | null;
   AREA: number | null;
   TYPHOON_NAME: string | null;
   PERIOD_OF_EXPOSURE: number | null;
+  // km/h: the typhoon's max sustained winds across its bulletins (storm-wide).
   WIND_VELOCITY: number | null;
-  DATE_FILED: string | null;
-  DATE_OF_OCCURRENCE: string | null;
+  AC: number | null;
+  FINAL_INDEMNITY_PAYMENT: number | null;
   P: string;
   S: string | null;
-  AC: number | null;
-  // Blank for now -- payout calculation is being revised (2026-10-12).
-  FINAL_INDEMNITY_PAYMENT: number | null;
   REMARKS: string;
   municipality: string | null;
   province: string | null;
+  // TCWS signal number (not exported) -- drives the on-screen Wind column.
+  wind_signal: number | null;
+  // On-screen only (not exported): assessed crop stage.
+  crop_stage: string | null;
 }
 
 // JSON version of the same combined PABS-format summary, for on-screen display.

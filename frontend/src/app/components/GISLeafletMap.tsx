@@ -702,7 +702,7 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
           {/* `||` not `??` -- see the matching note in SpatialAnalysisModule's
               Farmer cell: a blank-but-not-null name must still fall back. */}
           <p className="text-[14px] font-semibold leading-snug">{selectedFarm.farmer_name || "Unknown farmer"}</p>
-          <p className="text-[12px] text-muted-foreground mb-2.5">Farm #{selectedFarm.farm_id}</p>
+          <p className="text-[12px] text-muted-foreground mb-2.5">Farm ID {selectedFarm.csv_farm_reference ?? "—"}</p>
           {/* Labels at text-foreground/70 rather than text-muted-foreground --
               the muted token was too faint to read at a glance on the map. */}
           <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[12px]">

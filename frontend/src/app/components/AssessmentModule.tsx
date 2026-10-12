@@ -17,26 +17,28 @@ function formatDateTime(iso: string | null): string {
   return d.toLocaleString(undefined, { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
-type SortField = "FARMER_NAME" | "municipality" | "TYPHOON_NAME" | "AREA" | "PERIOD_OF_EXPOSURE" | "WIND_VELOCITY" | "AC";
+type SortField = "FARMER_NAME" | "municipality" | "TYPHOON_NAME" | "AREA" | "PERIOD_OF_EXPOSURE" | "wind_signal" | "crop_stage" | "AC";
 type SortDir = "asc" | "desc";
 
-// `right` = numeric column, right-aligned in both header and cells. IRID was
-// dropped 2026-10-12 per Cristian.
+// `right` = numeric column (tabular-nums). Every column is centered except
+// FARMER NAME, which is left-aligned (2026-10-12, per Fabio). Order is
+// PCIC's final PABS layout (2026-10-12, per Fabio); IRID is a blank column.
+// Labels are the exact CSV headers (backend PABS_CSV_HEADERS).
 const PABS_HEADERS: { label: string; field: keyof PabsAssessmentRow; right?: boolean }[] = [
-  { label: "Farmer Name", field: "FARMER_NAME" },
-  { label: "Farmer ID", field: "FARMERID" },
-  { label: "Farm ID", field: "FARMID" },
-  { label: "Area", field: "AREA", right: true },
-  { label: "Typhoon", field: "TYPHOON_NAME" },
-  { label: "Exposure (h)", field: "PERIOD_OF_EXPOSURE", right: true },
-  { label: "Wind Velocity", field: "WIND_VELOCITY", right: true },
-  { label: "Date Filed", field: "DATE_FILED" },
-  { label: "Date of Occurrence", field: "DATE_OF_OCCURRENCE" },
+  { label: "FARMER NAME", field: "FARMER_NAME" },
+  { label: "FARMERSID", field: "FARMERID" },
+  { label: "FARMID", field: "FARMID" },
+  { label: "IRID", field: "IRID" },
+  { label: "CIC NO", field: "CIC_NO" },
+  { label: "AREA", field: "AREA", right: true },
+  { label: "TYPHOON_NAME", field: "TYPHOON_NAME" },
+  { label: "PERIOD_OF_EXPOSURE", field: "PERIOD_OF_EXPOSURE", right: true },
+  { label: "WIND_VELOCITY", field: "WIND_VELOCITY", right: true },
+  { label: "AC", field: "AC", right: true },
+  { label: "FINAL_INDEMNITY_PAYMENT", field: "FINAL_INDEMNITY_PAYMENT", right: true },
   { label: "P", field: "P", right: true },
   { label: "S", field: "S", right: true },
-  { label: "AC", field: "AC", right: true },
-  { label: "Final Indemnity Payment", field: "FINAL_INDEMNITY_PAYMENT", right: true },
-  { label: "Remarks", field: "REMARKS" },
+  { label: "REMARKS", field: "REMARKS" },
 ];
 
 function formatCell(value: unknown): string {
@@ -45,10 +47,10 @@ function formatCell(value: unknown): string {
 }
 
 // Matches the CSV export's float_format="%.2f" -- what the preview shows for
-// AREA/AC must be exactly what ends up in the downloaded file.
+// AREA/AC/FINAL_INDEMNITY_PAYMENT must be exactly what ends up in the downloaded file.
 function formatPabsCell(field: keyof PabsAssessmentRow, value: unknown): string {
   if (value === null || value === undefined || value === "") return "—";
-  if ((field === "AREA" || field === "AC") && typeof value === "number") {
+  if ((field === "AREA" || field === "AC" || field === "FINAL_INDEMNITY_PAYMENT") && typeof value === "number") {
     return value.toFixed(2);
   }
   return String(value);
@@ -78,7 +80,7 @@ function CSVPreviewModal({ rows, onClose }: { rows: PabsAssessmentRow[]; onClose
         <div className="flex items-center gap-2 px-5 py-2 bg-blue-50 dark:bg-blue-950/30 border-b border-blue-100 shrink-0">
           <AlertCircle size={11} className="text-blue-600 shrink-0" />
           <p className="text-[10px] text-blue-700 dark:text-blue-300">
-            These {rows.length} records are exactly what the downloaded CSV will contain. P is PCIC's fixed 100% prevalence (1.0), S is the estimated yield loss as a fraction (30% = 0.3), and Remarks is PCIC's fixed remark. Final Indemnity Payment is blank until the revised payout calculation is in place.
+            These {rows.length} records are exactly what the downloaded CSV will contain. P is PCIC's fixed 100% prevalence (1.0), S is the estimated yield loss as a fraction (30% = 0.3), and Remarks is PCIC's fixed remark. WIND_VELOCITY is the typhoon's maximum sustained winds (km/h) from its PAGASA bulletins. IRID is blank (no source yet).
           </p>
         </div>
 
@@ -87,7 +89,7 @@ function CSVPreviewModal({ rows, onClose }: { rows: PabsAssessmentRow[]; onClose
             <thead className="sticky top-0 z-10">
               <tr className="bg-[#166534] text-white">
                 {PABS_HEADERS.map(h => (
-                  <th key={h.field} className={`px-2 py-1.5 font-semibold whitespace-nowrap ${h.right ? "text-right" : "text-left"}`}>{h.label}</th>
+                  <th key={h.field} className={`px-2 py-1.5 font-semibold whitespace-nowrap ${h.field === "FARMER_NAME" ? "text-left" : "text-center"}`}>{h.label}</th>
                 ))}
               </tr>
             </thead>
@@ -95,7 +97,7 @@ function CSVPreviewModal({ rows, onClose }: { rows: PabsAssessmentRow[]; onClose
               {rows.map((r, i) => (
                 <tr key={r.assessment_id} className={`border-t border-border hover:bg-muted/30 ${i % 2 === 0 ? "bg-card" : "bg-muted/10"}`}>
                   {PABS_HEADERS.map(h => (
-                    <td key={h.field} className={`px-2 py-1.5 whitespace-nowrap ${h.right ? "text-right tabular-nums" : ""}`}>{formatPabsCell(h.field, r[h.field])}</td>
+                    <td key={h.field} className={`px-2 py-1.5 whitespace-nowrap ${h.field === "FARMER_NAME" ? "text-left" : "text-center"} ${h.right ? "tabular-nums" : ""}`}>{formatPabsCell(h.field, r[h.field])}</td>
                   ))}
                 </tr>
               ))}
@@ -378,7 +380,7 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
   }, [rows]);
 
   const signals = useMemo(() => {
-    const set = new Set(rows.map(r => r.WIND_VELOCITY).filter((s): s is number => s != null));
+    const set = new Set(rows.map(r => r.wind_signal).filter((s): s is number => s != null));
     return ["All", ...Array.from(set).sort((a, b) => a - b).map(String)];
   }, [rows]);
 
@@ -392,7 +394,7 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
   const filtered = useMemo(() => rows
     .filter(r => selectedTyphoonName === null || r.TYPHOON_NAME === selectedTyphoonName)
     .filter(r => filterMuni === "All" || r.municipality === filterMuni)
-    .filter(r => filterSignal === "All" || r.WIND_VELOCITY === Number(filterSignal))
+    .filter(r => filterSignal === "All" || r.wind_signal === Number(filterSignal))
     .sort((a, b) => {
       const va = a[sortField] ?? (typeof a[sortField] === "number" ? 0 : "");
       const vb = b[sortField] ?? (typeof b[sortField] === "number" ? 0 : "");
@@ -413,15 +415,16 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
       ? sortDir === "asc" ? <ChevronUp size={10} /> : <ChevronDown size={10} />
       : <ArrowUpDown size={10} className="opacity-30" />;
 
-  // `right` = numeric column; its header is right-aligned to sit over its values.
-  const sortableCols: { l: string; f: SortField; right?: boolean }[] = [
+  // Every column is centered except Farmer, left-aligned (2026-10-12, per Fabio).
+  const sortableCols: { l: string; f: SortField }[] = [
     { l: "Farmer", f: "FARMER_NAME" },
     { l: "Municipality", f: "municipality" },
     { l: "Typhoon", f: "TYPHOON_NAME" },
-    { l: "Area", f: "AREA", right: true },
-    { l: "Exp (h)", f: "PERIOD_OF_EXPOSURE", right: true },
-    { l: "Wind", f: "WIND_VELOCITY", right: true },
-    { l: "AC", f: "AC", right: true },
+    { l: "Area", f: "AREA" },
+    { l: "Exp (h)", f: "PERIOD_OF_EXPOSURE" },
+    { l: "Wind", f: "wind_signal" },
+    { l: "Crop Stage", f: "crop_stage" },
+    { l: "AC", f: "AC" },
   ];
 
   return (
@@ -589,38 +592,40 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
                     {sortableCols.map(col => (
                       <th
                         key={col.f}
-                        className={`px-2 py-1.5 font-semibold cursor-pointer hover:bg-white/10 whitespace-nowrap ${col.right ? "text-right" : "text-left"}`}
+                        className={`px-2 py-1.5 font-semibold cursor-pointer hover:bg-white/10 whitespace-nowrap ${col.f === "FARMER_NAME" ? "text-left" : "text-center"}`}
                         onClick={() => handleSort(col.f)}
                       >
-                        <span className={`flex items-center gap-0.5 ${col.right ? "justify-end" : ""}`}>{col.l}<SortIcon field={col.f} /></span>
+                        <span className={`flex items-center gap-0.5 ${col.f === "FARMER_NAME" ? "" : "justify-center"}`}>{col.l}<SortIcon field={col.f} /></span>
                       </th>
                     ))}
-                    <th className="px-2 py-1.5 text-left font-semibold whitespace-nowrap">Farmer ID</th>
-                    <th className="px-2 py-1.5 text-left font-semibold whitespace-nowrap">Farm ID</th>
+                    <th className="px-2 py-1.5 text-center font-semibold whitespace-nowrap">Farmer ID</th>
+                    <th className="px-2 py-1.5 text-center font-semibold whitespace-nowrap">Farm ID</th>
                   </tr>
                 </thead>
                 <tbody>
                   {filtered.map((r, i) => (
                     <tr key={r.assessment_id} className={`border-t border-border hover:bg-muted/40 transition-colors ${i % 2 === 0 ? "" : "bg-muted/10"}`}>
-                      <td className="px-2 py-1.5 font-medium whitespace-nowrap">{formatCell(r.FARMER_NAME)}</td>
-                      <td className="px-2 py-1.5 text-muted-foreground">{formatCell(r.municipality)}</td>
-                      <td className="px-2 py-1.5">{formatCell(r.TYPHOON_NAME)}</td>
-                      <td className="px-2 py-1.5 text-right">{r.AREA != null ? r.AREA.toFixed(2) : "—"}</td>
-                      <td className="px-2 py-1.5 text-right">{formatCell(r.PERIOD_OF_EXPOSURE)}</td>
-                      {/* WIND_VELOCITY holds the TCWS signal number, not a speed. */}
-                      <td className="px-2 py-1.5 text-right whitespace-nowrap">{r.WIND_VELOCITY != null ? `Signal ${r.WIND_VELOCITY}` : "—"}</td>
-                      <td className="px-2 py-1.5 text-right font-bold text-[#166534] dark:text-emerald-400">{r.AC != null ? `₱${r.AC.toLocaleString()}` : "—"}</td>
-                      <td className="px-2 py-1.5 font-mono text-muted-foreground">{formatCell(r.FARMERID)}</td>
-                      <td className="px-2 py-1.5 font-mono text-[#166534] dark:text-emerald-400">#{formatCell(r.FARMID)}</td>
+                      <td className="px-2 py-1.5 text-left font-medium whitespace-nowrap">{formatCell(r.FARMER_NAME)}</td>
+                      <td className="px-2 py-1.5 text-center text-muted-foreground">{formatCell(r.municipality)}</td>
+                      <td className="px-2 py-1.5 text-center">{formatCell(r.TYPHOON_NAME)}</td>
+                      <td className="px-2 py-1.5 text-center">{r.AREA != null ? r.AREA.toFixed(2) : "—"}</td>
+                      <td className="px-2 py-1.5 text-center">{formatCell(r.PERIOD_OF_EXPOSURE)}</td>
+                      {/* wind_signal is the TCWS signal number; WIND_VELOCITY is km/h (CSV only). */}
+                      <td className="px-2 py-1.5 text-center whitespace-nowrap">{r.wind_signal != null ? `Signal ${r.wind_signal}` : "—"}</td>
+                      <td className="px-2 py-1.5 text-center whitespace-nowrap">{formatCell(r.crop_stage)}</td>
+                      <td className="px-2 py-1.5 text-center font-bold text-[#166534] dark:text-emerald-400">{r.AC != null ? `₱${r.AC.toLocaleString()}` : "—"}</td>
+                      <td className="px-2 py-1.5 text-center font-mono text-muted-foreground">{formatCell(r.FARMERID)}</td>
+                      {/* PCIC's own FARMID, same value as the CSV (2026-10-12). */}
+                      <td className="px-2 py-1.5 text-center font-mono text-[#166534] dark:text-emerald-400">{formatCell(r.FARMID)}</td>
                     </tr>
                   ))}
                 </tbody>
                 <tfoot>
                   <tr className="bg-[#166534]/10 border-t-2 border-[#166534] font-bold text-[11px]">
-                    <td colSpan={3} className="px-2 py-2">TOTAL ({filtered.length} records)</td>
-                    <td className="px-2 py-2 text-right">{totalArea.toFixed(2)}</td>
-                    <td colSpan={2} />
-                    <td className="px-2 py-2 text-right text-[#166534]">₱{totalAC.toLocaleString()}</td>
+                    <td colSpan={3} className="px-2 py-2 text-center">TOTAL ({filtered.length} records)</td>
+                    <td className="px-2 py-2 text-center">{totalArea.toFixed(2)}</td>
+                    <td colSpan={3} />
+                    <td className="px-2 py-2 text-center text-[#166534]">₱{totalAC.toLocaleString()}</td>
                     <td colSpan={2} />
                   </tr>
                 </tfoot>

@@ -4,6 +4,210 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-12] - Farm ID Shows PCIC's FARMID Everywhere; Farmer Names Left-Aligned (Sprint 3)
+
+Per Fabio: every on-screen Farm ID now follows the PABS-given FARMID
+(`csv_farm_reference`, e.g. `1347041`), never the database `farm_id`. The
+`#` prefix is dropped. `farm_id` stays the internal key for selection, map
+lookups and API calls.
+
+### 1. File: `frontend/src/app/components/AssessmentModule.tsx`
+* The table's Farm ID cell shows `r.FARMID` (PCIC's), the same value as the CSV.
+* Farmer names are left-aligned (header and cells) in both the assessment table
+  and the CSV preview. Every other column stays centered.
+
+### 2. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* The pinned Farm ID column shows `f.csv_farm_reference`, or "—" when absent.
+  It sorts on that field: `SortField` `"farm_id"` becomes
+  `"csv_farm_reference"`, and that is also the default sort.
+* The table sort now uses `localeCompare(..., { numeric: true })`, so digit
+  strings order numerically.
+
+### 3. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* The map's Farm Details card shows "Farm ID <PCIC FARMID>" instead of
+  "Farm #<db id>".
+
+### 4. Files: `backend/app/api/assessments.py`, `frontend/src/lib/api.ts`, `.claude/API_CONTRACT.md`
+* The non-exported `farm_id` key added earlier today is removed from the PABS
+  rows, since nothing reads it any more.
+
+---
+
+## [2026-10-12] - PABS CSV Uses PCIC's Exact Headers + PCIC FARMID; Assessment Table Centered + Crop Stage (Sprint 3)
+
+Per Fabio. The header source is PCIC's "The final Output" image
+(`USTP CAPSTONE/INSURANCE RECORDS/722244805_…_n.png`). The folder's PPT,
+`RECSAP-From-IRR.pptx`, only holds RECSAP matrices and has no column names.
+
+### 1. File: `backend/app/api/assessments.py`
+* New **`PABS_CSV_HEADERS`**: maps each row key to its exact CSV header, in
+  export order: `FARMER NAME, FARMERSID, FARMID, IRID, CIC NO, AREA,
+  TYPHOON_NAME, PERIOD_OF_EXPOSURE, WIND_VELOCITY, AC, FINAL_INDEMNITY_PAYMENT,
+  P, S, REMARKS`.
+  * `FARMER NAME` (with a space) and `FARMERSID` follow PCIC's reference.
+  * `CIC NO` matches PCIC's own CSV column.
+  * `FINAL_INDEMNITY_PAYMENT` follows the reference's underscore style.
+* **`export_assessments_pabs_csv()`** builds the frame from those keys and
+  renames them to the headers. It replaces the `pabs_columns` list. The
+  JSON/preview row keys are unchanged.
+* **`_build_pabs_rows()`**:
+  * `FARMID` is now PCIC's farm ID (`farm.csv_farm_reference`, e.g.
+    `1979999`), not the internal `farm.farm_id`. It is a string, so
+    `float_format` leaves it alone.
+  * New non-exported `farm_id` (internal, for the table's `#416` link) and
+    `crop_stage` (`RiskAssessment.crop_stage`).
+
+### 2. File: `frontend/src/lib/api.ts`
+* `PabsAssessmentRow`:
+  * `FARMID: string | null`;
+  * new `farm_id` and `crop_stage` fields.
+
+### 3. File: `frontend/src/app/components/AssessmentModule.tsx`
+* **`PABS_HEADERS`**: the preview labels are now the exact CSV headers.
+* **Assessment table**:
+  * every header, cell and the TOTAL row is centered;
+  * the unused `right` flags are dropped from `sortableCols`.
+* **New sortable "Crop Stage" column** right after Wind (`SortField` gains
+  `crop_stage`). The TOTAL row's spacer widens to `colSpan={3}`.
+* The Farm ID cell reads `farm_id`, so the on-screen `#416` stays internal.
+
+### 4. File: `.claude/API_CONTRACT.md`
+* The PABS entry lists the row keys, the CSV headers, and the new FARMID
+  meaning.
+
+---
+
+## [2026-10-12] - Main Dashboard Rename; Active Insurance Excludes Used Policies (Sprint 3)
+
+Per Fabio.
+
+### 1. File: `frontend/src/app/components/Header.tsx`
+* In `SPECIALIST_MODULES`, the "Monitoring & Extraction" tab is now **"Main
+  Dashboard"** (short label "Dashboard"). The module id (`monitoring`) and the
+  `MonitoringModule` component are unchanged. `DashboardLayout.tsx` still has
+  the old label, but nothing imports it, so it was left alone.
+
+### 2. File: `backend/app/api/insurance.py`
+* **`get_insurance_summary()`**: `active_count` now also requires
+  `InsuranceRecord.is_used = false`. A policy drops out as soon as an
+  assessment gives it a payout (`AssessmentService` sets `is_used`), even
+  before the PABS export locks it. `total_count` is unchanged (every policy).
+  Note that Farm Records' "Active Insurance Only" view still excludes only
+  export-locked policies, so the two can differ between calculation and export.
+
+### 3. File: `frontend/src/app/components/MonitoringModule.tsx`
+* The Active Insurance card's subtitle is now "In coverage · not yet used".
+
+### 4. File: `.claude/API_CONTRACT.md`
+* `GET /api/insurance/summary` description updated.
+
+---
+
+## [2026-10-12] - PABS Export: PCIC's Final Column Order, Real Payout, km/h Wind (Sprint 3)
+
+Per Fabio. The CSV and the "Review CSV" preview now use this column order:
+`FARMER_NAME, FARMERID, FARMID, IRID, CIC_NO, AREA, TYPHOON_NAME,
+PERIOD_OF_EXPOSURE, WIND_VELOCITY, AC, FINAL_INDEMNITY_PAYMENT, P, S, REMARKS`.
+Decisions:
+* `DATE_FILED` and `DATE_OF_OCCURRENCE` are removed.
+* IRID is back as a **blank** column. It has no source in the uploaded CSVs or
+  the DB.
+* WIND_VELOCITY is now **km/h**: the typhoon's highest PAGASA "maximum
+  sustained winds" across its bulletins. That is one storm-wide value, because
+  per-farm wind speed isn't stored. It replaces the TCWS signal number.
+* FINAL_INDEMNITY_PAYMENT is filled from the stored
+  `RiskAssessment.final_indemnity_payment`, with the formula unchanged. It was
+  blank before.
+
+### 1. File: `backend/app/api/assessments.py`
+* New **`_typhoon_max_winds()`**: one grouped query,
+  `MAX(max_sustained_winds)` per `typhoon_id` over `TropicalCycloneBulletin`.
+  Typhoons whose bulletins state no winds are left out, so their rows export
+  blank.
+* **`_build_pabs_rows()`**:
+  * adds `IRID` (None) and `CIC_NO` (`insurance.policy_no`);
+  * `WIND_VELOCITY` comes from `_typhoon_max_winds()`;
+  * `FINAL_INDEMNITY_PAYMENT` is filled in;
+  * the two date keys are dropped;
+  * keys are in the new order;
+  * new non-exported `wind_signal` (the TCWS signal from `a.wind_velocity`)
+    keeps the on-screen table's signal column and filter working.
+* **`export_assessments_pabs_csv()`**: `pabs_columns` uses the new order.
+  `float_format="%.2f"` now also formats the payout.
+* Imports `func` and `TropicalCycloneBulletin`.
+
+### 2. File: `frontend/src/lib/api.ts`
+* `PabsAssessmentRow`:
+  * adds `IRID`, `CIC_NO` and `wind_signal`;
+  * removes `DATE_FILED` and `DATE_OF_OCCURRENCE`;
+  * keys are in the new order.
+
+### 3. File: `frontend/src/app/components/AssessmentModule.tsx`
+* **`PABS_HEADERS`** follows the new order. It adds IRID and CIC No. and drops
+  the dates. "Wind Velocity" is now "Wind Velocity (km/h)".
+* **`formatPabsCell()`** formats Final Indemnity Payment to 2 decimals, like the
+  CSV.
+* Every header and cell in the preview table is now centered. Numeric cells
+  keep `tabular-nums` (via the `right` flag), so their digits stay
+  fixed-width.
+* The preview notice explains the km/h wind and the blank IRID. It no longer
+  says the payout is blank.
+* The main assessment table's Wind column, sort and signal filter read
+  `wind_signal` instead of `WIND_VELOCITY` (`SortField` updated), so they still
+  show "Signal N".
+
+### 4. File: `.claude/API_CONTRACT.md`
+* PABS column list and field meanings updated.
+
+---
+
+## [2026-10-12] - Login screen branding: AgriSureGIS + PCIC logos (Sprint 3)
+
+UI design change on the login screen only. The login flow itself is
+unchanged. The only behaviour removed is the demo Auto-fill shortcut.
+
+### 1. Modified file: `frontend/src/app/components/LoginScreen.tsx`
+* **Top bar:** the lucide `Leaf` icon tile is replaced by the PCIC logo. A
+  stack of four 1px white `drop-shadow` filters traces a white outline around
+  the logo's shape, so the dark-green mark stays visible on the green
+  gradient. The "Bicol Regional Office — GIS Risk Assessment Division"
+  subtitle under "Philippine Crop Insurance Corporation" is removed. `Leaf` is
+  dropped from the lucide import because nothing else uses it.
+* **App title:** the AgriSureGIS logo sits centered above the "AgriSureGIS"
+  heading. Its height is `clamp(3rem, 8vh, 4rem)`, so the card still fits
+  without scrolling on short viewports.
+* **Submit button:** the label is now "Sign In" instead of "Sign In to Dashboard".
+* **Demo credentials removed:** the amber "Demo Credentials" box with its
+  Auto-fill buttons is gone, along with the `DEMO_ACCOUNTS` constant and the
+  `fillDemo()` handler that only fed it. The seeded accounts
+  (`backend/seed_system_users.py`) still exist and still sign in when typed.
+* **Readability:** the subtitle ("Automated Disaster Risk Assessment System")
+  and tagline ("Parametric Indemnification · …") are one size larger and less
+  transparent, and so is the footer note ("Authorized Personnel Only · …").
+  The "Request system access (new staff)" link is bigger (`text-xs`), semibold
+  and brand green (`#166534`), and underlines on hover, so it reads as an
+  action. It also has more space above it now that the demo box is gone.
+
+### 2. New files
+* **`frontend/src/assets/agrisuregis-logo.png`** (256×211, 58 KB) comes from
+  `docs/AgriSureGIS LOGO.png`, with the transparent padding trimmed and the
+  image downscaled from 2000px.
+* **`frontend/src/assets/pcic-logo.webp`** (92×128, 8 KB, lossless) is a
+  downscaled copy of
+  `docs/Philippine_Crop_Insurance_Corporation_(PCIC)LOGO.svg.webp`. The
+  sources in `docs/` are unchanged.
+* **`frontend/src/app/components/BrandLogo.tsx`**: `BrandLogo` now renders
+  the official AgriSureGIS logo (`@/assets/agrisuregis-logo.png`) as an
+  `<img>` instead of the inline-SVG shield and rice-stalk mark. `size` sets
+  the height and the width follows the logo's aspect ratio. The props are
+  unchanged, so the header badge (`Header.tsx`) and `InstallAppPrompt.tsx`
+  pick it up with no edits.
+* **`frontend/src/vite-env.d.ts`** adds `/// <reference types="vite/client" />`
+  so TypeScript accepts `.png`/`.webp` imports. Before this, the project had
+  no Vite client types.
+
+---
+
 ## [2026-10-12] - Installable PWA + post-login install prompt (Sprint 3)
 
 The app can now be installed from the browser as **AgriSureGIS**: its own

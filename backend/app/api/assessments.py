@@ -4,7 +4,7 @@ import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
@@ -19,6 +19,7 @@ from app.models.models import (
     InsuranceRecord,
     InsuranceUsage,
     RiskAssessment,
+    TropicalCycloneBulletin,
     Typhoon,
 )
 from app.services.assessment_service import AssessmentService
@@ -338,6 +339,28 @@ def export_assessments_csv(
 PABS_PREVALENCE = "1.0"
 PABS_REMARKS = "Prolonged destructive winds caused severe crop damage with critical production loss."
 
+# Row key -> CSV header, in export order. Headers are spelled exactly as PCIC's
+# "The final Output" reference (USTP CAPSTONE/INSURANCE RECORDS/*.png):
+# "FARMER NAME" with a space, "FARMERSID". CIC NO matches PCIC's own CSV
+# column; FINAL_INDEMNITY_PAYMENT follows the reference's underscore style
+# (2026-10-12, per Fabio). Row keys stay as-is so the JSON/preview is stable.
+PABS_CSV_HEADERS = {
+    "FARMER_NAME": "FARMER NAME",
+    "FARMERID": "FARMERSID",
+    "FARMID": "FARMID",
+    "IRID": "IRID",
+    "CIC_NO": "CIC NO",
+    "AREA": "AREA",
+    "TYPHOON_NAME": "TYPHOON_NAME",
+    "PERIOD_OF_EXPOSURE": "PERIOD_OF_EXPOSURE",
+    "WIND_VELOCITY": "WIND_VELOCITY",
+    "AC": "AC",
+    "FINAL_INDEMNITY_PAYMENT": "FINAL_INDEMNITY_PAYMENT",
+    "P": "P",
+    "S": "S",
+    "REMARKS": "REMARKS",
+}
+
 
 def _yield_loss_fraction(assessment: RiskAssessment) -> str | None:
     """PABS "S": the RECSAP step-1 estimated yield loss % as a fraction,
@@ -346,6 +369,20 @@ def _yield_loss_fraction(assessment: RiskAssessment) -> str | None:
         return None
     fraction = assessment.matrix.estimated_yield_loss / 100
     return f"{fraction:.4f}".rstrip("0").rstrip(".") or "0"
+
+
+def _typhoon_max_winds(db: Session) -> dict[int, int]:
+    """PABS "WIND_VELOCITY" in km/h: each typhoon's highest PAGASA "maximum
+    sustained winds" across all its bulletins. It is one storm-wide value (near
+    the center), since per-farm wind speed isn't stored. Typhoons with no stated
+    winds are left out, so their rows export blank."""
+    rows = (
+        db.query(TropicalCycloneBulletin.typhoon_id, func.max(TropicalCycloneBulletin.max_sustained_winds))
+        .filter(TropicalCycloneBulletin.max_sustained_winds.isnot(None))
+        .group_by(TropicalCycloneBulletin.typhoon_id)
+        .all()
+    )
+    return {typhoon_id: max_winds for typhoon_id, max_winds in rows}
 
 
 def _build_pabs_rows(db: Session) -> list[dict]:
@@ -361,7 +398,15 @@ def _build_pabs_rows(db: Session) -> list[dict]:
     (_yield_loss_fraction); REMARKS is PCIC's fixed sentence (PABS_REMARKS).
     P and S are strings so the CSV's float_format="%.2f" doesn't turn them
     into "1.00"/"0.30".
+
+    2026-10-12 (per Fabio): column order is now PCIC's final layout. IRID is
+    back as a blank column (no source yet). CIC_NO is the policy_no. WIND_VELOCITY
+    is the typhoon's max sustained winds in km/h (_typhoon_max_winds), not
+    the TCWS signal. FINAL_INDEMNITY_PAYMENT is the stored payout. DATE_FILED /
+    DATE_OF_OCCURRENCE are dropped. FARMID is PCIC's own farm ID from the
+    uploaded CSV (csv_farm_reference), not our internal farm_id.
     """
+    max_winds = _typhoon_max_winds(db)
     assessments = (
         db.query(RiskAssessment)
         .filter(RiskAssessment.matrix_id.isnot(None))
@@ -398,28 +443,29 @@ def _build_pabs_rows(db: Session) -> list[dict]:
                 "assessment_id": a.assessment_id,
                 "FARMER_NAME": farmer_name,
                 "FARMERID": farmer.farmers_id if farmer else None,
-                "FARMID": farm.farm_id if farm else None,
+                # PCIC's FARMID (e.g. 1979999), as in their final output.
+                "FARMID": farm.csv_farm_reference if farm else None,
+                # No source for PCIC's IRID yet -- kept as a blank column.
+                "IRID": None,
+                "CIC_NO": insurance.policy_no if insurance else None,
                 "AREA": float(farm.area_size) if farm and farm.area_size is not None else None,
                 "TYPHOON_NAME": typhoon.name if typhoon else None,
                 "PERIOD_OF_EXPOSURE": a.period_of_exposure,
-                "WIND_VELOCITY": a.wind_velocity,
-                # MM/DD/YYYY -- matches the PABS reference format exactly (see
-                # pabs_format_mockup.csv), not the raw datetime the DB stores.
-                "DATE_FILED": a.assessment_date.strftime("%m/%d/%Y") if a.assessment_date else None,
-                "DATE_OF_OCCURRENCE": summary.start_time.strftime("%m/%d/%Y") if summary and summary.start_time else None,
+                "WIND_VELOCITY": max_winds.get(summary.typhoon_id) if summary else None,
+                "AC": float(insurance.amount_cover) if insurance and insurance.amount_cover is not None else None,
+                "FINAL_INDEMNITY_PAYMENT": float(a.final_indemnity_payment) if a.final_indemnity_payment is not None else None,
                 "P": PABS_PREVALENCE,
                 "S": _yield_loss_fraction(a),
-                "AC": float(insurance.amount_cover) if insurance and insurance.amount_cover is not None else None,
-                # Left blank on purpose (2026-10-12, per Cristian): the payout
-                # calculation is being changed per PCIC's request (Fabio). Not
-                # the lowercase final_indemnity_payment below, which still
-                # drives export locking.
-                "FINAL_INDEMNITY_PAYMENT": None,
                 "REMARKS": PABS_REMARKS,
                 # Extra fields beyond the PABS spec, kept for on-screen filtering/context
                 # (not written to the CSV export).
                 "municipality": farm.boundary.municipality if farm and farm.boundary else None,
                 "province": farm.boundary.province if farm and farm.boundary else None,
+                # TCWS signal number, for the on-screen table's Wind column and
+                # signal filter (WIND_VELOCITY above is km/h now).
+                "wind_signal": a.wind_velocity,
+                # On-screen only: the assessed crop stage.
+                "crop_stage": a.crop_stage,
                 # Used by export_assessments_pabs_csv to lock exported policies.
                 "insurance_records_id": a.insurance_records_id,
                 "typhoon_id": summary.typhoon_id if summary else None,
@@ -457,14 +503,9 @@ def export_assessments_pabs_csv(db: Session = Depends(get_db)):
     # Locked policies no longer count as active insurance, so cached Farm
     # Records pages are stale now (2026-10-12).
     invalidate_farms_cache()
-    pabs_columns = [
-        "FARMER_NAME", "FARMERID", "FARMID", "AREA", "TYPHOON_NAME",
-        "PERIOD_OF_EXPOSURE", "WIND_VELOCITY", "DATE_FILED", "DATE_OF_OCCURRENCE",
-        "P", "S", "AC", "FINAL_INDEMNITY_PAYMENT", "REMARKS",
-    ]
-    dataframe = pd.DataFrame(rows, columns=pabs_columns)
+    dataframe = pd.DataFrame(rows, columns=list(PABS_CSV_HEADERS)).rename(columns=PABS_CSV_HEADERS)
     buffer = io.StringIO()
-    # float_format matches AREA/AC to the reference format's 2-decimal style
+    # float_format matches AREA/AC/FINAL_INDEMNITY_PAYMENT to the reference format's 2-decimal style
     # (e.g. "16542.00", not "16542.0").
     dataframe.to_csv(buffer, index=False, float_format="%.2f")
     buffer.seek(0)
