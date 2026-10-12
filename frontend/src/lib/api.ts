@@ -602,6 +602,17 @@ export function calculateAssessments(typhoonId: number, bulletinId: number): Pro
   });
 }
 
+// The backend names each export after its typhoon and the moment it was pulled
+// (see backend/app/api/assessments.py's _export_filename), so the name it sends
+// wins over the caller's. Reading it needs expose_headers=["Content-Disposition"]
+// on the backend CORS middleware -- a cross-origin response hides the header
+// otherwise, and we fall back to the caller's name (2026-10-12).
+function filenameFromResponse(response: Response, fallback: string): string {
+  const disposition = response.headers.get('Content-Disposition');
+  const match = disposition ? /filename="?([^";]+)"?/i.exec(disposition) : null;
+  return match ? match[1].trim() : fallback;
+}
+
 // Authenticated downloads (2026-10-11) -- the export routes sit on the
 // assessments router, which is gated by Depends(get_current_user) (see
 // backend/app/api/assessments.py:25), so they need the same Bearer header
@@ -610,7 +621,7 @@ export function calculateAssessments(typhoonId: number, bulletinId: number): Pro
 // rendered {"detail":"Not authenticated."} instead of saving a file.
 // Fetching as a Blob and clicking a synthetic <a download> keeps the header
 // and gives the same save-file behaviour.
-async function downloadCsv(path: string, filename: string, method: 'GET' | 'POST' = 'GET'): Promise<void> {
+async function downloadCsv(path: string, fallbackFilename: string, method: 'GET' | 'POST' = 'GET'): Promise<void> {
   const token = loadPersistedToken();
   const headers = new Headers();
   if (token) headers.set('Authorization', `Bearer ${token}`);
@@ -628,7 +639,7 @@ async function downloadCsv(path: string, filename: string, method: 'GET' | 'POST
   const objectUrl = URL.createObjectURL(await response.blob());
   const anchor = document.createElement('a');
   anchor.href = objectUrl;
-  anchor.download = filename;
+  anchor.download = filenameFromResponse(response, fallbackFilename);
   document.body.appendChild(anchor);
   anchor.click();
   anchor.remove();
