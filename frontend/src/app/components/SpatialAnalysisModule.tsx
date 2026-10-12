@@ -2,12 +2,15 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import {
   ChevronUp, ChevronDown,
   Filter, User, ArrowUpDown, UploadCloud, CheckCircle2, Table2, ShieldCheck, Loader2, Wind,
-  Satellite
+  Satellite, Radar
 } from "lucide-react";
+import { toast } from "sonner";
 import { GISLeafletMap } from "./GISLeafletMap";
+import { SarAnalysisPanel } from "./SarAnalysisPanel";
 import {
   getAssessments, getMunicipalities, searchFarmers, getUsedTyphoons,
-  Farm, Assessment, Bulletin, FarmerSearchResult, UsedTyphoon,
+  getSarLayer, getPlantedVerifications, setPlantedVerification, clearPlantedVerification,
+  Farm, Assessment, Bulletin, FarmerSearchResult, UsedTyphoon, SarLayer,
 } from "@/lib/api";
 import { FarmsData } from "@/lib/useFarmsData";
 
@@ -148,6 +151,67 @@ export function SpatialAnalysisModule({
   // panel is hidden with CSS, not unmounted -- the table's ResizeObserver/
   // sentinel refs and the hidden upload inputs attach once on mount.
   const [recordsHidden, setRecordsHidden] = useState(false);
+  // Verify Farm Planted (2026-10-12) -- the SAR panel, its Earth Engine
+  // layer, and the Specialist's recorded verdicts. Only meaningful while
+  // Affected Only is in effect: the SAR AOI is that set, and verdicts are
+  // per typhoon (the selected bulletin's).
+  const [showSarPanel, setShowSarPanel] = useState(false);
+  const [sarLayer, setSarLayer] = useState<SarLayer | null>(null);
+  const [sarLoading, setSarLoading] = useState(false);
+  const [sarError, setSarError] = useState<string | null>(null);
+  const [sarVisible, setSarVisible] = useState(true);
+  const [sarOpacity, setSarOpacity] = useState(0.85);
+  const [plantedVerdicts, setPlantedVerdicts] = useState<Map<number, boolean>>(new Map());
+  const [verdictSaving, setVerdictSaving] = useState(false);
+  const verdictTyphoonId = affectedBulletinId != null && selectedBulletin ? selectedBulletin.typhoon_id : null;
+
+  // A layer belongs to one bulletin's affected set -- drop it (and close the
+  // panel if the filter went off) whenever that set changes.
+  useEffect(() => {
+    setSarLayer(null);
+    setSarError(null);
+    if (affectedBulletinId == null) setShowSarPanel(false);
+  }, [affectedBulletinId]);
+
+  useEffect(() => {
+    if (verdictTyphoonId == null) {
+      setPlantedVerdicts(new Map());
+      return;
+    }
+    let cancelled = false;
+    getPlantedVerifications(verdictTyphoonId)
+      .then(res => {
+        if (!cancelled) setPlantedVerdicts(new Map(res.data.map(v => [v.farm_id, v.is_planted])));
+      })
+      .catch(() => { if (!cancelled) setPlantedVerdicts(new Map()); });
+    return () => { cancelled = true; };
+  }, [verdictTyphoonId]);
+
+  const runSarAnalysis = () => {
+    if (affectedBulletinId == null) return;
+    setSarLoading(true);
+    setSarError(null);
+    getSarLayer(affectedBulletinId)
+      .then(res => { setSarLayer(res.data); setSarVisible(true); })
+      .catch((err: Error) => setSarError(err.message))
+      .finally(() => setSarLoading(false));
+  };
+
+  const handleSetVerdict = (farmId: number, isPlanted: boolean | null) => {
+    if (verdictTyphoonId == null) return;
+    setVerdictSaving(true);
+    const call = isPlanted == null
+      ? clearPlantedVerification(farmId, verdictTyphoonId)
+      : setPlantedVerification(farmId, verdictTyphoonId, isPlanted);
+    call
+      .then(() => setPlantedVerdicts(prev => {
+        const next = new Map(prev);
+        if (isPlanted == null) next.delete(farmId); else next.set(farmId, isPlanted);
+        return next;
+      }))
+      .catch((err: Error) => toast.error(`Couldn't save the planted verdict: ${err.message}`))
+      .finally(() => setVerdictSaving(false));
+  };
   // csvUploadProgress/gpxUploadProgress (and the failure-details modal they
   // used to feed) now live in App.tsx -- see SpatialAnalysisModuleProps'
   // doc comment above.
@@ -316,6 +380,11 @@ export function SpatialAnalysisModule({
   const topSpacerHeight = tableStartIndex * ROW_HEIGHT;
   const bottomSpacerHeight = (filteredFarms.length - tableEndIndex) * ROW_HEIGHT;
 
+  // "Planted (SAR)" column -- only while Affected Only is on (verdicts are
+  // recorded per typhoon for that set).
+  const showPlantedColumn = verdictTyphoonId != null;
+  const tableColumnCount = showPlantedColumn ? 16 : 15;
+
   const handleSort = (field: SortField) => {
     if (sortField === field) setSortDir(d => d === "asc" ? "desc" : "asc");
     else { setSortField(field); setSortDir("asc"); }
@@ -354,7 +423,28 @@ export function SpatialAnalysisModule({
             activeOnly={activeInsuranceOnly}
             typhoonId={filterTyphoonId}
             affectedBulletinId={affectedBulletinId}
+            sarTileUrl={sarLayer && sarVisible ? sarLayer.tile_url : null}
+            sarOpacity={sarOpacity}
+            plantedVerdicts={verdictTyphoonId != null ? plantedVerdicts : null}
+            onSetPlantedVerdict={handleSetVerdict}
+            verdictSaving={verdictSaving}
           />
+          {/* SAR panel -- slides in over the map, as in the prototype. */}
+          {showSarPanel && selectedBulletin && affectedBulletinId != null && (
+            <SarAnalysisPanel
+              darkMode={darkMode}
+              bulletin={selectedBulletin}
+              layer={sarLayer}
+              loading={sarLoading}
+              error={sarError}
+              onRun={runSarAnalysis}
+              onClose={() => setShowSarPanel(false)}
+              layerVisible={sarVisible}
+              onLayerVisibleChange={setSarVisible}
+              opacity={sarOpacity}
+              onOpacityChange={setSarOpacity}
+            />
+          )}
         </div>
       </div>
 
@@ -432,6 +522,23 @@ export function SpatialAnalysisModule({
               className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors border disabled:opacity-50 disabled:cursor-not-allowed ${affectedBulletinId != null ? "bg-[#c2410c] text-white border-[#c2410c]" : "border-[#c2410c] text-[#c2410c] hover:bg-[#c2410c]/10"}`}
             >
               <Satellite size={11} /> Affected Only
+            </button>
+
+            {/* SAR / GEE Analysis (2026-10-12) -- Verify Farm Planted. Sits
+                beside Affected Only because its AOI is exactly that set (the
+                prototype's map toolbar, where it used to live, was removed
+                2026-08-18). */}
+            <button
+              onClick={() => setShowSarPanel(v => !v)}
+              disabled={affectedBulletinId == null}
+              title={
+                affectedBulletinId == null
+                  ? "Turn on Affected Only first -- SAR is checked only on the affected farms"
+                  : "Pre-event Sentinel-1 layer over the affected farms (Google Earth Engine)"
+              }
+              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors border disabled:opacity-50 disabled:cursor-not-allowed ${showSarPanel ? "bg-[#166534] text-white border-[#166534]" : "border-[#166534] text-[#166534] hover:bg-[#166534]/10"}`}
+            >
+              <Radar size={11} /> SAR / GEE Analysis
             </button>
 
             {/* Municipality search -- moved down from the map toolbar
@@ -599,14 +706,14 @@ export function SpatialAnalysisModule({
                 Loading farm records…
               </div>
             ) : (
-            <table className="table-fixed w-[1990px] min-w-full text-[11px]">
+            <table className="table-fixed min-w-full text-[11px]" style={{ width: showPlantedColumn ? 2100 : 1990 }}>
               {/* Column order (2026-10-11, per Cristian): Farm ID (pinned),
                   Farmer, Municipality, Barangay, Area, Amount of Cover,
                   CIC No., Effectivity, Expiry, Program Type, Crop Stage,
                   Used For Typhoon, Signal, Exp (h), GPX Boundary -- sums to
                   1990px. Area (90px), CIC No. (130px) and Exp (h) (80px) are centered. Est. Payment was dropped for Amount of Cover. */}
               <colgroup>
-                {[90, 200, 140, 150, 90, 130, 130, 120, 120, 150, 220, 160, 90, 80, 120].map((w, i) => (
+                {[90, 200, 140, 150, 90, 130, 130, 120, 120, 150, 220, 160, 90, 80, 120, ...(showPlantedColumn ? [110] : [])].map((w, i) => (
                   <col key={i} style={{ width: w }} />
                 ))}
               </colgroup>
@@ -642,6 +749,9 @@ export function SpatialAnalysisModule({
                   <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Signal</th>
                   <th className="px-2.5 py-2 text-center font-semibold whitespace-nowrap">Exp (h)</th>
                   <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">GPX Boundary</th>
+                  {showPlantedColumn && (
+                    <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Planted (SAR)</th>
+                  )}
                 </tr>
               </thead>
               <tbody>
@@ -652,7 +762,7 @@ export function SpatialAnalysisModule({
                     virtualization comment near ROW_HEIGHT/OVERSCAN above. */}
                 {topSpacerHeight > 0 && (
                   <tr aria-hidden style={{ height: topSpacerHeight }}>
-                    <td colSpan={15} />
+                    <td colSpan={tableColumnCount} />
                   </tr>
                 )}
                 {windowedFarms.map(f => (
@@ -701,18 +811,27 @@ export function SpatialAnalysisModule({
                         : <span className="text-muted-foreground">No</span>
                       }
                     </td>
+                    {showPlantedColumn && (
+                      <td className="px-2.5 py-2 whitespace-nowrap">
+                        {plantedVerdicts.get(f.farm_id) === true
+                          ? <span className="font-medium text-[#16a34a]">Planted</span>
+                          : plantedVerdicts.get(f.farm_id) === false
+                            ? <span className="font-medium text-[#dc2626]">Not planted</span>
+                            : <span className="text-muted-foreground">—</span>}
+                      </td>
+                    )}
                   </tr>
                 ))}
                 {/* Bottom spacer -- same purpose as the top one, for rows not
                     yet scrolled to below the window. */}
                 {bottomSpacerHeight > 0 && (
                   <tr aria-hidden style={{ height: bottomSpacerHeight }}>
-                    <td colSpan={15} />
+                    <td colSpan={tableColumnCount} />
                   </tr>
                 )}
                 {hasMore && (
                   <tr ref={sentinelRef} className="h-9">
-                    <td colSpan={15} className="text-center text-[10px] text-muted-foreground">
+                    <td colSpan={tableColumnCount} className="text-center text-[10px] text-muted-foreground">
                       {isFetchingMore ? "Loading more…" : ""}
                     </td>
                   </tr>

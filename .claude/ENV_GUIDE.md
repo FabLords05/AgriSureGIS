@@ -14,6 +14,7 @@ Copy `.env.example` to `.env` in the `backend/` directory. **Do not commit `.env
 | `SMTP_PORT` | SMTP server port. Defaults to `587` (STARTTLS) if unset. | Mail administrator. |
 | `SMTP_USER` | SMTP server login username -- also used as the From/To address on outgoing alert emails. | Mail administrator. |
 | `SMTP_PASSWORD`| SMTP server password. | Mail administrator. |
+| `GEE_SERVICE_ACCOUNT_KEY_PATH` | Optional -- path to the Google Earth Engine service-account JSON key for SAR planted verification (`backend/app/services/gee_sar_service.py`, 2026-10-12). Unset means the SAR layer endpoint returns 503 "not configured"; nothing else changes. Only the key's `client_email`/`project_id` are ever shown (Calibration & Settings → Google Earth Engine). | The GCP project's service-account key (`webgis-pcic-*.json`, gitignored). The account must be registered for Earth Engine and the project must have the Earth Engine API enabled. |
 | `VITE_API_BASE_URL` | Backend base URL for frontend API calls. **No `/api` suffix** — every path in `frontend/src/lib/api.ts` already includes its own leading `/api/...`, so appending `/api` here causes a `/api/api/...` 404. | Default is `http://localhost:8000`. |
 | `VITE_GEOSERVER_URL` | GeoServer base URL for WMS/WFS spatial layer requests (farm boundary overlay, region boundaries). | Default is `http://localhost:8080/geoserver`. See `.claude/GEOSERVER_SETUP.md`. If unset or unreachable, the map falls back to the bundled static boundary file and skips the farm overlay. |
 
@@ -23,5 +24,5 @@ Copy `.env.example` to `.env` in the `backend/` directory. **Do not commit `.env
 ## Rules
 1. `.env` is already gitignored (`backend/.env` — covered by the root `.gitignore`'s `.env` / `.env.local` / `.env.*.local` entries). Never commit it.
 2. Frontend vars are **public** by build-time convention — Vite requires the `VITE_` prefix, and anything with that prefix ships into the browser bundle. Never put a secret (`DATABASE_URL`, `SMTP_PASSWORD`, etc.) in a frontend-facing variable.
-3. Secrets that must stay server-side (`DATABASE_URL`, `SMTP_PASSWORD`, `JWT_SECRET_KEY`) only ever go in `backend/.env`.
+3. Secrets that must stay server-side (`DATABASE_URL`, `SMTP_PASSWORD`, `JWT_SECRET_KEY`, the GEE key file) only ever go in `backend/.env` (or, for the GEE key, a gitignored file it points to).
 4. When you add a new variable, add it to `.env.example` with a placeholder value in the same commit — don't let `.env.example` drift from what the code actually reads.\n

@@ -378,6 +378,15 @@ export interface SystemStatus {
     issued_at: string;
   } | null;
   email_alerts: { configured: boolean };
+  // Earth Engine connection for SAR planted verification (2026-10-12).
+  // Read-only: the key itself lives only in backend/.env.
+  gee: {
+    configured: boolean;
+    connected: boolean;
+    project_id: string | null;
+    service_account: string | null;
+    last_error: string | null;
+  };
 }
 
 export function getSystemStatus(): Promise<SystemStatus> {
@@ -790,4 +799,61 @@ export interface ActivityLogEntry {
 
 export function getActivityLog(): Promise<{ status: string; data: ActivityLogEntry[] }> {
   return request<{ status: string; data: ActivityLogEntry[] }>('/api/activity-log/');
+}
+
+// "Verify Farm Planted" (2026-10-12) -- pre-event Sentinel-1 VV/VH colour layer
+// over a bulletin's affected farms (same set as the Spatial Analysis "Affected
+// Only" button), plus the GIS Specialist's recorded planted verdicts. The
+// verdict is shown only; the assessment and PABS export never read it.
+export interface SarLayer {
+  tile_url: string;
+  scene_dates: string[];
+  relative_orbit: number;
+  window_start: string;
+  window_end: string;
+  min_db: number;
+  max_db: number;
+  palette: string[];
+  bulletin_id: number;
+  event_date: string;
+  farm_count: number;
+  capped: boolean;
+  skipped_no_geom: number;
+}
+
+export function getSarLayer(bulletinId: number): Promise<{ status: string; data: SarLayer }> {
+  return request<{ status: string; data: SarLayer }>('/api/sar/layer', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ bulletin_id: bulletinId }),
+  });
+}
+
+export interface PlantedVerification {
+  farm_id: number;
+  typhoon_id: number;
+  is_planted: boolean;
+  verified_by: string | null;
+  verified_at: string | null;
+  notes: string | null;
+}
+
+export function getPlantedVerifications(typhoonId: number): Promise<{ status: string; data: PlantedVerification[] }> {
+  return request<{ status: string; data: PlantedVerification[] }>(`/api/sar/verifications?typhoon_id=${typhoonId}`);
+}
+
+export function setPlantedVerification(
+  farmId: number, typhoonId: number, isPlanted: boolean, notes?: string,
+): Promise<{ status: string; data: PlantedVerification }> {
+  return request<{ status: string; data: PlantedVerification }>(`/api/sar/verifications/${farmId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ typhoon_id: typhoonId, is_planted: isPlanted, notes: notes ?? null }),
+  });
+}
+
+export function clearPlantedVerification(farmId: number, typhoonId: number): Promise<{ status: string; deleted: number }> {
+  return request<{ status: string; deleted: number }>(
+    `/api/sar/verifications/${farmId}?typhoon_id=${typhoonId}`, { method: 'DELETE' },
+  );
 }

@@ -28,6 +28,9 @@ _ENDPOINT_SUMMARIES: list[tuple[str, re.Pattern, str]] = [
     ("PUT", re.compile(r"^/api/bulletins/settings$"), "Updated parser settings"),
     ("POST", re.compile(r"^/api/bulletins/\d+/compute-exposure$"), "Computed exposure for a bulletin"),
     ("POST", re.compile(r"^/api/assessments/calculate$"), "Calculated assessments"),
+    ("POST", re.compile(r"^/api/sar/layer$"), "Requested a SAR planted layer"),
+    ("PUT", re.compile(r"^/api/sar/verifications/\d+$"), "Recorded a planted verification"),
+    ("DELETE", re.compile(r"^/api/sar/verifications/\d+$"), "Cleared a planted verification"),
 ]
 
 

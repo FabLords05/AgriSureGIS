@@ -41,7 +41,21 @@ interface GISLeafletMapProps {
   // focusFarmerId rather than overriding them, so the map always shows the
   // same set as the Farm Records table. null = filter off.
   affectedBulletinId?: number | null;
+  // "Verify Farm Planted" (2026-10-12): pre-event Sentinel-1 VV/VH tile layer
+  // from Google Earth Engine (SarAnalysisPanel). While it's on, farm polygons
+  // drop their fill so the colour underneath stays readable.
+  sarTileUrl?: string | null;
+  sarOpacity?: number;
+  // farm_id -> recorded planted verdict for the selected bulletin's typhoon.
+  // null = verdict UI off (Affected Only not active). Outlines are tinted by
+  // verdict and the Farm Details panel gets Planted / Not planted buttons.
+  plantedVerdicts?: Map<number, boolean> | null;
+  onSetPlantedVerdict?: (farmId: number, isPlanted: boolean | null) => void;
+  verdictSaving?: boolean;
 }
+
+// Outline colours for a recorded planted verdict.
+const VERDICT_COLORS = { planted: "#16a34a", notPlanted: "#dc2626" };
 
 // Real, approximate town-center coordinates for the two municipalities actually
 // seeded today (per backend/pabs_results.csv: Bukidnon/Talakag and Misamis
@@ -307,7 +321,7 @@ function approximateFarmPosition(municipality: string | null, indexInMunicipalit
   return [base[0] + row * step, base[1] + (col - 1) * step];
 }
 
-export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBulletin, darkMode, focusMunicipality, focusFarmerId, activeOnly, typhoonId = null, affectedBulletinId = null }: GISLeafletMapProps) {
+export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBulletin, darkMode, focusMunicipality, focusFarmerId, activeOnly, typhoonId = null, affectedBulletinId = null, sarTileUrl = null, sarOpacity = 0.85, plantedVerdicts = null, onSetPlantedVerdict, verdictSaving = false }: GISLeafletMapProps) {
   const [affectedAreas, setAffectedAreas] = useState<TcbSignal[]>([]);
   const [regionXBoundaries, setRegionXBoundaries] = useState<FeatureCollection | null>(null);
   const [showFarmsWmsOverlay, setShowFarmsWmsOverlay] = useState(false);
@@ -513,6 +527,19 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
           url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
         />
 
+        {/* Pre-event Sentinel-1 VV/VH layer (2026-10-12), already clipped to
+            the affected farm polygons by Earth Engine. zIndex keeps it above
+            the Esri basemap; farm polygons (overlay pane) stay on top. */}
+        {sarTileUrl && (
+          <TileLayer
+            key={sarTileUrl}
+            url={sarTileUrl}
+            opacity={sarOpacity}
+            zIndex={10}
+            attribution='Contains modified Copernicus Sentinel data — Google Earth Engine'
+          />
+        )}
+
         {/* Optional GeoServer WMS reference overlay for farm boundaries — additive only,
             the interactive farm layer below (click/popup, from FastAPI) is unaffected. */}
         {showFarmsWmsOverlay && FARMS_WMS_URL && (
@@ -571,15 +598,22 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
             because attributes haven't caught up. */}
         {visibleGeomEntries.map(({ farmId, geom }) => {
           const isSelected = farmId === selectedFarmId;
+          const verdict = plantedVerdicts?.get(farmId);
+          const outline = verdict === true ? VERDICT_COLORS.planted
+            : verdict === false ? VERDICT_COLORS.notPlanted
+            : "#1e3a5f";
           return (
             <GeoJSON
-              key={farmId}
+              // Keyed on the style inputs too -- react-leaflet's GeoJSON
+              // doesn't re-style on prop change, so a new verdict or the SAR
+              // layer toggling needs a remount to show.
+              key={`${farmId}:${verdict ?? "-"}:${sarTileUrl ? 1 : 0}`}
               data={geom as any}
               style={{
-                color: isSelected ? "#ffffff" : "#1e3a5f",
-                fillColor: isSelected ? "#f59e0b" : "#1e3a5f",
-                fillOpacity: isSelected ? 0.65 : 0.4,
-                weight: isSelected ? 3 : 1.5,
+                color: isSelected ? "#ffffff" : outline,
+                fillColor: isSelected ? "#f59e0b" : outline,
+                fillOpacity: sarTileUrl ? 0 : isSelected ? 0.65 : 0.4,
+                weight: isSelected ? 3 : verdict != null || sarTileUrl ? 2.5 : 1.5,
               }}
               eventHandlers={{
                 click: () => onSelectFarm(farmId === selectedFarmId ? null : farmId),
@@ -634,6 +668,18 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
           <span className="w-3 h-3 rounded-sm inline-block" style={{ backgroundColor: "#1e3a5f" }} />
           <span className="text-[10px]">Surveyed (GPX)</span>
         </div>
+        {plantedVerdicts && (
+          <>
+            <div className="flex items-center gap-1.5 mt-1">
+              <span className="w-3 h-3 rounded-sm inline-block border-2" style={{ borderColor: VERDICT_COLORS.planted }} />
+              <span className="text-[10px]">Verified planted</span>
+            </div>
+            <div className="flex items-center gap-1.5 mt-1">
+              <span className="w-3 h-3 rounded-sm inline-block border-2" style={{ borderColor: VERDICT_COLORS.notPlanted }} />
+              <span className="text-[10px]">Verified not planted</span>
+            </div>
+          </>
+        )}
       </div>
 
       {selectedBulletin && (
@@ -682,7 +728,50 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
             <span className="font-bold text-[#166534]">
               {selectedFarm.amount_cover != null ? `₱${selectedFarm.amount_cover.toLocaleString()}` : "—"}
             </span>
+            {plantedVerdicts && (
+              <>
+                <span className="text-foreground/70">Planted (SAR):</span>
+                <span className="font-medium" style={{
+                  color: plantedVerdicts.get(selectedFarm.farm_id) === true ? VERDICT_COLORS.planted
+                    : plantedVerdicts.get(selectedFarm.farm_id) === false ? VERDICT_COLORS.notPlanted : undefined,
+                }}>
+                  {plantedVerdicts.get(selectedFarm.farm_id) === true ? "Planted"
+                    : plantedVerdicts.get(selectedFarm.farm_id) === false ? "Not planted" : "Not yet checked"}
+                </span>
+              </>
+            )}
           </div>
+          {/* Verify Farm Planted (2026-10-12): the Specialist's verdict after
+              checking the SAR colour. Recorded only -- never gates a payout. */}
+          {plantedVerdicts && onSetPlantedVerdict && (
+            <div className="flex gap-1.5 mt-3">
+              <button
+                disabled={verdictSaving}
+                onClick={() => onSetPlantedVerdict(selectedFarm.farm_id, true)}
+                className="flex-1 py-1 rounded-md text-[11px] font-medium text-white disabled:opacity-50"
+                style={{ background: VERDICT_COLORS.planted }}
+              >
+                Planted
+              </button>
+              <button
+                disabled={verdictSaving}
+                onClick={() => onSetPlantedVerdict(selectedFarm.farm_id, false)}
+                className="flex-1 py-1 rounded-md text-[11px] font-medium text-white disabled:opacity-50"
+                style={{ background: VERDICT_COLORS.notPlanted }}
+              >
+                Not planted
+              </button>
+              {plantedVerdicts.has(selectedFarm.farm_id) && (
+                <button
+                  disabled={verdictSaving}
+                  onClick={() => onSetPlantedVerdict(selectedFarm.farm_id, null)}
+                  className="px-2 py-1 rounded-md text-[11px] border border-border text-muted-foreground hover:text-foreground disabled:opacity-50"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>

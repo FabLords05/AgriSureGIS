@@ -4,6 +4,98 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-12] - Verify Farm Planted: SAR via Google Earth Engine, Phase 1 (Sprint 3, branch: develop)
+
+The Use Case Diagram's **Verify Farm Planted** (an `<<include>>` of Conduct
+Parametric Damage Assessment, against Google Earth Engine) had no
+implementation; the mocked SAR UI was removed in `1355f5f`. Phase 1 of
+`docs/SAR_ISPLANTED_METHOD.md`, per the decisions agreed this session: a
+pre-event Sentinel-1 VV/VH colour layer over the "Affected Only" farms that the
+GIS Specialist reads by eye, plus a recorded Planted / Not planted verdict.
+**The verdict is recorded and shown only** — `AssessmentService` and the
+PABS/PCIC export never read it. Planted area only (no flood extent, no NDVI).
+The per-farm rule, percentage and calibration are Phase 2.
+
+### 1. New table `tbl_planted_verification` — **not in the ERD yet**
+* `backend/migrations/2026-10-12_planted_verification.sql` (re-runnable),
+  `backend/init_schema.sql`, and model **`PlantedVerification`** in
+  `backend/app/models/models.py` (`Text` added to its imports). One row per
+  (farm, typhoon) — planting is per season — with `is_planted`,
+  `verified_by` → `tbl_system_users`, `verified_at`, `notes`.
+* `docs/ERD.drawio.png` still needs the table added (Fabio).
+
+### 2. New file: `backend/app/services/gee_sar_service.py`
+* **`gee_configured()`**, **`gee_status()`**, lazy **`_ensure_initialized()`**
+  (service-account credentials from `GEE_SERVICE_ACCOUNT_KEY_PATH`; `ee` is
+  imported lazily so a backend without `earthengine-api` still starts). A
+  failed sign-in is retried at most every 5 minutes, since
+  `GET /api/system/status` is polled. Only the key's `client_email` and
+  `project_id` are ever read out for display.
+* **`pre_event_window()`** — the 24 days before the event, end exclusive
+  (method doc §8: post-event imagery confuses "never planted" with
+  "flattened").
+* **`pick_relative_orbit()`** — most frequent orbit, ties to the lowest
+  number (method doc §5.1).
+* **`build_planted_layer()`** — `COPERNICUS/S1_GRD`, IW, VV+VH, descending,
+  one orbit; per-scene focal median then temporal median; `VV − VH` in dB;
+  clipped to the polygons after a 20 m inward buffer (§5.2); 4.5–7.5 dB
+  green→brown stretch (§7); `getMapId()` tile URL, cached for 1 hour.
+
+### 3. New file: `backend/app/api/sar.py` (registered in `app/main.py`)
+* **`POST /api/sar/layer`** — loads the affected polygons via
+  **`_load_affected_polygons()`**, which reuses `_affected_farm_ids()` from
+  `app/api/farms.py` (GPX farms only, capped at `MAX_LAYER_FARMS` = 5,000 and
+  reported when hit); event date from **`_event_date()`** (the typhoon's first
+  bulletin). 404 / 503 / 422 / 502 for unknown bulletin, not configured,
+  nothing to draw or no scenes, and Earth Engine failure.
+* **`GET` / `PUT` / `DELETE /api/sar/verifications`** — list per typhoon,
+  upsert per farm + typhoon (stamps `verified_by`/`verified_at`), clear.
+
+### 4. Files: `backend/app/api/system.py`, `backend/app/api/activity_log.py`
+* `GET /api/system/status` gains a read-only `gee` block.
+* Activity-log summaries for the three SAR write routes.
+
+### 5. Config + dependency
+* `backend/requirements.txt`: `earthengine-api==1.7.45`.
+* `backend/.env.example`, `.claude/ENV_GUIDE.md`: `GEE_SERVICE_ACCOUNT_KEY_PATH`.
+
+### 6. Frontend
+* `frontend/src/lib/api.ts`: `getSarLayer`, `getPlantedVerifications`,
+  `setPlantedVerification`, `clearPlantedVerification`; `gee` on `SystemStatus`.
+* New `frontend/src/app/components/SarAnalysisPanel.tsx`: the prototype
+  `AOISARPanel` shell (form → processing → results), trimmed: AOI fixed to the
+  affected farms, window and analysis type read-only, a real spinner instead
+  of simulated progress, results show scenes/orbit/farm count, the colour
+  legend, a layer toggle and an opacity slider.
+* `SpatialAnalysisModule.tsx`: **SAR / GEE Analysis** button beside Affected
+  Only (the prototype's map toolbar was removed 2026-08-18), enabled only
+  while Affected Only is in effect; the panel opens over the map; verdicts
+  loaded per typhoon, separate from `useFarmsData` (so the Redis farms cache
+  is untouched); a **Planted (SAR)** column while Affected Only is on.
+* `GISLeafletMap.tsx`: `sarTileUrl`/`sarOpacity` → a `TileLayer` above the
+  Esri basemap; while it's on, farm polygons drop their fill so the colour
+  shows. Outlines are tinted by verdict (green planted / red not planted),
+  with a legend entry, and Farm Details gets Planted / Not planted / Clear
+  buttons. Polygon keys include the verdict, since react-leaflet's `GeoJSON`
+  doesn't re-style on prop change.
+* `CalibrationModule.tsx`: read-only **Google Earth Engine** section
+  (status, project, service account, last error) where the prototype's
+  editable credentials card was. Deliberately not editable: the key is a live
+  private key and stays in `backend/.env`.
+
+### 7. Tests
+* New `backend/tests/test_gee_sar_service.py` (fake `ee` module): orbit
+  choice, pre-event window, unconfigured no-op, init back-off, filter chain,
+  layer cache.
+* New `backend/tests/test_sar_api.py`: 404/503/422/502 paths, first-bulletin
+  event date, polygon cap, verdict insert/update/clear/list.
+
+### 8. Docs
+* `.claude/API_CONTRACT.md` §4c and the `gee` status block;
+  `docs/SAR_ISPLANTED_METHOD.md` status updated, with the Phase 1 deviations
+  (a 24-day median rather than the §3 series; one orbit across all affected
+  farms, so farms outside its footprint get no colour).
+
 ## [2026-10-12] - Public Deployment via Tailscale Funnel (Sprint 3, branch: develop)
 
 By Cristian. The app is hosted on Cristian's PC, which PLDT puts behind CGNAT,
