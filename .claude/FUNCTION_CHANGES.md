@@ -4,6 +4,49 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-12] - Public Deployment via Tailscale Funnel (Sprint 3, branch: develop)
+
+By Cristian. The app is hosted on Cristian's PC, which PLDT puts behind CGNAT,
+so router port forwarding cannot make it public. Tailscale Funnel provides the
+public HTTPS address instead, and Caddy on 127.0.0.1:8090 serves the built
+frontend and forwards API/GeoServer requests on the same origin. No backend or
+frontend source code changed.
+
+### 1. File: `deploy/Caddyfile` (new)
+* Listens on `127.0.0.1:8090` (Funnel's target). Routes `/api/*` to uvicorn
+  (8000), `/geoserver-proxy/agrisuregis/*` to the GeoServer workspace (8080),
+  and everything else to `frontend/dist` with an `index.html` fallback.
+* Replaces Vite's dev-only `/geoserver-proxy` (`vite.config.ts`), which does
+  not exist in a production build. Only the `agrisuregis` workspace is
+  forwarded, so the GeoServer admin UI is not public; FastAPI `/docs` and
+  `/openapi.json` are not routed either.
+* Same origin for page, API and GeoServer, so `CORSMiddleware` in
+  `backend/app/main.py` is unchanged.
+
+### 2. File: `frontend/.env.production` (new)
+* Read by `npm run build` only. `VITE_API_BASE_URL` is empty, so `api.ts`
+  calls relative `/api/...` paths (an empty string does not trigger its
+  `?? 'http://localhost:8000'` fallback). `VITE_GEOSERVER_URL` is set only so
+  the GeoServer overlay stays enabled. No secrets; committed.
+
+### 3. File: `start-servers.bat`
+* New `prod` argument (`start-servers.bat prod`): starts the backend without
+  `--reload` and also starts Caddy from the repo root, skipped if port 8090 is
+  already listening, `caddy` is not on PATH, or `frontend\dist` has not been
+  built. With no argument it behaves as before (dev, `--reload`).
+* If `caddy` is not on PATH (terminals opened before the winget install,
+  e.g. VS Code's until it restarts), falls back to winget's package folder
+  under `%LOCALAPPDATA%\Microsoft\WinGet\Packages\`.
+* Line endings normalised to CRLF (cmd `goto` labels are unreliable in
+  LF-only batch files).
+
+### 4. File: `.claude/LOCAL_SERVER_SETUP.md`
+* New section 9: Funnel architecture, one-time setup (Caddy install, tailnet
+  HTTPS + `funnel` attribute, pre-launch security checks), build, start and
+  publish steps.
+
+---
+
 ## [2026-10-12] - Spatial Analysis: Hide/Show Farm Records (Sprint 3, branch: develop)
 
 By Cristian. The Farm Records panel can be hidden so the map fills the
