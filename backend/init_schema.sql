@@ -2,6 +2,9 @@
 CREATE EXTENSION IF NOT EXISTS postgis;
 
 -- 2. Clear out any old mistakes (Idempotent setup)
+DROP TABLE IF EXISTS tbl_sar_planted_check CASCADE;
+DROP TABLE IF EXISTS tbl_sar_fetch_coverage CASCADE;
+DROP TABLE IF EXISTS tbl_sar_observation CASCADE;
 DROP TABLE IF EXISTS tbl_planted_verification CASCADE;
 DROP TABLE IF EXISTS tbl_area_exposure_summary CASCADE;
 DROP TABLE IF EXISTS tbl_tcb_signals CASCADE;
@@ -329,6 +332,50 @@ CREATE TABLE tbl_planted_verification (
     notes TEXT,
     CONSTRAINT uq_planted_verification_farm_typhoon UNIQUE (farm_id, typhoon_id)
 );
+
+-- Automatic SAR planted check (see migrations/2026-10-12_sar_planted_check.sql):
+-- cached per-farm Sentinel-1 VV/VH, the date range cached per farm, and the
+-- GREEN planted / YELLOW field_verify result per farm per typhoon. Not read
+-- by the assessment or the PABS export.
+CREATE TABLE tbl_sar_observation (
+    observation_id SERIAL PRIMARY KEY,
+    farm_id INT NOT NULL REFERENCES tbl_farms(farm_id) ON DELETE CASCADE,
+    scene_date DATE NOT NULL,
+    relative_orbit INT NOT NULL,
+    vv_db NUMERIC(6,2) NOT NULL,
+    vh_db NUMERIC(6,2) NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_sar_observation_farm_scene UNIQUE (farm_id, scene_date, relative_orbit)
+);
+
+CREATE TABLE tbl_sar_fetch_coverage (
+    farm_id INT PRIMARY KEY REFERENCES tbl_farms(farm_id) ON DELETE CASCADE,
+    covered_start DATE NOT NULL,
+    covered_end DATE NOT NULL,
+    geom_hash VARCHAR(32) NOT NULL,
+    fetched_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE tbl_sar_planted_check (
+    check_id SERIAL PRIMARY KEY,
+    farm_id INT NOT NULL REFERENCES tbl_farms(farm_id) ON DELETE CASCADE,
+    typhoon_id INT NOT NULL REFERENCES tbl_typhoons(typhoon_id) ON DELETE CASCADE,
+    status VARCHAR(20) NOT NULL CHECK (status IN ('planted', 'field_verify')),
+    reason_code VARCHAR(40) NOT NULL,
+    t0_date DATE,
+    tp_date DATE,
+    vh_rise_db NUMERIC(5,2),
+    ratio_drop_db NUMERIC(5,2),
+    relative_orbit INT,
+    scene_count INT NOT NULL DEFAULT 0,
+    window_start DATE NOT NULL,
+    window_end DATE NOT NULL,
+    checked_by INT REFERENCES tbl_system_users(user_id) ON DELETE SET NULL,
+    checked_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT uq_sar_planted_check_farm_typhoon UNIQUE (farm_id, typhoon_id)
+);
+
+CREATE INDEX idx_sar_planted_check_typhoon ON tbl_sar_planted_check (typhoon_id);
 
 CREATE INDEX idx_activity_log_created_at ON tbl_activity_log (created_at DESC);
 CREATE INDEX idx_activity_log_user_id ON tbl_activity_log (user_id);
