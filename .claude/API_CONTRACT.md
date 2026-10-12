@@ -57,6 +57,7 @@
 * **GET `/api/farms/`** and **GET `/api/farms/geometry`**
   - **`active_only=true`:** farms with a policy inside its coverage dates today **and not locked as used** by a final PABS export (2026-10-12).
   - **`typhoon_id`:** farms whose policy was locked as used for that typhoon; overrides `active_only`.
+  - **`affected_bulletin_id`:** farms inside that bulletin's TCWS signal >= 2 areas (2026-10-12) — the Spatial Analysis "Affected Only" button. Matching is the same `(province, municipality)` text join `ExposureCalculatorService` uses against `tbl_tcb_signals`, so it is municipality-granular, **not** a geometric intersection with a wind footprint. Unlike `typhoon_id` (already exported/locked as used) it works as soon as a bulletin is parsed, before any assessment run, and it AND's with `active_only`/`municipality`/`farmer_id` rather than overriding them. Signals with no `province` recorded (pre-2026-08-20 rows) are skipped. The filtered set is the AOI for SAR planted-verification — see `docs/SAR_ISPLANTED_METHOD.md`.
 * **GET `/api/farms/used-typhoons`**
   - **Description:** Typhoons with at least one policy locked as used by a final export, for the Farm Records typhoon filter.
   - **Response:** `{ "status": "success", "data": [ { "typhoon_id": 7, "name": "OPONG", "year": 2026, "farm_count": 20 } ] }`

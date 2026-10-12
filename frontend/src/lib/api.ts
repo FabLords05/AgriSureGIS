@@ -451,6 +451,11 @@ export function getFarms(params?: {
   municipality?: string;
   farmer_id?: number;
   typhoon_id?: number;
+  // Farms inside this bulletin's TCWS signal >= 2 areas -- the "Affected
+  // Only" filter (2026-10-12). Unlike typhoon_id (already exported/locked
+  // as used), this works straight after a bulletin is parsed, before any
+  // assessment run. AND's with the other filters.
+  affected_bulletin_id?: number;
 }): Promise<GetFarmsResult> {
   const query = new URLSearchParams();
   if (params?.limit != null) query.set('limit', String(params.limit));
@@ -459,6 +464,7 @@ export function getFarms(params?: {
   if (params?.municipality) query.set('municipality', params.municipality);
   if (params?.farmer_id != null) query.set('farmer_id', String(params.farmer_id));
   if (params?.typhoon_id != null) query.set('typhoon_id', String(params.typhoon_id));
+  if (params?.affected_bulletin_id != null) query.set('affected_bulletin_id', String(params.affected_bulletin_id));
   const qs = query.toString();
   return request<GetFarmsResult>(`/api/farms/${qs ? `?${qs}` : ''}`);
 }
@@ -489,6 +495,9 @@ export function getFarmsGeometry(params: {
   active_only?: boolean;
   municipality?: string;
   typhoon_id?: number;
+  // Same "Affected Only" filter as getFarms -- keeps the map's polygons
+  // scoped to exactly what the Farm Records table is showing.
+  affected_bulletin_id?: number;
 }): Promise<GetFarmsGeometryResult> {
   const query = new URLSearchParams();
   if (params.bbox) query.set('bbox', params.bbox);
@@ -497,6 +506,7 @@ export function getFarmsGeometry(params: {
   if (params.active_only != null) query.set('active_only', String(params.active_only));
   if (params.municipality) query.set('municipality', params.municipality);
   if (params.typhoon_id != null) query.set('typhoon_id', String(params.typhoon_id));
+  if (params.affected_bulletin_id != null) query.set('affected_bulletin_id', String(params.affected_bulletin_id));
   return request<GetFarmsGeometryResult>(`/api/farms/geometry?${query.toString()}`);
 }
 

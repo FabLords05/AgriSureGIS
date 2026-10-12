@@ -75,6 +75,13 @@ export interface UseFarmsDataParams {
   // used for that typhoon (overrides activeOnly server-side) and scopes like
   // municipality/farmerId -- a bounded set, so it allows activeOnly: false.
   typhoonId: number | null;
+  // null = "Affected Only" is off. A real bulletin id (2026-10-12) lists
+  // only the farms inside that bulletin's TCWS signal >= 2 areas. Scopes
+  // like municipality/farmerId/typhoonId -- a bounded set (one storm's
+  // signal areas, never the whole country), so it allows activeOnly: false.
+  // Unlike typhoonId it AND's with the other filters rather than overriding
+  // activeOnly, matching the backend.
+  affectedBulletinId: number | null;
 }
 
 export interface FarmsData {
@@ -102,7 +109,9 @@ export interface FarmsData {
   requestMore: () => void;
 }
 
-export function useFarmsData({ enabled, activeOnly, municipality, farmerId, typhoonId }: UseFarmsDataParams): FarmsData {
+export function useFarmsData({
+  enabled, activeOnly, municipality, farmerId, typhoonId, affectedBulletinId,
+}: UseFarmsDataParams): FarmsData {
   const [farms, setFarms] = useState<Farm[]>([]);
   const [isLoadingFirstPage, setIsLoadingFirstPage] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -142,6 +151,7 @@ export function useFarmsData({ enabled, activeOnly, municipality, farmerId, typh
         municipality: municipality ?? undefined,
         farmer_id: farmerId ?? undefined,
         typhoon_id: typhoonId ?? undefined,
+        affected_bulletin_id: affectedBulletinId ?? undefined,
       });
       if (myGeneration !== generationRef.current) return; // superseded by a restart -- discard
 
@@ -189,7 +199,10 @@ export function useFarmsData({ enabled, activeOnly, municipality, farmerId, typh
     // to fetch. Covers a CSV/GPX upload's refresh() firing while this
     // combination is briefly in effect (App.tsx's guard normally corrects
     // it before this matters).
-    if (!activeOnly && municipality == null && farmerId == null && typhoonId == null) return;
+    if (
+      !activeOnly && municipality == null && farmerId == null &&
+      typhoonId == null && affectedBulletinId == null
+    ) return;
     generationRef.current += 1;
     const myGeneration = generationRef.current;
     fetchInFlightRef.current = false;
@@ -202,7 +215,11 @@ export function useFarmsData({ enabled, activeOnly, municipality, farmerId, typh
   };
 
   useEffect(() => {
-    if (!enabled || (!activeOnly && municipality == null && farmerId == null && typhoonId == null)) {
+    if (
+      !enabled ||
+      (!activeOnly && municipality == null && farmerId == null &&
+       typhoonId == null && affectedBulletinId == null)
+    ) {
       // Hook disabled, or the one unbounded combination (see start() above)
       // -- nothing to fetch. Bump generation so any in-flight fetch from a
       // just-changed filter discards its result instead of landing after this.
@@ -222,7 +239,7 @@ export function useFarmsData({ enabled, activeOnly, municipality, farmerId, typh
     }
     start();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, activeOnly, municipality, farmerId, typhoonId]);
+  }, [enabled, activeOnly, municipality, farmerId, typhoonId, affectedBulletinId]);
 
   return {
     farms,

@@ -60,9 +60,9 @@ def _get_client():
     return _redis_client
 
 
-# municipality/farmer_id/typhoon_id default to None (not "" / 0) so a request
-# with no filter and a request explicitly filtering to some future ""/0 value
-# can never collide.
+# municipality/farmer_id/typhoon_id/affected_bulletin_id default to None (not
+# "" / 0) so a request with no filter and a request explicitly filtering to
+# some future ""/0 value can never collide.
 def _cache_key(
     *,
     limit: int | None,
@@ -71,8 +71,12 @@ def _cache_key(
     municipality: str | None = None,
     farmer_id: int | None = None,
     typhoon_id: int | None = None,
+    affected_bulletin_id: int | None = None,
 ) -> str:
-    return f"agrisuregis:farms:{limit}:{after_id}:{active_only}:{municipality}:{farmer_id}:{typhoon_id}"
+    return (
+        f"agrisuregis:farms:{limit}:{after_id}:{active_only}:{municipality}"
+        f":{farmer_id}:{typhoon_id}:{affected_bulletin_id}"
+    )
 
 
 def get_cached_farms_page(
@@ -83,6 +87,7 @@ def get_cached_farms_page(
     municipality: str | None = None,
     farmer_id: int | None = None,
     typhoon_id: int | None = None,
+    affected_bulletin_id: int | None = None,
 ) -> dict[str, Any] | None:
     client = _get_client()
     if client is None:
@@ -92,6 +97,7 @@ def get_cached_farms_page(
             _cache_key(
                 limit=limit, after_id=after_id, active_only=active_only,
                 municipality=municipality, farmer_id=farmer_id, typhoon_id=typhoon_id,
+                affected_bulletin_id=affected_bulletin_id,
             )
         )
         return json.loads(raw) if raw else None
@@ -108,6 +114,7 @@ def cache_farms_page(
     municipality: str | None = None,
     farmer_id: int | None = None,
     typhoon_id: int | None = None,
+    affected_bulletin_id: int | None = None,
 ) -> None:
     client = _get_client()
     if client is None:
@@ -117,6 +124,7 @@ def cache_farms_page(
             _cache_key(
                 limit=limit, after_id=after_id, active_only=active_only,
                 municipality=municipality, farmer_id=farmer_id, typhoon_id=typhoon_id,
+                affected_bulletin_id=affected_bulletin_id,
             ),
             _TTL_SECONDS,
             json.dumps(result),

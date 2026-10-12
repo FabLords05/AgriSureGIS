@@ -4,6 +4,121 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-12] - Spatial Analysis: "Affected Only" Filter + SAR isPlanted Method Spec (Sprint 3, branch: develop)
+
+Per Fabio. The GIS Specialist needs to narrow Spatial Analysis to just the
+insured farms a typhoon actually hit, so those polygons — and only those —
+can be checked visually on SAR imagery to confirm the parcel was planted.
+Two pieces: the filter (built here, real backend) and the SAR detection
+method it will feed (specified, not yet implemented).
+
+Definition decision: "affected" = the farm's municipality is inside the
+selected bulletin's TCWS signal >= 2 areas, **not** "has a completed
+RiskAssessment". The planted-check is validation *before* payout, so the
+filter has to work the moment a bulletin is parsed, before Calculate
+Assessment has run.
+
+### 1. New file: `docs/SAR_ISPLANTED_METHOD.md`
+* Specification for `isPlanted`, grounded in two peer-reviewed Philippine
+  studies Fabio supplied (PhilGEOS x GeoAdvances 2019, IRRI/PhilRice):
+  Gutierrez et al. on the rice planting window, Villano et al. on TP/DS
+  separability. Both are Philippine rice with Philippine ground truth, and
+  Gutierrez names Misamis Oriental (Claveria) and Northern Mindanao
+  directly, so Region X results apply without extrapolation.
+* Defines a 5-condition multi-temporal rule (flood minimum → biomass rise →
+  canopy closure via VV/VH drop → dual-pol agreement → timing plausibility
+  against the Region X planting calendar and the policy's crop stage).
+  Deliberately **not** a single-date VH threshold: Villano's field means
+  show only ~2–3 dB of VH dynamic range across the whole season, too tight
+  to threshold reliably against speckle. The VV/VH ratio is the stronger
+  discriminator (significant at every growth stage bar harvest).
+* Records the deviations from the published method honestly: MAPscape-RICE®
+  is proprietary so its temporal smoothing must be reimplemented on GEE;
+  10 m vs 20 m resolution; S-1B's 2021 failure changes the revisit
+  assumption; incidence angle requires holding to one relative orbit.
+* All thresholds are named constants requiring local calibration (§6) —
+  no literature value ships as-is. SAR corroborates the declared crop stage,
+  never overrides it (Gutierrez's SoS carries ±23 days, about one growth
+  stage). `isPlanted` does not enter `I = (AC / 1000) * IF`.
+
+### 2. File: `backend/app/api/farms.py`
+* New **`_affected_farm_ids(db, tcb_id, min_signal_level=2)`**: farms whose
+  AdminBoundary `(province, municipality)` matches a `tbl_tcb_signals` row
+  for that bulletin at signal 2+. Same text-matching join
+  `ExposureCalculatorService.compute_for_typhoon` already uses — PAGASA
+  publishes TCWS areas as named municipality lists, not radii, so there is
+  no wind-footprint polygon to intersect. Province-qualified to avoid
+  same-named municipalities in other provinces; signals with a NULL
+  `province` (pre-2026-08-20 rows) are skipped rather than matched on
+  municipality alone. Returns a scalar subquery, not a join, so it composes
+  with the existing `municipality` filter's own AdminBoundary join instead
+  of colliding with it.
+* New module constant `MIN_AFFECTED_SIGNAL_LEVEL = 2`, matching the
+  assessment engine's eligibility floor (signal >= 2, not == 2).
+* New `affected_bulletin_id` query param on **`list_farms`** and
+  **`get_farms_geometry`**. AND's with `active_only`/`municipality`/
+  `farmer_id` rather than overriding them — unlike `typhoon_id`, "affected"
+  and "active" are independent questions, since a hit farm can still hold
+  usable cover. On the geometry endpoint it applies only to the normal
+  bbox-scoped query; the `farm_id` and bbox-less `farmer_id` fly-to
+  bypasses keep ignoring every filter, as before.
+
+### 3. File: `backend/app/core/farms_cache.py`
+* `affected_bulletin_id` added to `_cache_key`, `get_cached_farms_page` and
+  `cache_farms_page`. Without this, a filtered and an unfiltered page would
+  share a Redis key and serve each other's rows.
+
+### 4. File: `frontend/src/app/App.tsx`
+* New `affectedOnly` state plus derived `affectedBulletinId`
+  (`affectedOnly && selectedBulletin ? selectedBulletin.tcb_id : null`), so
+  the filter can never scope to a storm that isn't the one selected in the
+  header. A toggle rather than a second dropdown: the bulletin is already
+  chosen, and it's the same storm whose signals the map draws.
+* The unbounded-combination guard now counts an affected scope alongside
+  municipality/farmer/typhoon before forcing Active Insurance Only back on.
+
+### 5. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* New "Affected Only" toolbar button (`Satellite` icon, orange `#c2410c` to
+  distinguish it from the green Active Insurance toggle and the amber
+  typhoon dropdown). Disabled with an explanatory tooltip when no bulletin
+  is selected; when enabled the tooltip names the typhoon and bulletin
+  number. Active styling keys off `affectedBulletinId`, not `affectedOnly`,
+  so the button can't look on while the filter is inert.
+
+### 6. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* New `affectedBulletinId` prop, threaded into the viewport geometry fetch
+  and into both its dependency arrays plus the geomCache reset, so map
+  polygons always match the Farm Records table's set. Added to the
+  "unbounded combination" skip-check as a real scope.
+
+### 7. Files: `frontend/src/lib/api.ts`, `frontend/src/lib/useFarmsData.ts`
+* `affected_bulletin_id` added to `getFarms()` and `getFarmsGeometry()`.
+* `useFarmsData` takes `affectedBulletinId`, sends it with each page, and
+  counts it as a bounding scope in both the `start()` no-op guard and the
+  effect guard (one storm's signal areas is a bounded set, so it permits
+  Active Insurance Only off), with it added to the restart deps.
+
+### 8. File: `backend/tests/test_farms_api.py`
+* New `ListFarmsAffectedOnlyTests`: the filter compiles to a TCWS-signal
+  subquery scoped to the given bulletin at signal 2+ with the province
+  guard; it AND's with `active_only` instead of replacing it; and omitting
+  it adds no filter.
+* **Fixed pre-existing drift from `ef9265e`:** all 12 direct `list_farms()`
+  calls now pass `typhoon_id=None` explicitly. Calling the endpoint as a
+  plain function leaves an unpassed param bound to the raw
+  `fastapi.params.Query` marker object, which is *not* `None` — so every one
+  of these tests was taking the `typhoon_id is not None` branch and
+  asserting against filters it never expected. This is the same convention
+  `test_active_only_false_no_regression` already documents for
+  `active_only`; the typhoon filter just didn't follow it.
+* `_build_mock_db`'s query fallback now forwards every queried entity
+  (`SAQuery([entity, *rest])`), not just the first — `_affected_farm_ids`
+  builds a two-column subquery and reads both columns back off it.
+
+### 9. File: `.claude/API_CONTRACT.md`
+* Documented `affected_bulletin_id` under Farms, including that matching is
+  municipality-granular text matching rather than a geometric intersection.
+
 ## [2026-10-12] - Spatial Analysis: Hide/Show Farm Records (Sprint 3, branch: develop)
 
 By Cristian. The Farm Records panel can be hidden so the map fills the

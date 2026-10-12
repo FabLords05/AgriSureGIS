@@ -3,7 +3,7 @@ from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, Query
 from geoalchemy2.shape import to_shape
 from shapely.geometry import mapping
-from sqlalchemy import func
+from sqlalchemy import and_, func
 from sqlalchemy.orm import Session, joinedload
 
 from app.core.database import get_db
@@ -11,7 +11,19 @@ from app.core.farmer_name import format_given_first, format_pcic
 from app.core.farms_cache import cache_farms_page, get_cached_farms_page
 from app.core.farms_view import fetch_latest_insurance_from_view, materialized_view_available
 from app.core.security import get_current_user
-from app.models.models import AdminBoundary, Farm, FarmerProfile, InsuranceRecord, InsuranceUsage, Typhoon
+from app.models.models import (
+    AdminBoundary,
+    Farm,
+    FarmerProfile,
+    InsuranceRecord,
+    InsuranceUsage,
+    TcbSignal,
+    Typhoon,
+)
+
+# Lowest TCWS signal that counts as "affected" -- matches the assessment
+# engine's own eligibility rule (signal >= 2, not signal == 2).
+MIN_AFFECTED_SIGNAL_LEVEL = 2
 
 router = APIRouter(prefix="/farms", tags=["farms"], dependencies=[Depends(get_current_user)])
 
@@ -92,6 +104,63 @@ def _typhoon_used_farm_ids(db: Session, typhoon_id: int):
     )
 
 
+def _affected_farm_ids(db: Session, tcb_id: int, min_signal_level: int = MIN_AFFECTED_SIGNAL_LEVEL):
+    """
+    Farms sitting inside a bulletin's TCWS signal areas at `min_signal_level`
+    or above -- backs the "Affected Only" filter on GET /farms/ and
+    /farms/geometry (2026-10-12).
+
+    Matching is the same (province, municipality) text join
+    ExposureCalculatorService.compute_for_typhoon already uses: PAGASA
+    publishes TCWS areas as named municipality lists per bulletin (captured
+    in tbl_tcb_signals), not as a radius, so there is no wind-footprint
+    polygon to intersect against. That makes this filter barangay-granular
+    at best -- every farm in a listed municipality is "affected" -- which is
+    correct for gating a visual check but is NOT a geometric
+    intersection. See docs/SAR_ISPLANTED_METHOD.md for what the filtered set
+    then feeds.
+
+    Keyed on (province, municipality) rather than municipality alone for the
+    same reason the exposure calculator is: nationwide, duplicate
+    municipality names across provinces are common. Signals predating the
+    province column (pre-2026-08-20, nullable -- see
+    backend/migrations/2026-08-20_tcb_signal_province.sql) are skipped
+    rather than matched on municipality alone, which could silently pull in
+    a same-named municipality from the wrong province.
+
+    Deliberately a scalar subquery on Farm.farm_id, not a join: callers
+    already join AdminBoundary for the `municipality` filter, and a second
+    join against the same table would collide. An `.in_()` against this
+    composes with every other filter instead.
+    """
+    signal_areas = (
+        db.query(
+            func.lower(TcbSignal.province).label("province"),
+            func.lower(TcbSignal.area_name).label("municipality"),
+        )
+        .filter(
+            TcbSignal.tcb_id == tcb_id,
+            TcbSignal.signal_level >= min_signal_level,
+            TcbSignal.province.isnot(None),
+        )
+        .distinct()
+        .subquery()
+    )
+    return (
+        db.query(Farm.farm_id)
+        .join(AdminBoundary, Farm.boundary_id == AdminBoundary.boundary_id)
+        .join(
+            signal_areas,
+            and_(
+                func.lower(AdminBoundary.province) == signal_areas.c.province,
+                func.lower(AdminBoundary.municipality) == signal_areas.c.municipality,
+            ),
+        )
+        .distinct()
+        .scalar_subquery()
+    )
+
+
 @router.get("/")
 def list_farms(
     db: Session = Depends(get_db),
@@ -101,6 +170,7 @@ def list_farms(
     municipality: str | None = Query(None),
     farmer_id: int | None = Query(None),
     typhoon_id: int | None = Query(None),
+    affected_bulletin_id: int | None = Query(None),
 ):
     """
     Lists farms with farmer/boundary identity, insurance coverage dates (from
@@ -155,6 +225,14 @@ def list_farms(
     a client-side filter over the fully-loaded array into the query, since
     the redesign no longer loads the full array client-side to filter over.
 
+    `affected_bulletin_id` (2026-10-12) restricts results to farms inside
+    that bulletin's TCWS signal >= 2 areas (_affected_farm_ids) -- the
+    "Affected Only" filter. Unlike `typhoon_id` (which means "already
+    exported/locked as used"), this is usable the moment a bulletin is
+    parsed, before any assessment run, because it reads tbl_tcb_signals
+    directly. It AND's with `active_only`/`municipality`/`farmer_id` rather
+    than overriding them.
+
     `farmer_id` (2026-08-18, farmer search) restricts results to one
     farmer's own farms -- an exact FK filter (`Farm.farmer_id == farmer_id`),
     always cheap regardless of table size. Combines with `active_only`/
@@ -197,6 +275,7 @@ def list_farms(
     cached = get_cached_farms_page(
         limit=limit, after_id=after_id, active_only=active_only,
         municipality=municipality, farmer_id=farmer_id, typhoon_id=typhoon_id,
+        affected_bulletin_id=affected_bulletin_id,
     )
     if cached is not None:
         return cached
@@ -207,6 +286,9 @@ def list_farms(
         base_query = base_query.filter(Farm.farm_id.in_(_typhoon_used_farm_ids(db, typhoon_id)))
     elif active_only:
         base_query = base_query.filter(Farm.farm_id.in_(_active_farm_ids(db)))
+
+    if affected_bulletin_id is not None:
+        base_query = base_query.filter(Farm.farm_id.in_(_affected_farm_ids(db, affected_bulletin_id)))
 
     if municipality:
         # Plain join (not joinedload) purely to filter -- Farm.boundary_id ->
@@ -324,7 +406,8 @@ def list_farms(
 
     cache_farms_page(
         limit=limit, after_id=after_id, active_only=active_only,
-        municipality=municipality, farmer_id=farmer_id, typhoon_id=typhoon_id, result=result,
+        municipality=municipality, farmer_id=farmer_id, typhoon_id=typhoon_id,
+        affected_bulletin_id=affected_bulletin_id, result=result,
     )
     return result
 
@@ -348,6 +431,10 @@ def get_farms_geometry(
     typhoon_id: int | None = Query(
         None,
         description="Only farms whose policy was locked as used for this typhoon; overrides active_only. Same filter as GET /farms/.",
+    ),
+    affected_bulletin_id: int | None = Query(
+        None,
+        description="Only farms inside this bulletin's TCWS signal >= 2 areas. AND's with the other filters. Same filter as GET /farms/.",
     ),
     db: Session = Depends(get_db),
 ):
@@ -379,6 +466,14 @@ def get_farms_geometry(
     geometry wouldn't be in the bbox result set yet -- this lets the map
     resolve that one farm's geometry directly, reusing this endpoint/route
     instead of adding a second one.
+
+    `affected_bulletin_id` (2026-10-12) scopes the viewport query to farms
+    inside that bulletin's TCWS signal >= 2 areas, so the map's polygons
+    match whatever the Farm Records table's "Affected Only" button is
+    showing. Like `active_only`/`municipality`, it applies only to the
+    normal bbox-scoped query -- the `farm_id` and bbox-less `farmer_id`
+    fly-to bypasses above deliberately ignore every filter, since their job
+    is to resolve a specific farm's geometry regardless of what's on screen.
 
     `farmer_id` (2026-08-18, farmer search) has two roles depending on
     whether `bbox` is also given: combined with a real `bbox` request it's
@@ -421,6 +516,9 @@ def get_farms_geometry(
         query = query.filter(Farm.farm_id.in_(_typhoon_used_farm_ids(db, typhoon_id)))
     elif active_only:
         query = query.filter(Farm.farm_id.in_(_active_farm_ids(db)))
+
+    if affected_bulletin_id is not None:
+        query = query.filter(Farm.farm_id.in_(_affected_farm_ids(db, affected_bulletin_id)))
 
     if municipality:
         query = query.join(AdminBoundary, Farm.boundary_id == AdminBoundary.boundary_id).filter(
