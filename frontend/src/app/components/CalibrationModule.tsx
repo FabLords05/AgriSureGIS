@@ -2,10 +2,10 @@ import { useEffect, useState } from "react";
 import {
   Settings, Shield, Save, AlertTriangle,
   ChevronDown, ChevronRight, CheckCircle2,
-  Clock, ToggleRight, DollarSign, Wifi
+  Clock, ToggleRight, DollarSign, Wifi, Key
 } from "lucide-react";
 import { DAMAGE_FACTORS, GrowthStage } from "./mockData";
-import { getParserSettings } from "@/lib/api";
+import { getParserSettings, getSystemStatus, SystemStatus } from "@/lib/api";
 
 interface SectionProps {
   title: string;
@@ -50,6 +50,14 @@ export function CalibrationModule({ coverageRatePerHa, onCoverageRateChange }: C
   // configurable here.
   const [backendOk, setBackendOk] = useState<boolean | null>(null);
   const [lastCheck, setLastCheck] = useState<string | null>(null);
+
+  // Google Earth Engine connection (2026-10-12) -- read-only. The
+  // prototype's editable credentials card is deliberately not reproduced:
+  // the service-account key is a live private key and stays in backend/.env.
+  const [gee, setGee] = useState<SystemStatus["gee"] | null>(null);
+  useEffect(() => {
+    getSystemStatus().then(res => setGee(res.gee ?? null)).catch(() => setGee(null));
+  }, []);
 
   useEffect(() => {
     getParserSettings()
@@ -110,6 +118,30 @@ export function CalibrationModule({ coverageRatePerHa, onCoverageRateChange }: C
             <Clock size={10} className="text-muted-foreground" />
             <span className="text-[10px] text-muted-foreground">Last check: {lastCheck ?? "—"}</span>
           </div>
+        </Section>
+
+        {/* Google Earth Engine -- read-only status for SAR planted verification */}
+        <Section title="Google Earth Engine" icon={<Key size={15} />}>
+          <p className="text-[11px] text-muted-foreground mb-3">
+            Sentinel-1 SAR imagery for verifying that affected farms were planted. Credentials are set on the
+            server (<span className="font-mono">GEE_SERVICE_ACCOUNT_KEY_PATH</span> in backend/.env), not here.
+          </p>
+          <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[11px]">
+            <span className="text-muted-foreground">Status:</span>
+            <span className="flex items-center gap-1.5">
+              {gee?.connected
+                ? <CheckCircle2 size={12} className="text-emerald-500 shrink-0" />
+                : <AlertTriangle size={12} className="text-amber-500 shrink-0" />}
+              {gee == null ? "Checking…" : gee.connected ? "Connected" : gee.configured ? "Configured, not connected" : "Not configured"}
+            </span>
+            <span className="text-muted-foreground">Project:</span>
+            <span className="font-mono">{gee?.project_id ?? "—"}</span>
+            <span className="text-muted-foreground">Service account:</span>
+            <span className="font-mono break-all">{gee?.service_account ?? "—"}</span>
+          </div>
+          {gee?.last_error && (
+            <p className="text-[10px] text-amber-600 mt-3">{gee.last_error}</p>
+          )}
         </Section>
 
         {/* Coverage Parameters */}

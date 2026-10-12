@@ -40,8 +40,8 @@
   - **Description:** For the Spatial Analysis typhoon track overlay (2026-10-12). One point per bulletin center in issue order (bulletins with no center, or the parser's 0.0/0.0 fallback, are skipped), the latest bulletin's forecast positions, and the PAR outline. `in_par` here is geometric (latest center inside PAR), `null` if no center; radii are `null` when the bulletin didn't state them.
   - **Response:** `{ "status": "success", "typhoon_id": 7, "typhoon_name": "OPONG", "year": 2026, "is_active": true, "par_polygon": [[25, 120], ...], "points": [ { "tcb_id": 410, "bulletin_count": 9, "is_final": false, "issued_at": "...", "category": "Typhoon", "max_sustained_winds": 120, "lat": 14.3, "lng": 120.9, "wind_radius_km": 500, "storm_force_radius_km": 150, "inside_par": true } ], "forecast": [ { "label": "12-Hour Forecast 2:00 AM", "lat": 15.0, "lon": 117.8, "location": "...", "inside_par": true } ], "in_par": true }`
 * **GET `/api/system/status`**
-  - **Description:** For the Monitoring dashboard's System Status panel: the PAGASA polling job's last/next run (last run is in memory, `null` until the first run after a restart), the newest bulletin, and whether SMTP email alerts are configured.
-  - **Response:** `{ "status": "success", "parser": { "interval_minutes": 15, "last_run_at": "...", "scrape_ok": true, "status_sync_ok": true, "next_run_at": "..." }, "last_bulletin": { "tcb_id": 432, "bulletin_count": 23, "is_final": true, "typhoon_name": "OPONG", "issued_at": "..." }, "email_alerts": { "configured": true } }`
+  - **Description:** For the Monitoring dashboard's System Status panel: the PAGASA polling job's last/next run (last run is in memory, `null` until the first run after a restart), the newest bulletin, whether SMTP email alerts are configured, and (2026-10-12) the Google Earth Engine connection (`gee`, read-only -- the key never leaves the server; a failed sign-in is retried at most every 5 minutes).
+  - **Response:** `{ "status": "success", "parser": { "interval_minutes": 15, "last_run_at": "...", "scrape_ok": true, "status_sync_ok": true, "next_run_at": "..." }, "last_bulletin": { "tcb_id": 432, "bulletin_count": 23, "is_final": true, "typhoon_name": "OPONG", "issued_at": "..." }, "email_alerts": { "configured": true }, "gee": { "configured": true, "connected": true, "project_id": "webgis-pcic", "service_account": "agrisure-ee@webgis-pcic.iam.gserviceaccount.com", "last_error": null } }`
 
 ## 4. Parametric Assessments
 * **POST `/api/assessments/calculate`**
@@ -61,6 +61,17 @@
 * **GET `/api/farms/used-typhoons`**
   - **Description:** Typhoons with at least one policy locked as used by a final export, for the Farm Records typhoon filter.
   - **Response:** `{ "status": "success", "data": [ { "typhoon_id": 7, "name": "OPONG", "year": 2026, "farm_count": 20 } ] }`
+
+## 4c. SAR Planted Verification (Verify Farm Planted, 2026-10-12)
+Phase 1 of `docs/SAR_ISPLANTED_METHOD.md`: a visual layer plus the GIS Specialist's recorded verdict. The verdict is **never** read by the assessment or the PABS/PCIC export.
+* **POST `/api/sar/layer`**
+  - **Payload:** `{ "bulletin_id": 42 }`
+  - **Description:** Pre-event Sentinel-1 VV/VH-ratio tile layer from Google Earth Engine, clipped (20 m inward buffer) to the bulletin's affected farm polygons -- the same set as `affected_bulletin_id` on `GET /api/farms/`, GPX-surveyed farms only, capped at 5,000. Window: the 24 days before the typhoon's first bulletin; descending IW scenes from the single most frequent relative orbit; colour stretch 4.5-7.5 dB. Cached server-side for 1 hour.
+  - **Response:** `{ "status": "success", "data": { "tile_url": "https://earthengine.googleapis.com/.../{z}/{x}/{y}", "scene_dates": ["2026-09-06", "2026-09-18"], "relative_orbit": 105, "window_start": "2026-09-01", "window_end": "2026-09-24", "min_db": 4.5, "max_db": 7.5, "palette": ["#14532d", "#22c55e", "#d2b48c", "#7c4a1e"], "bulletin_id": 42, "event_date": "2026-09-25", "farm_count": 120, "capped": false, "skipped_no_geom": 3 } }`
+  - **Errors:** 404 unknown bulletin; 503 Earth Engine not configured; 422 no affected polygons or no pre-event scenes; 502 Earth Engine failure.
+* **GET `/api/sar/verifications?typhoon_id=7`** -- `{ "status": "success", "data": [ { "farm_id": 5, "typhoon_id": 7, "is_planted": true, "verified_by": "Juan Dela Cruz", "verified_at": "...", "notes": null } ] }`
+* **PUT `/api/sar/verifications/{farm_id}`** -- payload `{ "typhoon_id": 7, "is_planted": false, "notes": "bare soil" }`; creates or replaces the verdict for that farm and typhoon (`tbl_planted_verification`, unique per farm + typhoon). 404 unknown farm.
+* **DELETE `/api/sar/verifications/{farm_id}?typhoon_id=7`** -- back to unchecked; `{ "status": "success", "deleted": 1 }`.
 
 ## 5. Insurance
 * **GET `/api/insurance/summary`** - Counts date-window-active vs. total policies.

@@ -6,6 +6,7 @@ from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.models import TropicalCycloneBulletin, Typhoon
 from app.services.email_alert_service import smtp_configured
+from app.services.gee_sar_service import gee_status
 
 router = APIRouter(prefix="/system", tags=["system"], dependencies=[Depends(get_current_user)])
 
@@ -52,4 +53,7 @@ def get_system_status(request: Request, db: Session = Depends(get_db)):
             else None
         ),
         "email_alerts": {"configured": smtp_configured()},
+        # Earth Engine connection for SAR planted verification (2026-10-12);
+        # read-only -- the key lives only in backend/.env.
+        "gee": gee_status(),
     }

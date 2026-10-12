@@ -2,6 +2,7 @@
 CREATE EXTENSION IF NOT EXISTS postgis;
 
 -- 2. Clear out any old mistakes (Idempotent setup)
+DROP TABLE IF EXISTS tbl_planted_verification CASCADE;
 DROP TABLE IF EXISTS tbl_area_exposure_summary CASCADE;
 DROP TABLE IF EXISTS tbl_tcb_signals CASCADE;
 DROP TABLE IF EXISTS tbl_tropical_cyclone_bulletins CASCADE;
@@ -312,6 +313,21 @@ CREATE TABLE tbl_activity_log (
     endpoint VARCHAR(255) NOT NULL,
     status_code INT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+-- GIS Specialist's planted / not-planted verdict per farm per typhoon, from
+-- the pre-event Sentinel-1 layer (see
+-- migrations/2026-10-12_planted_verification.sql). Not read by the
+-- assessment or the PABS export -- recorded, never gating.
+CREATE TABLE tbl_planted_verification (
+    verification_id SERIAL PRIMARY KEY,
+    farm_id INT NOT NULL REFERENCES tbl_farms(farm_id) ON DELETE CASCADE,
+    typhoon_id INT NOT NULL REFERENCES tbl_typhoons(typhoon_id) ON DELETE CASCADE,
+    is_planted BOOLEAN NOT NULL,
+    verified_by INT REFERENCES tbl_system_users(user_id) ON DELETE SET NULL,
+    verified_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    notes TEXT,
+    CONSTRAINT uq_planted_verification_farm_typhoon UNIQUE (farm_id, typhoon_id)
 );
 
 CREATE INDEX idx_activity_log_created_at ON tbl_activity_log (created_at DESC);

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Boolean, UniqueConstraint, func
+from sqlalchemy import Column, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, Boolean, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from geoalchemy2 import Geometry
@@ -326,6 +326,35 @@ class AreaExposureSummary(Base):
     computed_at = Column(DateTime, server_default=func.now())
 
     typhoon = relationship("Typhoon")
+
+
+class PlantedVerification(Base):
+    """
+    The GIS Specialist's planted / not-planted verdict for one farm for one
+    typhoon -- the "Verify Farm Planted" use case (an <<include>> of Conduct
+    Parametric Damage Assessment). Recorded after looking at the pre-event
+    Sentinel-1 VV/VH layer (app/services/gee_sar_service.py) over the
+    "Affected Only" polygons. See migrations/2026-10-12_planted_verification.sql.
+
+    Per typhoon, not per farm, because planting is per season. Deliberately
+    NOT read by AssessmentService or the PABS/PCIC export (per Fabio,
+    2026-10-12: record the verdict, don't gate the payout).
+    """
+
+    __tablename__ = "tbl_planted_verification"
+    __table_args__ = (
+        UniqueConstraint("farm_id", "typhoon_id", name="uq_planted_verification_farm_typhoon"),
+    )
+
+    verification_id = Column(Integer, primary_key=True, index=True)
+    farm_id = Column(Integer, ForeignKey("tbl_farms.farm_id", ondelete="CASCADE"), nullable=False)
+    typhoon_id = Column(Integer, ForeignKey("tbl_typhoons.typhoon_id", ondelete="CASCADE"), nullable=False)
+    is_planted = Column(Boolean, nullable=False)
+    verified_by = Column(Integer, ForeignKey("tbl_system_users.user_id", ondelete="SET NULL"))
+    verified_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    notes = Column(Text)
+
+    verifier = relationship("SystemUser", foreign_keys=[verified_by])
 
 
 class ParserSettings(Base):

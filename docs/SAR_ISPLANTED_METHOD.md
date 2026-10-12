@@ -1,6 +1,18 @@
 # SAR `isPlanted` Detection Method
 
-**Status:** Specification — not yet implemented.
+**Status:** Phase 1 implemented (2026-10-12) — the §7 primary VV/VH colour
+render over the affected polygons, plus a recorded Specialist verdict
+(`tbl_planted_verification`; never gates a payout). Code:
+`backend/app/services/gee_sar_service.py`, `backend/app/api/sar.py`,
+`frontend/src/app/components/SarAnalysisPanel.tsx`. **Not yet implemented
+(Phase 2):** the §3 rule, the §3.2 percentage, the §7 sparkline, and the §6
+calibration.
+
+Phase 1 deviations from this spec, stated plainly: the composite is the
+temporal median of the pre-event scenes in the 24 days before the typhoon's
+first bulletin (≈ two acquisitions), not the 150-day series §3 needs; and a
+single relative orbit is chosen per request across all affected farms, so
+farms outside that orbit's footprint get no colour.
 **Purpose:** Defines how AgriSureGIS determines whether an insured farm polygon
 carried a standing rice crop at the time of a typhoon, using Sentinel-1 SAR via
 Google Earth Engine.
