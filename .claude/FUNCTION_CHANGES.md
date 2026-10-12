@@ -4,6 +4,41 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-12] - Public Deployment via Tailscale Funnel + Caddy (branch: fabio/frontend/affected-only-sar-filter)
+
+By Cristian. This PC is behind PLDT CGNAT, so router port forwarding can't
+work. Tailscale Funnel gives a public HTTPS address over an outbound
+connection, and Caddy puts the built frontend, `/api` and the GeoServer
+workspace behind that one origin, so no CORS change is needed.
+
+### 1. New file: `deploy/Caddyfile`
+* Listens on `127.0.0.1:8090` (Funnel's target). Routes `/api/*` →
+  uvicorn `:8000`, `/geoserver-proxy/agrisuregis/*` → GeoServer `:8080`
+  (rewritten to `/geoserver/`; it replaces Vite's dev-only proxy), and
+  everything else → `frontend/dist` with SPA fallback to `index.html`.
+* Deliberately not routed: FastAPI `/docs`/`/openapi.json` and the GeoServer
+  admin UI. The admin API and auto-HTTPS are off (Funnel terminates TLS).
+
+### 2. New file: `frontend/.env.production`
+* Used only by `npm run build`. `VITE_API_BASE_URL` is empty, so the built
+  app calls `/api` on its own origin. No secrets.
+
+### 3. File: `start-servers.bat`
+* New optional `prod` argument: runs the backend without `--reload`.
+* Starts Caddy (`caddy run --config deploy\Caddyfile` from the repo root)
+  **in both modes**. It is skipped if port 8090 is already listening. If
+  `caddy` isn't on PATH yet, the script tries winget's package folder. If
+  `frontend\dist` hasn't been built, it prints a message and skips Caddy;
+  GeoServer and the backend still start. In dev mode Caddy serves the last
+  build, not live source. Vite on `:5173` is still where you develop.
+
+### 4. File: `.claude/LOCAL_SERVER_SETUP.md`
+* New section 9: architecture, one-time setup (Caddy install, Funnel node
+  attribute, strong `JWT_SECRET_KEY` + changed seed passwords before going
+  public), build, start, `tailscale funnel --bg 8090`, and how to stop it.
+
+---
+
 ## [2026-10-12] - Spatial Analysis: "Affected Only" Filter + SAR isPlanted Method Spec (Sprint 3, branch: develop)
 
 Per Fabio. The GIS Specialist needs to narrow Spatial Analysis to just the
