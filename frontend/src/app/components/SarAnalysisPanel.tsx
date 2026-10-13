@@ -117,7 +117,7 @@ export function SarAnalysisPanel({
               <div className="border border-border rounded-lg px-3 py-2 text-[11px]">
                 Farms affected by {typhoonLabel}
                 <p className="text-[10px] text-muted-foreground mt-0.5">
-                  Every farm under TCWS signal 2+ in any of its bulletins (the "Affected by" set).
+                  Every farm under TCWS signal 2+ in any of its bulletins that was insured when it hit. Farms without cover are skipped.
                 </p>
               </div>
             </div>

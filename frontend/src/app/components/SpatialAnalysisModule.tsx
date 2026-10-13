@@ -862,7 +862,7 @@ export function SpatialAnalysisModule({
                               : <span className="text-muted-foreground">—</span>}
                           </td>
                           <td className="px-2.5 py-2 whitespace-nowrap overflow-hidden text-ellipsis text-muted-foreground" title={check?.reason}>
-                            {check ? check.reason : "Not in the last check"}
+                            {check ? check.reason : "Not checked (not insured at the typhoon)"}
                           </td>
                         </>
                       );

@@ -735,7 +735,7 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
                 <>
                   <span className="text-foreground/70">Planted (SAR):</span>
                   <span className="font-medium" style={{ color: check ? PLANTED_CHECK_COLORS[check.status] : undefined }}>
-                    {check ? PLANTED_CHECK_LABELS[check.status] : "Not in the last check"}
+                    {check ? PLANTED_CHECK_LABELS[check.status] : "Not checked (not insured at the typhoon)"}
                   </span>
                   {check && (
                     <>

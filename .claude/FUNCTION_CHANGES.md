@@ -4,6 +4,49 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-12] - SAR Checks Only Farms Insured When the Typhoon Hit (Sprint 3)
+
+Per Cristian: the planted check (and its colour layer) must not send every
+affected farm to Google Earth Engine. Only farms insured when the typhoon
+hit are checked, which saves Earth Engine quota on the 100K+ records with no
+usable cover. Branch: `cristian/backend/sar-insured-only`.
+
+Decision: "insured" is dated to the typhoon, not today. That differs from
+the **Active Insurance Only** button, which would drop the farms already
+exported for this typhoon and every past typhoon's expired policies. The
+table and map filter is unchanged (SAR-only scope).
+
+### 1. File: `backend/app/api/sar.py`
+* New **`_insured_at_event_farm_ids(typhoon_id, event_date)`**: farms with an
+  `InsuranceRecord` in force on the first-bulletin date
+  (`effectivity_date <= event <= expiry_date`) whose policy isn't locked as
+  used (`InsuranceUsage` final) for a **different** typhoon. A policy spent
+  on this same typhoon still counts.
+* New **`_sar_farm_filter()`**: the affected set AND the insured set.
+* `_load_affected_polygons()` and `_load_affected_farms()` take `event_date`
+  and use that filter, so uninsured farms are never sent to Earth Engine and
+  get no stored result. The 422 messages now mention insurance.
+
+### 2. Frontend
+* `SarAnalysisPanel.tsx`: the Area of Interest text says uninsured farms are
+  skipped.
+* `SpatialAnalysisModule.tsx` (SAR Reason cell) and `GISLeafletMap.tsx` (Farm
+  Details): a farm with no result reads "Not checked (not insured at the
+  typhoon)".
+
+### 3. Tests and docs
+* `test_sar_api.py` / `test_sar_planted_check.py`: the loaders are called with
+  `(typhoon_id, event_date)`. New `InsuredAtEventTests` covers the
+  event-dated window and the spent-on-another-typhoon exclusion.
+* `docs/SAR_ISPLANTED_METHOD.md`, `.claude/API_CONTRACT.md`: scope updated.
+
+### Status
+* Stored OPONG results from earlier runs still include uninsured farms until
+  the check is re-run. Re-running replaces them, and every reading comes
+  from saved data, so no Earth Engine calls are made.
+
+---
+
 ## [2026-10-12] - Spatial Module: "Farm Polygon" Legend Label, Province Column (Sprint 3)
 
 Per Cristian. Frontend only; `Farm.province` was already returned by the API.
