@@ -1,11 +1,13 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
-  Home, Map, FileText, Settings, Bell, Moon, Sun, ChevronDown,
-  User, LogOut, Shield, RefreshCw, CheckCircle2
+  Home, Map, FileText, Settings, Bell, Moon, Sun, ChevronDown, ChevronUp,
+  User, LogOut, Shield, RefreshCw, CheckCircle2, Users, Database, Activity, UserCog
 } from "lucide-react";
 import { AppNotification } from "./mockData";
+import { BrandLogo } from "./BrandLogo";
+import { HeaderHideMode } from "@/lib/headerHideModeStorage";
 
-export type ModuleId = "monitoring" | "spatial" | "assessment" | "calibration";
+export type ModuleId = "monitoring" | "spatial" | "assessment" | "calibration" | "users" | "backup" | "activity" | "account";
 
 interface HeaderProps {
   activeModule: ModuleId;
@@ -16,18 +18,113 @@ interface HeaderProps {
   onClearNotification: (id: string) => void;
   currentUser?: { name: string; role: string; email: string };
   onLogout?: () => void;
+  // "manual" (default) is the original click-to-hide/click-to-show toggle.
+  // "auto" (2026-08-18, set from Account Settings -- see
+  // AccountSettingsModule.tsx's "Display Preferences" card) hides itself
+  // shortly after the cursor leaves the header, and reveals again on
+  // hover -- no click needed either way. See the `collapsed`/`autoVisible`
+  // state below for how the two modes coexist without interfering.
+  hideMode: HeaderHideMode;
 }
 
-const MODULES: { id: ModuleId; label: string; icon: React.ReactNode; shortLabel: string }[] = [
-  { id:"monitoring",   label:"Monitoring & Extraction",        shortLabel:"Monitoring",    icon:<Home size={15} /> },
+// How long the header stays up after the cursor leaves it (or after mount,
+// for "auto" mode) before hiding itself. Short enough to feel responsive,
+// long enough that a normal mouse pass-through over the header doesn't
+// trigger a hide the user didn't intend.
+const AUTO_HIDE_DELAY_MS = 900;
+
+const SPECIALIST_MODULES: { id: ModuleId; label: string; icon: React.ReactNode; shortLabel: string }[] = [
+  { id:"monitoring",   label:"Main Dashboard",                 shortLabel:"Dashboard",    icon:<Home size={15} /> },
   { id:"spatial",      label:"Spatial Analysis & Data Import", shortLabel:"Spatial",       icon:<Map size={15} /> },
   { id:"assessment",   label:"Assessment & Reporting",         shortLabel:"Assessment",    icon:<FileText size={15} /> },
-  { id:"calibration",  label:"Calibration / Settings",         shortLabel:"Settings",      icon:<Settings size={15} /> },
 ];
 
-export function Header({ activeModule, onModuleChange, darkMode, onToggleDark, notifications, onClearNotification, currentUser, onLogout }: HeaderProps) {
+// System Administrators get their own dedicated tabs (Admin Panel / User
+// Management / Database Backup / Activity Log) instead of the 3 specialist-
+// facing tabs -- per Fabio's explicit request to keep admin focused on
+// admin privileges/maintenance, not the regular GIS workflow. User
+// Management and Database Backup used to be nested sections inside Admin
+// Panel; split into their own tabs so neither is buried behind an
+// accordion. Activity Log is new (2026-08-16).
+const ADMIN_MODULES: { id: ModuleId; label: string; icon: React.ReactNode; shortLabel: string }[] = [
+  { id:"calibration",  label:"Admin Panel",                    shortLabel:"Admin",         icon:<Settings size={15} /> },
+  { id:"users",        label:"User Management",                shortLabel:"Users",         icon:<Users size={15} /> },
+  { id:"backup",       label:"Database Backup",                shortLabel:"Backup",        icon:<Database size={15} /> },
+  { id:"activity",     label:"Activity Log",                   shortLabel:"Activity",      icon:<Activity size={15} /> },
+];
+
+// Personal account settings (2026-08-16) -- unlike the role-specific lists
+// above, every user gets this tab regardless of Specialist/Admin, so it's
+// appended separately rather than duplicated into both arrays.
+const ACCOUNT_MODULE: { id: ModuleId; label: string; icon: React.ReactNode; shortLabel: string } =
+  { id:"account", label:"Account Settings", shortLabel:"Account", icon:<UserCog size={15} /> };
+
+export function Header({ activeModule, onModuleChange, darkMode, onToggleDark, notifications, onClearNotification, currentUser, onLogout, hideMode }: HeaderProps) {
   const [showNotifs, setShowNotifs] = useState(false);
   const [showUser, setShowUser] = useState(false);
+  // Collapsible header (2026-08-18, per Fabio's request -- "like on Word,
+  // that it can be hide") -- same idea as Word's ribbon-collapse toggle:
+  // hides the whole header (logo, tabs, every control) down to a thin
+  // strip. Two independent pieces of state, one per mode, so switching
+  // `hideMode` in Account Settings never has to reconcile one against the
+  // other -- only the state matching the current `hideMode` is ever read.
+  //
+  // "manual": `collapsed` -- explicit click to hide, explicit click to
+  // show (the ChevronUp/ChevronDown buttons below).
+  const [collapsed, setCollapsed] = useState(false);
+  // "auto": `autoVisible` -- hides itself automatically (see the effect and
+  // AUTO_HIDE_DELAY_MS above), no click needed for either direction.
+  const [autoVisible, setAutoVisible] = useState(true);
+  const autoHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const cancelAutoHide = () => {
+    if (autoHideTimerRef.current) {
+      clearTimeout(autoHideTimerRef.current);
+      autoHideTimerRef.current = null;
+    }
+  };
+  const scheduleAutoHide = () => {
+    cancelAutoHide();
+    autoHideTimerRef.current = setTimeout(() => setAutoVisible(false), AUTO_HIDE_DELAY_MS);
+  };
+
+  // Re-arms on every mode switch (and on mount, if already "auto"): shows
+  // the header, then schedules the same hide-after-a-pause used when the
+  // cursor leaves it -- covers loading straight into "auto" mode or
+  // switching into it from Account Settings while the cursor isn't
+  // currently over the header to trigger a real mouseLeave.
+  useEffect(() => {
+    if (hideMode === "auto") {
+      setAutoVisible(true);
+      scheduleAutoHide();
+    } else {
+      cancelAutoHide();
+    }
+    return cancelAutoHide;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hideMode]);
+
+  const isHidden = hideMode === "manual" ? collapsed : !autoVisible;
+  const isAdmin = currentUser?.role === "System Administrator";
+  const modules = [...(isAdmin ? ADMIN_MODULES : SPECIALIST_MODULES), ACCOUNT_MODULE];
+
+  // Tab-key module switching (2026-08-18, per Fabio's request): while focus
+  // is on one of the module tab buttons below, Tab/Shift+Tab moves the
+  // active module to the next/previous one and carries focus with it,
+  // instead of the browser's default "move focus to the next focusable
+  // element on the page" behavior. Wraps around at both ends. Scoped to the
+  // tab buttons themselves (via onKeyDown on each button) so it never
+  // touches Tab behavior anywhere else in the app -- typing in a search box
+  // or form field is unaffected.
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const handleTabKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>, idx: number) => {
+    if (e.key !== "Tab") return;
+    e.preventDefault();
+    const nextIdx = (idx + (e.shiftKey ? -1 : 1) + modules.length) % modules.length;
+    onModuleChange(modules[nextIdx].id);
+    tabRefs.current[nextIdx]?.focus();
+  };
+
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshDone, setRefreshDone] = useState(false);
   const unread = notifications.filter(n => !n.read).length;
@@ -49,28 +146,55 @@ export function Header({ activeModule, onModuleChange, darkMode, onToggleDark, n
     success:  "bg-emerald-500",
   };
 
+  if (isHidden) {
+    return (
+      <div
+        onClick={() => { if (hideMode === "manual") setCollapsed(false); }}
+        onMouseEnter={() => { if (hideMode === "auto") { cancelAutoHide(); setAutoVisible(true); } }}
+        className={`h-5 flex items-center justify-center shrink-0 select-none group z-50 ${hideMode === "manual" ? "cursor-pointer" : ""}`}
+        style={{ background: darkMode ? "#0f1e0f" : "#166534" }}
+        title={hideMode === "manual" ? "Show menu" : "Hover to show menu"}
+      >
+        <ChevronDown size={13} className="text-white/50 group-hover:text-white transition-colors" />
+      </div>
+    );
+  }
+
   return (
     <header
+      onMouseEnter={() => { if (hideMode === "auto") cancelAutoHide(); }}
+      onMouseLeave={() => { if (hideMode === "auto") scheduleAutoHide(); }}
       className="h-14 flex items-center px-0 z-50 shrink-0 select-none"
       style={{ background: darkMode ? "#0f1e0f" : "#166534" }}
     >
       {/* Logo / Brand */}
-      <div className="flex items-center gap-2.5 px-4 h-full border-r border-white/15 min-w-[200px]">
-        <div className="w-8 h-8 rounded-lg bg-white/15 flex items-center justify-center shrink-0">
-          <span className="text-white font-black text-sm">P</span>
-        </div>
-        <div>
-          <p className="text-white text-[11px] font-bold leading-tight tracking-wide">PCIC-GIS</p>
-          <p className="text-white/60 text-[9px] leading-tight">Risk Assessment System</p>
+      <div className="flex items-center px-3 h-full shrink-0">
+        {/* Badge: logo + name framed as one mark -- gold-tinted rounded edge,
+            a top-left sheen, a 1px top highlight, and a faint gold glow. */}
+        <div
+          className="flex items-center gap-3 pl-2 pr-4 py-1 rounded-xl border border-[#fbbf24]/45"
+          style={{
+            background: "linear-gradient(135deg, rgba(255,255,255,0.16) 0%, rgba(255,255,255,0.04) 55%, rgba(251,191,36,0.08) 100%)",
+            boxShadow: "inset 0 1px 0 rgba(255,255,255,0.22), 0 0 12px rgba(251,191,36,0.18), 0 2px 6px rgba(0,0,0,0.25)",
+          }}
+        >
+          <BrandLogo size={38} className="shrink-0 drop-shadow" />
+          <div>
+            <p className="text-white text-[14px] font-bold leading-tight tracking-wide">PCIC-GIS</p>
+            <p className="text-white/75 text-[11px] leading-tight whitespace-nowrap">Risk Assessment System</p>
+          </div>
         </div>
       </div>
 
-      {/* Module Tabs */}
-      <nav className="flex items-center h-full flex-1 px-1">
-        {MODULES.map(m => (
+      {/* Module Tabs -- no left padding: the brand block's own px-3 already
+          spaces the first tab from the badge (the divider line was removed). */}
+      <nav className="flex items-center h-full flex-1 pr-1">
+        {modules.map((m, idx) => (
           <button
             key={m.id}
-            onClick={() => onModuleChange(m.id)}
+            ref={el => { tabRefs.current[idx] = el; }}
+            onClick={e => { onModuleChange(m.id); e.currentTarget.focus(); }}
+            onKeyDown={e => handleTabKeyDown(e, idx)}
             className="relative h-full flex items-center gap-1.5 px-4 text-[12px] transition-all"
             style={{
               color: activeModule === m.id ? "#ffffff" : "rgba(255,255,255,0.65)",
@@ -185,12 +309,14 @@ export function Header({ activeModule, onModuleChange, darkMode, onToggleDark, n
                 <p className="text-[10px] text-muted-foreground font-mono">{currentUser?.email ?? ""}</p>
               </div>
               <div className="py-1">
-                <button
-                  onClick={() => { setShowUser(false); onModuleChange("calibration"); }}
-                  className="w-full flex items-center gap-2 px-3 py-2 text-[11px] hover:bg-muted transition-colors"
-                >
-                  <Shield size={12} /> Account Settings
-                </button>
+                {isAdmin && (
+                  <button
+                    onClick={() => { setShowUser(false); onModuleChange("calibration"); }}
+                    className="w-full flex items-center gap-2 px-3 py-2 text-[11px] hover:bg-muted transition-colors"
+                  >
+                    <Shield size={12} /> Admin Panel
+                  </button>
+                )}
                 <button
                   onClick={() => { setShowUser(false); onLogout?.(); }}
                   className="w-full flex items-center gap-2 px-3 py-2 text-[11px] hover:bg-muted transition-colors text-destructive"
@@ -201,6 +327,18 @@ export function Header({ activeModule, onModuleChange, darkMode, onToggleDark, n
             </div>
           )}
         </div>
+
+        {/* Collapse header -- "auto" mode has no button, since it hides
+            itself; only "manual" needs an explicit control. */}
+        {hideMode === "manual" && (
+          <button
+            onClick={() => setCollapsed(true)}
+            className="w-8 h-8 rounded flex items-center justify-center hover:bg-white/10 transition-colors"
+            title="Hide menu"
+          >
+            <ChevronUp size={14} className="text-white/70" />
+          </button>
+        )}
       </div>
     </header>
   );

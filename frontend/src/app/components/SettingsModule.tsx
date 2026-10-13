@@ -1,10 +1,8 @@
 import { useState } from 'react';
 import { Card, CardContent, Button, TextField, Select, MenuItem, FormControl, InputLabel, Switch, FormControlLabel, Chip, type SelectChangeEvent } from '@mui/material';
-import { Save, RefreshCw, Database, Cloud, Mail, Lock, User, Settings as SettingsIcon } from 'lucide-react';
+import { Save, RefreshCw, Database, Mail, Lock, User, Settings as SettingsIcon } from 'lucide-react';
 
 export function SettingsModule() {
-  const [geeProjectId, setGeeProjectId] = useState('agrisure-gis-project');
-  const [geeCapacity, setGeeCapacity] = useState('1000');
   const [sessionTimeout, setSessionTimeout] = useState('5');
   const [autoSave, setAutoSave] = useState(true);
   const [emailNotifications, setEmailNotifications] = useState(true);
@@ -41,54 +39,6 @@ export function SettingsModule() {
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <Card>
-          <CardContent>
-            <div className="flex items-center gap-3 mb-4">
-              <Cloud className="w-6 h-6" style={{ color: 'var(--primary)' }} />
-              <h3 className="text-xl">Google Earth Engine Configuration</h3>
-            </div>
-
-            <div className="space-y-4">
-              <TextField
-                fullWidth
-                label="Google Cloud Project ID"
-                value={geeProjectId}
-                onChange={(e) => setGeeProjectId(e.target.value)}
-                variant="outlined"
-                helperText="Project ID for Google Earth Engine SAR analysis"
-              />
-
-              <TextField
-                fullWidth
-                label="EEC Capacity Allocation"
-                value={geeCapacity}
-                onChange={(e) => setGeeCapacity(e.target.value)}
-                variant="outlined"
-                type="number"
-                helperText="Earth Engine Compute units (e.g., 1000 EEC)"
-              />
-
-              <div className="flex items-center justify-between p-3 rounded" style={{ backgroundColor: 'var(--muted)' }}>
-                <span>GEE API Status</span>
-                <Chip
-                  label="Connected"
-                  size="small"
-                  sx={{ bgcolor: 'var(--green-500)', color: 'white' }}
-                />
-              </div>
-
-              <Button
-                fullWidth
-                variant="outlined"
-                startIcon={<RefreshCw />}
-                sx={{ borderColor: 'var(--primary)', color: 'var(--primary)' }}
-              >
-                Test Connection
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-
         <Card>
           <CardContent>
             <div className="flex items-center gap-3 mb-4">

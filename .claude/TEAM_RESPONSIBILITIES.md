@@ -14,4 +14,4 @@
 
 ## Review and Merging Workflow
 - Any database structure modifications must be proposed to Fabio.
-- All code changes must go through a pull request and get approved by at least one other developer before merging into `main`.\n
+- All code changes must go through a pull request and get approved by at least one other developer before merging into `develop`. `main` only receives merges from `develop` at a release point (see `.claude/GITHUB_WORKFLOW.md` Phase 7) — it stays frozen otherwise.\n

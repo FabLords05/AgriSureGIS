@@ -7,7 +7,7 @@ Traditional insurance validation depends on physical inspections of damaged area
 
 ## 2. Three-Tier System Architecture
 - **Presentation Layer:** Developed using React and Leaflet JS, styled with Tailwind CSS. Renders interactive maps showing farm boundaries (from GPX files), typhoon trajectories, and wind footprint layers.
-- **Web-GIS Application Layer:** FastAPI coordinates API endpoints.
+- **Web-GIS Application Layer:** FastAPI coordinates API endpoints, with GeoServer serving spatial layers (farm boundaries, wind footprints, typhoon trajectories) to the Presentation Layer.
   - Uses `BeautifulSoup` to scrape new bulletins from PAGASA.
   - Uses `pdfplumber` to extract typhoon metrics from bulletin PDFs.
   - Uses `GeoPandas` and `Shapely` to perform geometric intersections.
@@ -15,7 +15,7 @@ Traditional insurance validation depends on physical inspections of damaged area
 
 ## 3. Parametric Damage Calculations
 The calculation engine operates strictly on the predefined PCIC Typhoon-Induced Strong Winds Matrix.
-- **Indemnity Formula:** `I = (AC / 1000) * IF * Area`
+- **Indemnity Formula:** `I = (AC / 1000) * IF`
 - **Yield Loss (YL) Matrices:** Calculated by crossing exposure duration (6h, 12h, 24h) with the TCWS Signal Level (2 to 5) and the growth stage (Booting, Flowering, Maturity).
 - **Indemnity Factor (IF) Lookup:** Determined by linking the calculated YL% with the crop's vegetative/reproductive/maturity stage.
 - **Exporting:** The final assessment yields a payout report extending the original PCIC formatting with parsed parameters and final indemnity payout calculations.\n
