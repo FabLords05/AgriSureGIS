@@ -232,6 +232,318 @@ honouring `filter(tcb_id == ...)` so the multi-bulletin cases are real.
 
 ---
 
+## [2026-10-13] - Farm Details Overlap Fix, Province/Barangay Columns, Login Text (Sprint 3)
+
+Per Cristian. No schema change; the PABS CSV export is unchanged.
+
+### 1. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* Farm Details and the bottom-left legends (Farm Boundary, Signal) now share
+  one left-hand flex column, like the right-hand toggles. The panel
+  (`min-h-0 overflow-y-auto`) scrolls inside itself instead of running down
+  over the legends, which the SAR rows had made it do on short maps.
+
+### 2. Assessment & Reporting table
+* `backend/app/api/assessments.py` (`_build_pabs_rows`): rows carry the
+  farm's `barangay` (on-screen only, not in `PABS_CSV_HEADERS`).
+* `frontend/src/lib/api.ts`: `PabsAssessmentRow.barangay`.
+* `frontend/src/app/components/AssessmentModule.tsx`: new sortable
+  **Province** (before Municipality) and **Barangay** (after it) columns,
+  centered like the rest (Farmer stays left). **Typhoon** is no longer
+  sortable (removed from `SortField`; `sortableCols` entries with `f: null`
+  render a plain header). TOTAL row's first span is now 5 columns.
+* `.claude/API_CONTRACT.md`: pabs-summary lists the on-screen
+  `province`/`municipality`/`barangay` keys.
+
+### 3. File: `frontend/src/app/components/LoginScreen.tsx`
+* Card header ("Sign in to your account" + subtitle) is centered.
+* "Request system access (new staff)" link now reads "Request System Access".
+
+---
+
+## [2026-10-12] - SAR Checks Only Farms Insured When the Typhoon Hit (Sprint 3)
+
+Per Cristian: the planted check (and its colour layer) must not send every
+affected farm to Google Earth Engine. Only farms insured when the typhoon
+hit are checked, which saves Earth Engine quota on the 100K+ records with no
+usable cover. Branch: `cristian/backend/sar-insured-only`.
+
+Decision: "insured" is dated to the typhoon, not today. That differs from
+the **Active Insurance Only** button, which would drop the farms already
+exported for this typhoon and every past typhoon's expired policies. The
+table and map filter is unchanged (SAR-only scope).
+
+### 1. File: `backend/app/api/sar.py`
+* New **`_insured_at_event_farm_ids(typhoon_id, event_date)`**: farms with an
+  `InsuranceRecord` in force on the first-bulletin date
+  (`effectivity_date <= event <= expiry_date`) whose policy isn't locked as
+  used (`InsuranceUsage` final) for a **different** typhoon. A policy spent
+  on this same typhoon still counts.
+* New **`_sar_farm_filter()`**: the affected set AND the insured set.
+* `_load_affected_polygons()` and `_load_affected_farms()` take `event_date`
+  and use that filter, so uninsured farms are never sent to Earth Engine and
+  get no stored result. The 422 messages now mention insurance.
+
+### 2. Frontend
+* `SarAnalysisPanel.tsx`: the Area of Interest text says uninsured farms are
+  skipped.
+* `SpatialAnalysisModule.tsx` (SAR Reason cell) and `GISLeafletMap.tsx` (Farm
+  Details): a farm with no result reads "Not checked (not insured at the
+  typhoon)".
+
+### 3. Tests and docs
+* `test_sar_api.py` / `test_sar_planted_check.py`: the loaders are called with
+  `(typhoon_id, event_date)`. New `InsuredAtEventTests` covers the
+  event-dated window and the spent-on-another-typhoon exclusion.
+* `docs/SAR_ISPLANTED_METHOD.md`, `.claude/API_CONTRACT.md`: scope updated.
+
+### Status
+* Stored OPONG results from earlier runs still include uninsured farms until
+  the check is re-run. Re-running replaces them, and every reading comes
+  from saved data, so no Earth Engine calls are made.
+
+---
+
+## [2026-10-12] - Spatial Module: "Farm Polygon" Legend Label, Province Column (Sprint 3)
+
+Per Cristian. Frontend only; `Farm.province` was already returned by the API.
+
+### 1. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* The map legend's "Farm Boundary" entry is now labelled "Farm Polygon"
+  instead of "Surveyed (GPX)". The heading is unchanged.
+
+### 2. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* Farm Records table: added a sortable **Province** column between Farmer
+  and Municipality. `SortField` now includes `"province"`.
+* The colgroup gained a 140px column. The table width went from 1990 to
+  2130px (2330 to 2470px with the SAR columns). `tableColumnCount` went from
+  15/17 to 16/18, so the virtualization spacer rows still span the full table.
+
+---
+
+## [2026-10-12] - Registration Accepts Any Email; Optional SMTP_FROM for Brevo (Sprint 3)
+
+Per Fabio: the bulletin email alerts must be testable with real inboxes, and
+the alerts will be sent through Brevo instead of Gmail. Gmail app passwords
+are sometimes blocked.
+
+### 1. File: `frontend/src/app/components/LoginScreen.tsx`
+* `RegistrationPanel.handleSubmit()`: removed the `@pcic.gov.ph`-only check.
+  Any valid email can register now. Fabio chose "any valid email" over
+  "PCIC + Gmail only". The backend already accepted any `EmailStr`, so this
+  check only existed in the frontend.
+* The Registration email field's label changed from "Institutional Email" to
+  "Email", its placeholder to `yourname@gmail.com`, and the required-fields
+  error now says "email". The Login panel was left unchanged; it never had a
+  domain check.
+
+### 2. File: `backend/app/services/email_alert_service.py`
+* `_smtp_config()`: new `sender` key, read from optional `SMTP_FROM` and
+  falling back to `SMTP_USER`.
+* `send_new_bulletin_alerts()`: the `From:`/`To:` headers and the
+  `sendmail()` envelope sender now use `sender` instead of `user`. Brevo's
+  SMTP login is a generated ID, not a mailbox, so mail must come from a
+  verified sender. Existing Gmail setups (`SMTP_FROM` unset) behave the same
+  as before.
+
+### 3. Files: `backend/.env.example` / `.claude/ENV_GUIDE.md`
+* Documented `SMTP_FROM` and the Brevo settings
+  (`SMTP_HOST=smtp-relay.brevo.com`, port 587).
+
+### Status / Next Steps
+* Not tested end to end. It needs a Brevo account, a verified sender, and
+  the SMTP login/key in Fabio's `backend/.env`, then a backend restart and a
+  manual parse against an active typhoon.
+
+---
+
+## [2026-10-12] - Automatic SAR Planted Check, Green / Yellow, with a Sentinel-1 Cache (Sprint 3)
+
+Per Cristian: SAR now checks **every farm affected by a typhoon** (e.g.
+OPONG) on its own. Each farm comes back **green** (planted, no field visit)
+or **yellow** (needs field verification). The rule is grounded in the two
+studies in `USTP CAPSTONE/`: Gutierrez et al. 2019 (rice planting window)
+and Villano et al. 2019 (TP/DS separability). The Earth Engine imagery
+values are stored so the same farm and dates are never queried twice. This
+is Phase 2 of `docs/SAR_ISPLANTED_METHOD.md`. Branch:
+`cristian/backend/sar-planted-check`.
+
+Decisions (Cristian, 2026-10-12):
+* Green/yellow only. SAR never says "not planted".
+* Nothing further happens in-app after field verification, so the manual
+  Planted / Not planted buttons are removed from the UI.
+* The check runs from a button in the SAR panel.
+* The Phase 1 colour layer stays as an optional overlay.
+
+### 0. Per typhoon, not per bulletin (Cristian, same day)
+"Affected" now means signal 2+ in **any** of the typhoon's bulletins, and it
+is picked from a typhoon dropdown in Spatial Analysis. Before, it was the
+bulletin selected in Monitoring.
+* `backend/app/api/farms.py`:
+  * **`_affected_farm_ids(db, typhoon_id)`** matches `tbl_tcb_signals` of
+    every bulletin of the typhoon, through a `select()` on
+    `TropicalCycloneBulletin`.
+  * The `affected_bulletin_id` query parameter on `GET /farms/` and
+    `/farms/geometry` is renamed **`affected_typhoon_id`**.
+* `backend/app/core/farms_cache.py`: the cache key slot is labelled
+  `affected_t=`, so a cached per-bulletin page can't be served for a
+  same-numbered typhoon.
+* `backend/app/api/sar.py`:
+  * `LayerRequest` / `CheckRequest` take `typhoon_id`.
+  * `_event_date(db, typhoon_id)` returns 404 when the typhoon has no
+    bulletins.
+  * The layer response returns `typhoon_id` instead of `bulletin_id`.
+* `tbl_sar_planted_check.bulletin_id` is dropped from the model, the
+  migration and `init_schema.sql`. Its migration had only been applied on
+  Cristian's local DB.
+* Frontend:
+  * `App.tsx`: `affectedOnly` + derived id becomes an
+    `affectedTyphoonId` state.
+  * `SpatialAnalysisModule.tsx`: the **"Affected by" dropdown** replaces
+    the toggle. Its options are built from `getBulletins()`, newest typhoon
+    first.
+  * `SarAnalysisPanel.tsx` takes `typhoonLabel` instead of `bulletin`.
+  * `api.ts`: `getSarLayer` / `runPlantedCheck` take a typhoon id.
+  * `useFarmsData.ts` / `GISLeafletMap.tsx`: the prop is renamed.
+* Tests: `test_farms_api.py` asserts the subquery goes through
+  `tbl_tropical_cyclone_bulletins` with `typhoon_id = 42`, and
+  `test_sar_api.py` / `test_sar_planted_check.py` send `typhoon_id`.
+
+### 1. New file: `backend/app/services/sar_planted_classifier.py`
+* Pure-Python method-doc §3 rule. It needs no Earth Engine, so it can be
+  unit-tested.
+* **`classify(observations, event_date)`** returns a `CheckResult`. Status is
+  `planted` only if C1–C5 all pass; otherwise `field_verify` with the first
+  failed condition as `reason_code`. It also returns `t0_date`, `tp_date`,
+  `vh_rise_db`, `ratio_drop_db` and `scene_count`.
+* **`observation_window()`**: the 150 days before the first bulletin.
+* **`in_planting_window()`**: [A]'s Region X window, padded by 23 days.
+* **`pick_orbit_series()`**: one relative orbit per farm (the most scenes;
+  ties go to the lowest orbit).
+* **`REASON_LABELS`**: plain labels for each reason code.
+* Thresholds are named constants read from [B]'s boxplots: `RISE_VH_DB` 2.0,
+  `DROP_RATIO_DB` 1.5, `VV_VH_MAX_GAP_DAYS` 24, `MIN_OBSERVATIONS` 6. None of
+  them is a published cut-off, so they still need §6 calibration.
+
+### 2. File: `backend/app/services/gee_sar_service.py`
+* New **`fetch_backscatter_series(farms, start, end)`** returns polygon-mean
+  VV/VH (dB) per farm per scene.
+  * It keeps every descending relative orbit, with the same 20 m inward
+    buffer and 30 m focal median as the layer.
+  * Farms are chunked so no `getInfo()` returns more than
+    `MAX_ROWS_PER_REQUEST` (4000) rows.
+* New **`_descending_scenes()`** holds the shared S1 GRD filter.
+  `build_planted_layer()` now uses it, with no behaviour change.
+
+### 3. Files: `backend/app/models/models.py`, `backend/init_schema.sql`, new `backend/migrations/2026-10-12_sar_planted_check.sql`
+* **`SarObservation`** / `tbl_sar_observation`: the cached per-scene VV/VH,
+  unique per (farm, scene_date, relative_orbit).
+* **`SarFetchCoverage`** / `tbl_sar_fetch_coverage`: the date range cached
+  per farm, plus the md5 of `location_geom` it was measured on. A
+  re-uploaded GPX boundary refetches.
+* **`SarPlantedCheck`** / `tbl_sar_planted_check`: the result per farm per
+  typhoon (unique).
+* None of the three is read by the assessment or the PABS export.
+* The ERD (`docs/ERD.drawio.png`) does not have them yet.
+
+### 4. File: `backend/app/api/sar.py`
+* New **`POST /sar/check`** (`run_planted_check`):
+  * Loads the affected farms.
+  * Marks `no_boundary` and `too_small` farms yellow in PostGIS, before any
+    Earth Engine call.
+  * Fetches only the farms whose window isn't cached
+    (**`_needs_fetch()`**), stores them (**`_store_fetched()`**) and commits
+    that first.
+  * Then classifies from the cache (**`_load_observations()`**) and replaces
+    the typhoon's stored results.
+  * A fully cached re-run works with Earth Engine unconfigured.
+  * Coverage never claims the last `SCENE_INGEST_LAG_DAYS` (3), so late
+    scenes are picked up on the next run.
+* New **`GET /sar/checks?typhoon_id=`** (`list_planted_checks`) returns the
+  stored result. Helpers: `_check_to_dict()`, `_summary()`.
+* The `/verifications` endpoints and `tbl_planted_verification` are
+  unchanged and still work. They are just no longer called by the
+  frontend, so recorded verdicts stay readable.
+
+### 5. Frontend
+* `frontend/src/lib/api.ts`:
+  * New `runPlantedCheck()`, `getPlantedChecks()`, and the
+    `PlantedCheck*` types.
+  * Removed the now-unused `getPlantedVerifications` /
+    `setPlantedVerification` / `clearPlantedVerification` and the
+    `PlantedVerification` type.
+* `SarAnalysisPanel.tsx`:
+  * **Run Planted Check** is the main action.
+  * Results show checked/green/yellow counts, "Why yellow" with counts per
+    reason, and how many farms came from Earth Engine vs. saved data.
+  * Has a re-run button.
+  * The colour layer is an optional checkbox, fetched the first time it's
+    ticked.
+* `SpatialAnalysisModule.tsx`:
+  * Loads the stored check for the selected typhoon.
+  * Replaces the verdict state and handlers with `plantedCheck` /
+    `runCheck`.
+  * Adds "Planted (SAR)" and "SAR Reason" table columns.
+  * The `toast` import is removed because it is no longer used.
+* `GISLeafletMap.tsx`:
+  * `plantedVerdicts` / `onSetPlantedVerdict` / `verdictSaving` are replaced
+    by `plantedResults`.
+  * Outlines and the legend are green/yellow, using the new exported
+    `PLANTED_CHECK_COLORS` / `PLANTED_CHECK_LABELS`.
+  * Farm Details shows the result and reason read-only, with no buttons.
+
+### 6. Tests and docs
+* New `backend/tests/test_sar_planted_check.py`:
+  * Classifier tests, using a synthetic OPONG-like wet-season series for
+    each reason.
+  * `_needs_fetch` tests.
+  * `run_planted_check` tests: cached run never calls Earth Engine, 503,
+    fetch-and-store, 502.
+  * `list_planted_checks` tests.
+* `docs/SAR_ISPLANTED_METHOD.md`:
+  * The status block describes Phase 2.
+  * C4 is now "argmin(VV) within 24d of t0" ([A]'s SoS agreement), not
+    "VV rises".
+  * Correction: [B] Table 4 compares TP vs. DS rice, not growth stages.
+* `.claude/API_CONTRACT.md`: new endpoints.
+* `.claude/HANDOFF_2026-10-12_AFFECTED_FILTER_SAR.md`: stale "not built"
+  note flagged.
+
+---
+
+## [2026-10-12] - PABS REMARKS Follow PCIC's Per-Signal Remark Tables (Sprint 3)
+
+Per Cristian, from `USTP CAPSTONE/Remarks/Signal no2.png`, `no3.png` and
+`no4.png` ("Remarks on the Effect of Typhoon-Induced Strong Winds (Rice)").
+REMARKS is no longer one fixed sentence on every row.
+
+### 1. File: `backend/app/api/assessments.py`
+* `PABS_REMARKS` is replaced by **`PABS_REMARKS_BY_MATRIX`**: 27 remarks
+  keyed `(wind_signal_tcws, crop_stage_no, exposure_hours)`, the same key as
+  `tbl_recsap_matrix`. The tables' rows match the seeded matrix's 6/12/24h
+  yield-loss cells exactly; for example, signal 2 Booting is 10/15/20%.
+  * The text is copied as PCIC wrote it, including their inconsistent final
+    periods.
+  * The bottom edge of `Signal no2.png` cuts off the signal-2 24h Booting and
+    Maturity remarks. Their ending ("reduction") follows the visible signal-2
+    24h Flowering remark.
+* New **`_pabs_remarks()`** looks up the assessment's RECSAP matrix row.
+  Signal 5 (>184 kph) uses the signal-4 table, whose header covers "118-184 KPH
+  AND MORE THAN 184 KPH". It returns `None` (a blank cell) when there is no
+  matrix row or no matching remark.
+* `_build_pabs_rows()`: `REMARKS` now comes from `_pabs_remarks(a)`.
+
+### 2. Files: `frontend/src/lib/api.ts`, `frontend/src/app/components/AssessmentModule.tsx`
+* `PabsAssessmentRow.REMARKS` is now `string | null`.
+* The blue explanatory notice at the top of "Review CSV Before Downloading"
+  is removed (per Cristian). The modal goes straight from its title bar to the
+  table. `AlertCircle` stays imported because it is still used elsewhere in
+  the module.
+
+### 3. File: `.claude/API_CONTRACT.md`
+* REMARKS description updated.
+
+---
+
 ## [2026-10-12] - Farm ID Shows PCIC's FARMID Everywhere; Farmer Names Left-Aligned (Sprint 3)
 
 Per Fabio: every on-screen Farm ID now follows the PABS-given FARMID

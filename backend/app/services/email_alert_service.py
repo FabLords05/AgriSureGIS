@@ -44,6 +44,11 @@ def _smtp_config() -> dict | None:
         "port": int(os.getenv("SMTP_PORT", "587")),
         "user": user,
         "password": password,
+        # Brevo (and most relay providers) log in with a generated SMTP ID
+        # that isn't a real mailbox, so the From address has to be a
+        # separately verified sender. Gmail logs in with the address itself,
+        # so leaving SMTP_FROM unset keeps the old SMTP_USER behavior.
+        "sender": os.getenv("SMTP_FROM") or user,
     }
 
 
@@ -109,19 +114,19 @@ def send_new_bulletin_alerts(created: list[dict], db: Session) -> None:
 
     msg = MIMEText("\n".join(lines))
     msg["Subject"] = subject
-    msg["From"] = config["user"]
+    msg["From"] = config["sender"]
     # Sent BCC-style -- every active user is in the sendmail() envelope
     # recipient list below, not in a visible header, so recipients can't see
     # each other's addresses. The To: header is set to the sender itself
     # (a common convention for broadcast mail with no single "primary"
     # recipient) rather than left blank.
-    msg["To"] = config["user"]
+    msg["To"] = config["sender"]
 
     try:
         with smtplib.SMTP(config["host"], config["port"], timeout=10) as server:
             server.starttls()
             server.login(config["user"], config["password"])
-            server.sendmail(config["user"], recipients, msg.as_string())
+            server.sendmail(config["sender"], recipients, msg.as_string())
         logger.info("Sent bulletin alert email to %d active user(s).", len(recipients))
     except Exception:
         logger.exception("Failed to send bulletin alert email.")

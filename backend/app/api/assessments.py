@@ -391,7 +391,59 @@ def export_assessments_csv(
 # PCIC's fixed values for the PABS P/REMARKS columns (2026-10-12, per
 # Cristian, from PCIC's final-output reference). P = prevalence, always 100%.
 PABS_PREVALENCE = "1.0"
-PABS_REMARKS = "Prolonged destructive winds caused severe crop damage with critical production loss."
+
+# PCIC's "Remarks on the Effect of Typhoon-Induced Strong Winds (Rice)" tables
+# (USTP CAPSTONE/Remarks/Signal no2-4.png), keyed like tbl_recsap_matrix:
+# (wind_signal_tcws, crop_stage_no, exposure_hours). Each table row lines up
+# with the matrix's 6/12/24h yield-loss cells (e.g. signal 2 Booting 10/15/20%).
+# Text is copied as PCIC wrote it, including their inconsistent final periods.
+# Signal 5 (>184 kph) reuses signal 4's table, whose header covers "118-184 KPH
+# AND MORE THAN 184 KPH" (2026-10-12, per Cristian). The two signal-2 24h
+# Booting/Maturity remarks are cut off at the image's bottom edge; their
+# endings ("reduction") follow the visible signal-2 24h Flowering remark.
+PABS_REMARKS_BY_MATRIX: dict[tuple[int, int, int], str] = {
+    # Signal 2 (66-88 kph)
+    (2, 1, 6): "Slight wind stress observed with minimal impact on crop development and expected yield.",
+    (2, 1, 12): "Moderate wind stress affected crop vigor and may cause minor reduction in yield potential.",
+    (2, 1, 24): "Prolonged wind exposure affected panicle development resulting in moderate yield reduction",
+    (2, 2, 6): "Slight wind stress observed with minimal impact on flowering process and expected yield.",
+    (2, 2, 12): "Moderate wind stress affected pollination and may cause minor reduction in grain formation",
+    (2, 2, 24): "Prolonged wind exposure affected pollination efficiency resulting in moderate yield reduction",
+    (2, 3, 6): "Slight wind stress observed with minimal impact on grain quality and harvestable yield.",
+    (2, 3, 12): "Moderate wind stress affected grain condition and may cause minor reduction in harvest recovery.",
+    (2, 3, 24): "Prolonged wind exposure affected grain quality resulting in moderate yield reduction",
+    # Signal 3 (89-117 kph)
+    (3, 1, 6): "Strong wind exposure caused noticeable crop stress with possible reduction in grain formation.",
+    (3, 1, 12): "Significant crop stress observed with considerable impact on panicle development and yield potential.",
+    (3, 1, 24): "Severe wind exposure adversely affected crop development resulting in substantial yield loss.",
+    (3, 2, 6): "Strong wind exposure caused noticeable flowering stress with possible reduction in grain formation.",
+    (3, 2, 12): "Significant flowering stress observed with considerable impact on grain development and yield potential",
+    (3, 2, 24): "Severe wind exposure adversely affected flowering process resulting in substantial yield loss.",
+    (3, 3, 6): "Strong wind exposure caused noticeable grain damage with possible reduction in marketable yield.",
+    (3, 3, 12): "Significant wind stress observed with considerable impact on grain condition and harvest recovery",
+    (3, 3, 24): "Severe wind exposure adversely affected grain quality resulting in substantial yield loss.",
+    # Signal 4 (118-184 kph, and more than 184 kph)
+    (4, 1, 6): "Destructive wind impact caused severe crop stress with major reduction in production potential.",
+    (4, 1, 12): "Extensive crop injury observed with critical effect on panicle emergence and crop recovery.",
+    (4, 1, 24): "Prolonged destructive winds caused severe crop damage with critical production loss.",
+    (4, 2, 6): "Destructive wind impact caused severe flowering stress with major reduction in production potential",
+    (4, 2, 12): "Extensive reproductive injury observed with critical effect on grain development and crop recovery",
+    (4, 2, 24): "Prolonged destructive winds caused severe reproductive damage with critical production loss.",
+    (4, 3, 6): "Destructive wind impact caused severe grain damage with major reduction in production potential",
+    (4, 3, 12): "Extensive crop injury observed with critical effect on harvest recovery and grain quality.",
+    (4, 3, 24): "Prolonged destructive winds caused severe crop damage with critical production loss.",
+}
+
+
+def _pabs_remarks(assessment: RiskAssessment) -> str | None:
+    """PABS "REMARKS": PCIC's remark for the assessment's RECSAP cell (signal,
+    crop stage, exposure). None (blank) when the assessment has no matrix row
+    or the cell has no PCIC remark."""
+    matrix = assessment.matrix
+    if matrix is None:
+        return None
+    signal = min(matrix.wind_signal_tcws, 4)  # signal 5 uses the signal 4 table
+    return PABS_REMARKS_BY_MATRIX.get((signal, matrix.crop_stage_no, matrix.exposure_hours))
 
 # Row key -> CSV header, in export order. Headers are spelled exactly as PCIC's
 # "The final Output" reference (USTP CAPSTONE/INSURANCE RECORDS/*.png):
@@ -449,7 +501,8 @@ def _build_pabs_rows(db: Session) -> list[dict]:
     2026-10-12 (per Cristian, from PCIC's final-output reference): IRID was
     dropped; P is PCIC's fixed 100% prevalence (PABS_PREVALENCE); S is the
     assessment's RECSAP estimated yield loss as a fraction
-    (_yield_loss_fraction); REMARKS is PCIC's fixed sentence (PABS_REMARKS).
+    (_yield_loss_fraction). REMARKS was PCIC's fixed sentence; since 2026-10-12 it
+    is looked up per RECSAP cell (_pabs_remarks).
     P and S are strings so the CSV's float_format="%.2f" doesn't turn them
     into "1.00"/"0.30".
 
@@ -510,11 +563,12 @@ def _build_pabs_rows(db: Session) -> list[dict]:
                 "FINAL_INDEMNITY_PAYMENT": float(a.final_indemnity_payment) if a.final_indemnity_payment is not None else None,
                 "P": PABS_PREVALENCE,
                 "S": _yield_loss_fraction(a),
-                "REMARKS": PABS_REMARKS,
+                "REMARKS": _pabs_remarks(a),
                 # Extra fields beyond the PABS spec, kept for on-screen filtering/context
                 # (not written to the CSV export).
                 "municipality": farm.boundary.municipality if farm and farm.boundary else None,
                 "province": farm.boundary.province if farm and farm.boundary else None,
+                "barangay": farm.boundary.barangay if farm and farm.boundary else None,
                 # TCWS signal number, for the on-screen table's Wind column and
                 # signal filter (WIND_VELOCITY above is km/h now).
                 "wind_signal": a.wind_velocity,

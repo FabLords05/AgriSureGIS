@@ -178,6 +178,27 @@ class SendPathTests(unittest.TestCase):
         self.assertIn("To: alerts@test.invalid", message)
         self.assertNotIn("To: gis@test.invalid", message)
 
+    def test_smtp_from_overrides_sender_but_not_login(self):
+        """
+        Brevo-style relays log in with a generated SMTP ID that is not a real
+        mailbox, so SMTP_FROM carries the separately verified sender while
+        SMTP_USER stays the login (Cristian's change, merged 2026-10-13).
+        """
+        bulletin = _bulletin(1, 16, "OPONG", is_active=True)
+        db = _FakeSession([bulletin], [SystemUser(email="gis@test.invalid")])
+        env = {**SMTP_ENV, "SMTP_FROM": "verified@test.invalid"}
+        with patch.dict(os.environ, env, clear=True), \
+                patch.object(email_alert_service, "smtplib") as mock_smtplib:
+            send_new_bulletin_alerts([_created(bulletin)], db)
+
+        server = mock_smtplib.SMTP.return_value.__enter__.return_value
+        server.login.assert_called_once_with("alerts@test.invalid", "secret")
+        from_addr, to_addrs, message = server.sendmail.call_args.args
+        self.assertEqual(from_addr, "verified@test.invalid")
+        self.assertEqual(to_addrs, ["gis@test.invalid"])
+        self.assertIn("From: verified@test.invalid", message)
+        self.assertIn("To: verified@test.invalid", message)
+
     def test_default_port_is_587_when_unset(self):
         bulletin = _bulletin(1, 16, "OPONG", is_active=True)
         db = _FakeSession([bulletin], [SystemUser(email="gis@test.invalid")])

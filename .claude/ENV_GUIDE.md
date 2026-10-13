@@ -12,8 +12,9 @@ Copy `.env.example` to `.env` in the `backend/` directory. **Do not commit `.env
 | `PAGASA_SCRAPE_URL` | PAGASA Tropical Cyclone Bulletin webpage URL. | PAGASA official website. |
 | `SMTP_HOST` | SMTP server address for email alerts (`backend/app/services/email_alert_service.py`). Optional -- unset (along with `SMTP_USER`/`SMTP_PASSWORD`) means alerts are a no-op, same convention as `REDIS_URL` above. | Internal mail server / SMTP provider. |
 | `SMTP_PORT` | SMTP server port. Defaults to `587` (STARTTLS) if unset. | Mail administrator. |
-| `SMTP_USER` | SMTP server login username -- also used as the From/To address on outgoing alert emails. | Mail administrator. |
+| `SMTP_USER` | SMTP server login username -- also used as the From/To address on outgoing alert emails unless `SMTP_FROM` is set. | Mail administrator. |
 | `SMTP_PASSWORD`| SMTP server password. | Mail administrator. |
+| `SMTP_FROM` | Optional From/To address for alert emails. Unset = `SMTP_USER` (correct for Gmail). Required for Brevo (`SMTP_HOST=smtp-relay.brevo.com`), whose SMTP login is a generated ID, not a mailbox -- set it to a sender address verified in Brevo. | Brevo dashboard → Senders. |
 | `GEE_SERVICE_ACCOUNT_KEY_PATH` | Optional -- path to the Google Earth Engine service-account JSON key for SAR planted verification (`backend/app/services/gee_sar_service.py`, 2026-10-12). Unset means the SAR layer endpoint returns 503 "not configured"; nothing else changes. Only the key's `client_email`/`project_id` are ever shown (Calibration & Settings → Google Earth Engine). | The GCP project's service-account key (`webgis-pcic-*.json`, gitignored). The account must be registered for Earth Engine and the project must have the Earth Engine API enabled. |
 | `VITE_API_BASE_URL` | Backend base URL for frontend API calls. **No `/api` suffix** — every path in `frontend/src/lib/api.ts` already includes its own leading `/api/...`, so appending `/api` here causes a `/api/api/...` 404. | Default is `http://localhost:8000`. |
 | `VITE_GEOSERVER_URL` | GeoServer base URL for WMS/WFS spatial layer requests (farm boundary overlay, region boundaries). | Default is `http://localhost:8080/geoserver`. See `.claude/GEOSERVER_SETUP.md`. If unset or unreachable, the map falls back to the bundled static boundary file and skips the farm overlay. |
@@ -25,14 +26,16 @@ The alert in `email_alert_service.py` stays a silent no-op until **all three** o
 For a Gmail sender: `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=587`, `SMTP_USER=<the account>`,
 `SMTP_PASSWORD=<16-character App Password>` (an App Password requires 2-Step Verification on
 that account; a normal Google password is rejected). Outbound port 587 must not be blocked
-on the backend host.
+on the backend host. For Brevo, also set `SMTP_FROM` (see the table above) -- its SMTP login
+is a generated ID rather than a mailbox, so the From address has to be a separately verified
+sender.
 
 Recipients are every `tbl_system_users` row with `is_active = true` -- GIS Specialists **and**
 System Administrators -- so at least one of those rows needs a real, deliverable inbox.
 
 After editing `backend/.env`, restart the backend (env is read at process start, not hot-reloaded),
-then verify with `backend/simulate_new_bulletin_alert.py` (dry run by default; `--send` really
-delivers). The Monitoring dashboard's System Status panel also shows an "Email Alerts:
+then verify with `backend/simulation/simulate_new_bulletin_alert.py` (dry run by default;
+`--send` really delivers; or `simulate.bat alert` from the repo root). The Monitoring dashboard's System Status panel also shows an "Email Alerts:
 Configured / Not configured" row, fed by `GET /api/system/status`.
 
 ## Key Security Rules

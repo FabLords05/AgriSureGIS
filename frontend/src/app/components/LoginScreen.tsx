@@ -46,11 +46,7 @@ function RegistrationPanel({ onBack }: { onBack: () => void }) {
     setError(null);
 
     if (!form.fullName.trim() || !form.email.trim() || !form.employeeId.trim()) {
-      setError("Full name, institutional email, and employee ID are required.");
-      return;
-    }
-    if (!form.email.toLowerCase().endsWith("@pcic.gov.ph")) {
-      setError("Registration is restricted to @pcic.gov.ph institutional email addresses.");
+      setError("Full name, email, and employee ID are required.");
       return;
     }
     if (form.password.length < 8) {
@@ -190,12 +186,12 @@ function RegistrationPanel({ onBack }: { onBack: () => void }) {
 
           {/* Email */}
           <div>
-            <label className="block text-[11px] font-semibold text-gray-600 mb-1">Institutional Email</label>
+            <label className="block text-[11px] font-semibold text-gray-600 mb-1">Email</label>
             <input
               type="email"
               value={form.email}
               onChange={e => update("email", e.target.value)}
-              placeholder="yourname@pcic.gov.ph"
+              placeholder="yourname@gmail.com"
               className="w-full border border-gray-200 rounded-xl px-3.5 py-2 text-[11px] focus:outline-none focus:border-[#166534] focus:ring-1 focus:ring-[#166534]/30 transition-all placeholder:text-gray-300"
             />
           </div>
@@ -335,7 +331,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
             {/* Login Card */}
             <div className="bg-white rounded-2xl shadow-2xl overflow-hidden">
               {/* Card Header */}
-              <div className="px-6 pt-[clamp(0.75rem,2vh,1.5rem)] pb-[clamp(0.5rem,1.2vh,1rem)] border-b border-gray-100">
+              <div className="px-6 pt-[clamp(0.75rem,2vh,1.5rem)] pb-[clamp(0.5rem,1.2vh,1rem)] border-b border-gray-100 text-center">
                 <p className="text-sm font-bold text-gray-800">Sign in to your account</p>
                 <p className="text-[11px] text-gray-400 mt-0.5">Enter your institutional email and password</p>
               </div>
@@ -402,7 +398,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
                     onClick={() => setView("register")}
                     className="text-xs font-semibold text-[#166534] hover:text-[#14532d] hover:underline underline-offset-2 transition-colors inline-flex items-center gap-1"
                   >
-                    <UserPlus size={12} /> Request system access (new staff)
+                    <UserPlus size={12} /> Request System Access
                   </button>
                 </div>
               </form>

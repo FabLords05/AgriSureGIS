@@ -460,11 +460,11 @@ export function getFarms(params?: {
   municipality?: string;
   farmer_id?: number;
   typhoon_id?: number;
-  // Farms inside this bulletin's TCWS signal >= 2 areas -- the "Affected
-  // Only" filter (2026-10-12). Unlike typhoon_id (already exported/locked
-  // as used), this works straight after a bulletin is parsed, before any
-  // assessment run. AND's with the other filters.
-  affected_bulletin_id?: number;
+  // Farms inside this typhoon's TCWS signal >= 2 areas in any of its
+  // bulletins -- the "Affected by" filter (2026-10-12). Unlike typhoon_id
+  // (already exported/locked as used), this works straight after a bulletin
+  // is parsed, before any assessment run. AND's with the other filters.
+  affected_typhoon_id?: number;
 }): Promise<GetFarmsResult> {
   const query = new URLSearchParams();
   if (params?.limit != null) query.set('limit', String(params.limit));
@@ -473,7 +473,7 @@ export function getFarms(params?: {
   if (params?.municipality) query.set('municipality', params.municipality);
   if (params?.farmer_id != null) query.set('farmer_id', String(params.farmer_id));
   if (params?.typhoon_id != null) query.set('typhoon_id', String(params.typhoon_id));
-  if (params?.affected_bulletin_id != null) query.set('affected_bulletin_id', String(params.affected_bulletin_id));
+  if (params?.affected_typhoon_id != null) query.set('affected_typhoon_id', String(params.affected_typhoon_id));
   const qs = query.toString();
   return request<GetFarmsResult>(`/api/farms/${qs ? `?${qs}` : ''}`);
 }
@@ -504,9 +504,9 @@ export function getFarmsGeometry(params: {
   active_only?: boolean;
   municipality?: string;
   typhoon_id?: number;
-  // Same "Affected Only" filter as getFarms -- keeps the map's polygons
+  // Same "Affected by" typhoon filter as getFarms -- keeps the map's polygons
   // scoped to exactly what the Farm Records table is showing.
-  affected_bulletin_id?: number;
+  affected_typhoon_id?: number;
 }): Promise<GetFarmsGeometryResult> {
   const query = new URLSearchParams();
   if (params.bbox) query.set('bbox', params.bbox);
@@ -515,7 +515,7 @@ export function getFarmsGeometry(params: {
   if (params.active_only != null) query.set('active_only', String(params.active_only));
   if (params.municipality) query.set('municipality', params.municipality);
   if (params.typhoon_id != null) query.set('typhoon_id', String(params.typhoon_id));
-  if (params.affected_bulletin_id != null) query.set('affected_bulletin_id', String(params.affected_bulletin_id));
+  if (params.affected_typhoon_id != null) query.set('affected_typhoon_id', String(params.affected_typhoon_id));
   return request<GetFarmsGeometryResult>(`/api/farms/geometry?${query.toString()}`);
 }
 
@@ -679,9 +679,12 @@ export interface PabsAssessmentRow {
   FINAL_INDEMNITY_PAYMENT: number | null;
   P: string;
   S: string | null;
-  REMARKS: string;
+  // PCIC's remark for the RECSAP cell; null when there is none.
+  REMARKS: string | null;
   municipality: string | null;
   province: string | null;
+  // On-screen only (not exported): the farm's barangay.
+  barangay: string | null;
   // TCWS signal number (not exported) -- drives the on-screen Wind column.
   wind_signal: number | null;
   // On-screen only (not exported): assessed crop stage.
@@ -819,9 +822,8 @@ export function getActivityLog(): Promise<{ status: string; data: ActivityLogEnt
 }
 
 // "Verify Farm Planted" (2026-10-12) -- pre-event Sentinel-1 VV/VH colour layer
-// over a bulletin's affected farms (same set as the Spatial Analysis "Affected
-// Only" button), plus the GIS Specialist's recorded planted verdicts. The
-// verdict is shown only; the assessment and PABS export never read it.
+// over a typhoon's affected farms (same set as the Spatial Analysis "Affected
+// by" filter). An optional overlay beside the automatic planted check below.
 export interface SarLayer {
   tile_url: string;
   scene_dates: string[];
@@ -831,46 +833,68 @@ export interface SarLayer {
   min_db: number;
   max_db: number;
   palette: string[];
-  bulletin_id: number;
+  typhoon_id: number;
   event_date: string;
   farm_count: number;
   capped: boolean;
   skipped_no_geom: number;
 }
 
-export function getSarLayer(bulletinId: number): Promise<{ status: string; data: SarLayer }> {
+export function getSarLayer(typhoonId: number): Promise<{ status: string; data: SarLayer }> {
   return request<{ status: string; data: SarLayer }>('/api/sar/layer', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ bulletin_id: bulletinId }),
+    body: JSON.stringify({ typhoon_id: typhoonId }),
   });
 }
 
-export interface PlantedVerification {
+// Automatic planted check (2026-10-12, docs/SAR_ISPLANTED_METHOD.md §3) --
+// every affected farm GREEN "planted" or YELLOW "field_verify", stored per
+// typhoon. Replaces the Specialist's manual Planted / Not planted buttons in
+// the UI; like them, never read by the assessment or the PABS export.
+export type PlantedCheckStatus = 'planted' | 'field_verify';
+
+export interface PlantedCheckResult {
   farm_id: number;
+  status: PlantedCheckStatus;
+  reason_code: string;
+  reason: string;
+  t0_date: string | null;
+  tp_date: string | null;
+  vh_rise_db: number | null;
+  ratio_drop_db: number | null;
+  relative_orbit: number | null;
+  scene_count: number;
+}
+
+export interface PlantedCheckSummary {
   typhoon_id: number;
-  is_planted: boolean;
-  verified_by: string | null;
-  verified_at: string | null;
-  notes: string | null;
+  window_start: string;
+  window_end: string;
+  checked_at: string | null;
+  checked: number;
+  planted: number;
+  field_verify: number;
+  reasons: { code: string; label: string; count: number }[];
+  // Only on a fresh run (POST): farms pulled from Earth Engine vs. read
+  // from the stored series.
+  fetched_from_gee?: number;
+  from_cache?: number;
 }
 
-export function getPlantedVerifications(typhoonId: number): Promise<{ status: string; data: PlantedVerification[] }> {
-  return request<{ status: string; data: PlantedVerification[] }>(`/api/sar/verifications?typhoon_id=${typhoonId}`);
+export interface PlantedCheckData {
+  summary: PlantedCheckSummary | null;
+  results: PlantedCheckResult[];
 }
 
-export function setPlantedVerification(
-  farmId: number, typhoonId: number, isPlanted: boolean, notes?: string,
-): Promise<{ status: string; data: PlantedVerification }> {
-  return request<{ status: string; data: PlantedVerification }>(`/api/sar/verifications/${farmId}`, {
-    method: 'PUT',
+export function runPlantedCheck(typhoonId: number): Promise<{ status: string; data: PlantedCheckData }> {
+  return request<{ status: string; data: PlantedCheckData }>('/api/sar/check', {
+    method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ typhoon_id: typhoonId, is_planted: isPlanted, notes: notes ?? null }),
+    body: JSON.stringify({ typhoon_id: typhoonId }),
   });
 }
 
-export function clearPlantedVerification(farmId: number, typhoonId: number): Promise<{ status: string; deleted: number }> {
-  return request<{ status: string; deleted: number }>(
-    `/api/sar/verifications/${farmId}?typhoon_id=${typhoonId}`, { method: 'DELETE' },
-  );
+export function getPlantedChecks(typhoonId: number): Promise<{ status: string; data: PlantedCheckData }> {
+  return request<{ status: string; data: PlantedCheckData }>(`/api/sar/checks?typhoon_id=${typhoonId}`);
 }

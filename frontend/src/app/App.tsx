@@ -166,35 +166,32 @@ export default function App() {
   // typhoon. A scope like municipality/farmer, so it also allows Active
   // Insurance Only off.
   const [filterTyphoonId, setFilterTyphoonId] = useState<number | null>(null);
-  // "Affected Only" (2026-10-12): farms inside the selected bulletin's TCWS
-  // signal >= 2 areas -- the set the GIS Specialist then checks visually on
-  // SAR (see docs/SAR_ISPLANTED_METHOD.md). A plain toggle rather than its
-  // own dropdown: the bulletin is already chosen in the header, and it's the
-  // same storm whose signals the map is drawing. Resolves to null (filter
-  // off) whenever no bulletin is selected, so the toggle can never scope to
-  // a storm that isn't on screen.
-  const [affectedOnly, setAffectedOnly] = useState(false);
-  const affectedBulletinId = affectedOnly && selectedBulletin ? selectedBulletin.tcb_id : null;
+  // "Affected by" (2026-10-12): farms inside a typhoon's TCWS signal >= 2
+  // areas in any of its bulletins -- the SAR planted check's AOI (see
+  // docs/SAR_ISPLANTED_METHOD.md). Per typhoon, picked from its own
+  // dropdown in Spatial Analysis (per Cristian -- it was a toggle scoped to
+  // the bulletin selected in Monitoring until the same day). null = off.
+  const [affectedTyphoonId, setAffectedTyphoonId] = useState<number | null>(null);
   // Guards against landing in the unbounded combination: if the user had
   // turned Active Insurance Only off while a municipality, farmer, typhoon
-  // or affected-bulletin scope was selected, then clears all of them back to
+  // or affected-typhoon scope was selected, then clears all of them back to
   // "nothing selected", this forces it back on rather than leaving the
   // table/map stuck showing nothing.
   useEffect(() => {
     if (
       filterMuni === "All" && filterFarmerId == null && filterTyphoonId == null &&
-      affectedBulletinId == null && !activeInsuranceOnly
+      affectedTyphoonId == null && !activeInsuranceOnly
     ) {
       setActiveInsuranceOnly(true);
     }
-  }, [filterMuni, filterFarmerId, filterTyphoonId, affectedBulletinId, activeInsuranceOnly]);
+  }, [filterMuni, filterFarmerId, filterTyphoonId, affectedTyphoonId, activeInsuranceOnly]);
   const farmsData = useFarmsData({
     enabled: !!currentUser,
     activeOnly: activeInsuranceOnly,
     municipality: filterMuni === "All" ? null : filterMuni,
     farmerId: filterFarmerId,
     typhoonId: filterTyphoonId,
-    affectedBulletinId,
+    affectedTyphoonId,
   });
   // Re-fetch whenever the Spatial tab is opened: a final PABS export on the
   // Assessment tab locks policies as used, which changes who is active.
@@ -597,9 +594,8 @@ export default function App() {
                   onFilterFarmerIdChange={setFilterFarmerId}
                   filterTyphoonId={filterTyphoonId}
                   onFilterTyphoonIdChange={setFilterTyphoonId}
-                  affectedOnly={affectedOnly}
-                  onAffectedOnlyChange={setAffectedOnly}
-                  affectedBulletinId={affectedBulletinId}
+                  affectedTyphoonId={affectedTyphoonId}
+                  onAffectedTyphoonIdChange={setAffectedTyphoonId}
                   csvUploadProgress={csvUploadProgress}
                   gpxUploadProgress={gpxUploadProgress}
                   onCsvFileSelected={handleCsvFileSelected}

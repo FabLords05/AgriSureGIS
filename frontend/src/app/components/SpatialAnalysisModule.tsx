@@ -4,13 +4,12 @@ import {
   Filter, User, ArrowUpDown, UploadCloud, CheckCircle2, Table2, ShieldCheck, Loader2, Wind,
   Satellite, Radar
 } from "lucide-react";
-import { toast } from "sonner";
-import { GISLeafletMap } from "./GISLeafletMap";
+import { GISLeafletMap, PLANTED_CHECK_COLORS, PLANTED_CHECK_LABELS } from "./GISLeafletMap";
 import { SarAnalysisPanel } from "./SarAnalysisPanel";
 import {
-  getAssessments, getMunicipalities, searchFarmers, getUsedTyphoons,
-  getSarLayer, getPlantedVerifications, setPlantedVerification, clearPlantedVerification,
-  Farm, Assessment, Bulletin, FarmerSearchResult, UsedTyphoon, SarLayer,
+  getAssessments, getMunicipalities, searchFarmers, getUsedTyphoons, getBulletins,
+  getSarLayer, runPlantedCheck, getPlantedChecks,
+  Farm, Assessment, Bulletin, FarmerSearchResult, UsedTyphoon, SarLayer, PlantedCheckData,
 } from "@/lib/api";
 import { FarmsData } from "@/lib/useFarmsData";
 
@@ -18,7 +17,7 @@ interface FarmRow extends Farm {
   assessment: Assessment | null;
 }
 
-type SortField = "csv_farm_reference" | "farmer_name" | "municipality" | "barangay" | "area_size";
+type SortField = "csv_farm_reference" | "farmer_name" | "province" | "municipality" | "barangay" | "area_size";
 type SortDir   = "asc" | "desc";
 
 // Map/records handle: a press that moves less than this before release is a
@@ -77,16 +76,12 @@ interface SpatialAnalysisModuleProps {
   // Insurance view). Scopes like filterMuni/filterFarmerId. null = none.
   filterTyphoonId: number | null;
   onFilterTyphoonIdChange: (value: number | null) => void;
-  // "Affected Only" (2026-10-12) -- farms inside the selected bulletin's
-  // TCWS signal >= 2 areas, i.e. the polygons the GIS Specialist then
-  // checks visually on SAR (docs/SAR_ISPLANTED_METHOD.md). Owned by
-  // App.tsx like every other filter here. `affectedBulletinId` is the
-  // resolved value actually sent to the backend (null whenever the toggle
-  // is off OR no bulletin is selected) -- the button reads it to show
-  // whether the filter is really in effect.
-  affectedOnly: boolean;
-  onAffectedOnlyChange: (value: boolean) => void;
-  affectedBulletinId: number | null;
+  // "Affected by" (2026-10-12) -- farms inside a typhoon's TCWS signal >= 2
+  // areas in any of its bulletins, i.e. the SAR planted check's AOI
+  // (docs/SAR_ISPLANTED_METHOD.md). Owned by App.tsx like every other
+  // filter here. null = off.
+  affectedTyphoonId: number | null;
+  onAffectedTyphoonIdChange: (value: number | null) => void;
   // CSV/GPX upload progress + handlers now live in App.tsx, not here --
   // this module is conditionally mounted (only while activeModule ===
   // "spatial"), so an in-flight upload's progress/polling used to freeze
@@ -105,7 +100,7 @@ export function SpatialAnalysisModule({
   darkMode, selectedBulletin, farmsData,
   activeInsuranceOnly, onActiveInsuranceOnlyChange, filterMuni, onFilterMuniChange,
   filterFarmerId, onFilterFarmerIdChange, filterTyphoonId, onFilterTyphoonIdChange,
-  affectedOnly, onAffectedOnlyChange, affectedBulletinId,
+  affectedTyphoonId, onAffectedTyphoonIdChange,
   csvUploadProgress, gpxUploadProgress, onCsvFileSelected, onGpxFilesSelected,
 }: SpatialAnalysisModuleProps) {
   const {
@@ -143,6 +138,31 @@ export function SpatialAnalysisModule({
   useEffect(() => {
     getUsedTyphoons().then(res => setUsedTyphoons(res.data)).catch(() => setUsedTyphoons([]));
   }, []);
+  // "Affected by" options (2026-10-12) -- every typhoon with a parsed
+  // bulletin, newest first, built from the bulletin list (already newest
+  // issued first). Year is the first bulletin's, as on the Used For Typhoon
+  // dropdown.
+  const [bulletinTyphoons, setBulletinTyphoons] = useState<{ typhoon_id: number; name: string; year: number | null }[]>([]);
+  useEffect(() => {
+    getBulletins()
+      .then(bulletins => {
+        const byId = new Map<number, { typhoon_id: number; name: string; year: number | null }>();
+        for (const b of bulletins) {
+          if (b.typhoon_id == null) continue;
+          // Later entries are older bulletins -- keep overwriting the year so
+          // it ends on the typhoon's first bulletin.
+          const year = b.issued_at ? new Date(b.issued_at).getFullYear() : null;
+          byId.set(b.typhoon_id, { typhoon_id: b.typhoon_id, name: b.typhoon_name, year: year ?? byId.get(b.typhoon_id)?.year ?? null });
+        }
+        // Map keeps first-insertion order, i.e. newest typhoon first.
+        setBulletinTyphoons([...byId.values()]);
+      })
+      .catch(() => setBulletinTyphoons([]));
+  }, []);
+  const affectedTyphoon = bulletinTyphoons.find(t => t.typhoon_id === affectedTyphoonId) ?? null;
+  const affectedTyphoonLabel = affectedTyphoon
+    ? `${affectedTyphoon.name}${affectedTyphoon.year ? ` ${affectedTyphoon.year}` : ""}`
+    : null;
   const [sortField, setSortField] = useState<SortField>("csv_farm_reference");
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [topPanelH, setTopPanelH] = useState(55);
@@ -151,66 +171,73 @@ export function SpatialAnalysisModule({
   // panel is hidden with CSS, not unmounted -- the table's ResizeObserver/
   // sentinel refs and the hidden upload inputs attach once on mount.
   const [recordsHidden, setRecordsHidden] = useState(false);
-  // Verify Farm Planted (2026-10-12) -- the SAR panel, its Earth Engine
-  // layer, and the Specialist's recorded verdicts. Only meaningful while
-  // Affected Only is in effect: the SAR AOI is that set, and verdicts are
-  // per typhoon (the selected bulletin's).
+  // Verify Farm Planted (2026-10-12) -- the SAR panel, the automatic planted
+  // check (GREEN planted / YELLOW field verify per affected farm, stored per
+  // typhoon), and the optional Earth Engine colour layer. Only meaningful
+  // while an "Affected by" typhoon is picked: the SAR AOI is that set.
   const [showSarPanel, setShowSarPanel] = useState(false);
   const [sarLayer, setSarLayer] = useState<SarLayer | null>(null);
   const [sarLoading, setSarLoading] = useState(false);
   const [sarError, setSarError] = useState<string | null>(null);
-  const [sarVisible, setSarVisible] = useState(true);
+  const [sarVisible, setSarVisible] = useState(false);
   const [sarOpacity, setSarOpacity] = useState(0.85);
-  const [plantedVerdicts, setPlantedVerdicts] = useState<Map<number, boolean>>(new Map());
-  const [verdictSaving, setVerdictSaving] = useState(false);
-  const verdictTyphoonId = affectedBulletinId != null && selectedBulletin ? selectedBulletin.typhoon_id : null;
+  const [plantedCheck, setPlantedCheck] = useState<PlantedCheckData | null>(null);
+  const [checkLoading, setCheckLoading] = useState(false);
+  const [checkError, setCheckError] = useState<string | null>(null);
+  const plantedResults = useMemo(
+    () => plantedCheck?.summary ? new Map(plantedCheck.results.map(r => [r.farm_id, r])) : null,
+    [plantedCheck],
+  );
 
-  // A layer belongs to one bulletin's affected set -- drop it (and close the
+  // A layer belongs to one typhoon's affected set -- drop it (and close the
   // panel if the filter went off) whenever that set changes.
   useEffect(() => {
     setSarLayer(null);
+    setSarVisible(false);
     setSarError(null);
-    if (affectedBulletinId == null) setShowSarPanel(false);
-  }, [affectedBulletinId]);
+    setCheckError(null);
+    if (affectedTyphoonId == null) setShowSarPanel(false);
+  }, [affectedTyphoonId]);
 
+  // Stored results for the typhoon -- a check already run shows straight
+  // away, without touching Earth Engine.
   useEffect(() => {
-    if (verdictTyphoonId == null) {
-      setPlantedVerdicts(new Map());
+    if (affectedTyphoonId == null) {
+      setPlantedCheck(null);
       return;
     }
     let cancelled = false;
-    getPlantedVerifications(verdictTyphoonId)
-      .then(res => {
-        if (!cancelled) setPlantedVerdicts(new Map(res.data.map(v => [v.farm_id, v.is_planted])));
-      })
-      .catch(() => { if (!cancelled) setPlantedVerdicts(new Map()); });
+    getPlantedChecks(affectedTyphoonId)
+      .then(res => { if (!cancelled) setPlantedCheck(res.data); })
+      .catch(() => { if (!cancelled) setPlantedCheck(null); });
     return () => { cancelled = true; };
-  }, [verdictTyphoonId]);
+  }, [affectedTyphoonId]);
 
   const runSarAnalysis = () => {
-    if (affectedBulletinId == null) return;
+    if (affectedTyphoonId == null) return;
     setSarLoading(true);
     setSarError(null);
-    getSarLayer(affectedBulletinId)
+    getSarLayer(affectedTyphoonId)
       .then(res => { setSarLayer(res.data); setSarVisible(true); })
       .catch((err: Error) => setSarError(err.message))
       .finally(() => setSarLoading(false));
   };
 
-  const handleSetVerdict = (farmId: number, isPlanted: boolean | null) => {
-    if (verdictTyphoonId == null) return;
-    setVerdictSaving(true);
-    const call = isPlanted == null
-      ? clearPlantedVerification(farmId, verdictTyphoonId)
-      : setPlantedVerification(farmId, verdictTyphoonId, isPlanted);
-    call
-      .then(() => setPlantedVerdicts(prev => {
-        const next = new Map(prev);
-        if (isPlanted == null) next.delete(farmId); else next.set(farmId, isPlanted);
-        return next;
-      }))
-      .catch((err: Error) => toast.error(`Couldn't save the planted verdict: ${err.message}`))
-      .finally(() => setVerdictSaving(false));
+  const runCheck = () => {
+    if (affectedTyphoonId == null) return;
+    setCheckLoading(true);
+    setCheckError(null);
+    runPlantedCheck(affectedTyphoonId)
+      .then(res => setPlantedCheck(res.data))
+      .catch((err: Error) => setCheckError(err.message))
+      .finally(() => setCheckLoading(false));
+  };
+
+  // The panel's "Show radar colour layer" box -- fetches the layer the first
+  // time it's ticked.
+  const handleLayerVisibleChange = (visible: boolean) => {
+    setSarVisible(visible);
+    if (visible && !sarLayer && !sarLoading) runSarAnalysis();
   };
   // csvUploadProgress/gpxUploadProgress (and the failure-details modal they
   // used to feed) now live in App.tsx -- see SpatialAnalysisModuleProps'
@@ -381,10 +408,10 @@ export function SpatialAnalysisModule({
   const topSpacerHeight = tableStartIndex * ROW_HEIGHT;
   const bottomSpacerHeight = (filteredFarms.length - tableEndIndex) * ROW_HEIGHT;
 
-  // "Planted (SAR)" column -- only while Affected Only is on (verdicts are
-  // recorded per typhoon for that set).
-  const showPlantedColumn = verdictTyphoonId != null;
-  const tableColumnCount = showPlantedColumn ? 16 : 15;
+  // "Planted (SAR)" + "SAR Reason" columns -- only while an Affected by typhoon is picked
+  // and the typhoon has a stored planted check.
+  const showPlantedColumn = plantedResults != null;
+  const tableColumnCount = showPlantedColumn ? 18 : 16;
 
   const handleSort = (field: SortField) => {
     if (sortField === field) setSortDir(d => d === "asc" ? "desc" : "asc");
@@ -423,25 +450,26 @@ export function SpatialAnalysisModule({
             focusFarmerId={filterFarmerId}
             activeOnly={activeInsuranceOnly}
             typhoonId={filterTyphoonId}
-            affectedBulletinId={affectedBulletinId}
+            affectedTyphoonId={affectedTyphoonId}
             sarTileUrl={sarLayer && sarVisible ? sarLayer.tile_url : null}
             sarOpacity={sarOpacity}
-            plantedVerdicts={verdictTyphoonId != null ? plantedVerdicts : null}
-            onSetPlantedVerdict={handleSetVerdict}
-            verdictSaving={verdictSaving}
+            plantedResults={plantedResults}
           />
           {/* SAR panel -- slides in over the map, as in the prototype. */}
-          {showSarPanel && selectedBulletin && affectedBulletinId != null && (
+          {showSarPanel && affectedTyphoonId != null && (
             <SarAnalysisPanel
               darkMode={darkMode}
-              bulletin={selectedBulletin}
+              typhoonLabel={affectedTyphoonLabel ?? "the selected typhoon"}
+              summary={plantedCheck?.summary ?? null}
+              checkLoading={checkLoading}
+              checkError={checkError}
+              onRunCheck={runCheck}
               layer={sarLayer}
-              loading={sarLoading}
-              error={sarError}
-              onRun={runSarAnalysis}
+              layerLoading={sarLoading}
+              layerError={sarError}
               onClose={() => setShowSarPanel(false)}
               layerVisible={sarVisible}
-              onLayerVisibleChange={setSarVisible}
+              onLayerVisibleChange={handleLayerVisibleChange}
               opacity={sarOpacity}
               onOpacityChange={setSarOpacity}
             />
@@ -504,38 +532,43 @@ export function SpatialAnalysisModule({
               <ShieldCheck size={11} /> Active Insurance Only
             </button>
 
-            {/* Affected Only (2026-10-12) -- narrows table + map to the
-                insured farms inside the selected bulletin's TCWS signal >= 2
-                areas, which is the AOI the GIS Specialist then checks
-                visually on SAR (docs/SAR_ISPLANTED_METHOD.md). Distinct from
+            {/* Affected by (2026-10-12) -- narrows table + map to the insured
+                farms inside a typhoon's TCWS signal >= 2 areas in ANY of its
+                bulletins, which is the SAR planted check's AOI
+                (docs/SAR_ISPLANTED_METHOD.md). Per typhoon, not per bulletin
+                (per Cristian), so no Monitoring step is needed. Distinct from
                 the "Used for typhoon" dropdown below: that one lists
                 already-exported/spent policies, this one lists farms the
                 storm actually hit, and works as soon as a bulletin is parsed
                 -- no assessment run needed. */}
-            <button
-              onClick={() => onAffectedOnlyChange(!affectedOnly)}
-              disabled={selectedBulletin == null}
-              title={
-                selectedBulletin == null
-                  ? "Select a bulletin first -- this filter scopes to that bulletin's TCWS signal areas"
-                  : `Only farms under TCWS signal 2+ in ${selectedBulletin.typhoon_name} bulletin #${selectedBulletin.bulletin_count}`
-              }
-              className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors border disabled:opacity-50 disabled:cursor-not-allowed ${affectedBulletinId != null ? "bg-[#c2410c] text-white border-[#c2410c]" : "border-[#c2410c] text-[#c2410c] hover:bg-[#c2410c]/10"}`}
-            >
-              <Satellite size={11} /> Affected Only
-            </button>
+            <div className="flex items-center gap-1.5">
+              <Satellite size={11} className={affectedTyphoonId != null ? "text-[#c2410c] shrink-0" : "text-muted-foreground shrink-0"} />
+              <select
+                value={affectedTyphoonId ?? ""}
+                onChange={e => onAffectedTyphoonIdChange(e.target.value === "" ? null : Number(e.target.value))}
+                title="Only farms under TCWS signal 2+ in any bulletin of this typhoon"
+                className={`text-[11px] border rounded px-2 py-1 bg-background ${affectedTyphoonId != null ? "border-[#c2410c] text-[#c2410c] font-semibold" : "border-border"}`}
+              >
+                <option value="">Affected by: None</option>
+                {bulletinTyphoons.map(t => (
+                  <option key={t.typhoon_id} value={t.typhoon_id}>
+                    Affected by: {t.name}{t.year ? ` ${t.year}` : ""}
+                  </option>
+                ))}
+              </select>
+            </div>
 
             {/* SAR / GEE Analysis (2026-10-12) -- Verify Farm Planted. Sits
-                beside Affected Only because its AOI is exactly that set (the
+                beside Affected by because its AOI is exactly that set (the
                 prototype's map toolbar, where it used to live, was removed
                 2026-08-18). */}
             <button
               onClick={() => setShowSarPanel(v => !v)}
-              disabled={affectedBulletinId == null}
+              disabled={affectedTyphoonId == null}
               title={
-                affectedBulletinId == null
-                  ? "Turn on Affected Only first -- SAR is checked only on the affected farms"
-                  : "Pre-event Sentinel-1 layer over the affected farms (Google Earth Engine)"
+                affectedTyphoonId == null
+                  ? "Pick a typhoon under \"Affected by\" first -- SAR is checked only on the affected farms"
+                  : "Sentinel-1 planted check over the affected farms (Google Earth Engine)"
               }
               className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors border disabled:opacity-50 disabled:cursor-not-allowed ${showSarPanel ? "bg-[#166534] text-white border-[#166534]" : "border-[#166534] text-[#166534] hover:bg-[#166534]/10"}`}
             >
@@ -707,14 +740,14 @@ export function SpatialAnalysisModule({
                 Loading farm records…
               </div>
             ) : (
-            <table className="table-fixed min-w-full text-[11px]" style={{ width: showPlantedColumn ? 2100 : 1990 }}>
-              {/* Column order (2026-10-11, per Cristian): Farm ID (pinned),
-                  Farmer, Municipality, Barangay, Area, Amount of Cover,
+            <table className="table-fixed min-w-full text-[11px]" style={{ width: showPlantedColumn ? 2470 : 2130 }}>
+              {/* Column order (2026-10-12, per Cristian): Farm ID (pinned),
+                  Farmer, Province, Municipality, Barangay, Area, Amount of Cover,
                   CIC No., Effectivity, Expiry, Program Type, Crop Stage,
                   Used For Typhoon, Signal, Exp (h), GPX Boundary -- sums to
-                  1990px. Area (90px), CIC No. (130px) and Exp (h) (80px) are centered. Est. Payment was dropped for Amount of Cover. */}
+                  2130px. Area (90px), CIC No. (130px) and Exp (h) (80px) are centered. Est. Payment was dropped for Amount of Cover. */}
               <colgroup>
-                {[90, 200, 140, 150, 90, 130, 130, 120, 120, 150, 220, 160, 90, 80, 120, ...(showPlantedColumn ? [110] : [])].map((w, i) => (
+                {[90, 200, 140, 140, 150, 90, 130, 130, 120, 120, 150, 220, 160, 90, 80, 120, ...(showPlantedColumn ? [120, 220] : [])].map((w, i) => (
                   <col key={i} style={{ width: w }} />
                 ))}
               </colgroup>
@@ -723,6 +756,7 @@ export function SpatialAnalysisModule({
                   {[
                     { label:"Farm ID",     field:"csv_farm_reference" as SortField },
                     { label:"Farmer",      field:"farmer_name" as SortField },
+                    { label:"Province",    field:"province"    as SortField },
                     { label:"Municipality",field:"municipality" as SortField },
                     { label:"Barangay",    field:"barangay"    as SortField },
                     { label:"Area (ha)",   field:"area_size"   as SortField },
@@ -751,7 +785,10 @@ export function SpatialAnalysisModule({
                   <th className="px-2.5 py-2 text-center font-semibold whitespace-nowrap">Exp (h)</th>
                   <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">GPX Boundary</th>
                   {showPlantedColumn && (
-                    <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Planted (SAR)</th>
+                    <>
+                      <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">Planted (SAR)</th>
+                      <th className="px-2.5 py-2 text-left font-semibold whitespace-nowrap">SAR Reason</th>
+                    </>
                   )}
                 </tr>
               </thead>
@@ -788,6 +825,7 @@ export function SpatialAnalysisModule({
                         only substitutes on null/undefined, which rendered the
                         cell visually empty instead of showing the dash. */}
                     <td className="px-2.5 py-2 font-medium truncate" title={f.farmer_name || undefined}>{f.farmer_name || "—"}</td>
+                    <td className="px-2.5 py-2 truncate" title={f.province ?? undefined}>{f.province ?? "—"}</td>
                     <td className="px-2.5 py-2 truncate" title={f.municipality ?? undefined}>{f.municipality ?? "—"}</td>
                     <td className="px-2.5 py-2 text-muted-foreground truncate" title={f.barangay ?? undefined}>{f.barangay ?? "—"}</td>
                     <td className="px-2.5 py-2 text-center whitespace-nowrap">{f.area_size != null ? f.area_size.toFixed(2) : "—"}</td>
@@ -812,15 +850,23 @@ export function SpatialAnalysisModule({
                         : <span className="text-muted-foreground">No</span>
                       }
                     </td>
-                    {showPlantedColumn && (
-                      <td className="px-2.5 py-2 whitespace-nowrap">
-                        {plantedVerdicts.get(f.farm_id) === true
-                          ? <span className="font-medium text-[#16a34a]">Planted</span>
-                          : plantedVerdicts.get(f.farm_id) === false
-                            ? <span className="font-medium text-[#dc2626]">Not planted</span>
-                            : <span className="text-muted-foreground">—</span>}
-                      </td>
-                    )}
+                    {showPlantedColumn && (() => {
+                      const check = plantedResults?.get(f.farm_id);
+                      return (
+                        <>
+                          <td className="px-2.5 py-2 whitespace-nowrap">
+                            {check
+                              ? <span className="font-medium" style={{ color: PLANTED_CHECK_COLORS[check.status] }}>
+                                  {PLANTED_CHECK_LABELS[check.status]}
+                                </span>
+                              : <span className="text-muted-foreground">—</span>}
+                          </td>
+                          <td className="px-2.5 py-2 whitespace-nowrap overflow-hidden text-ellipsis text-muted-foreground" title={check?.reason}>
+                            {check ? check.reason : "Not checked (not insured at the typhoon)"}
+                          </td>
+                        </>
+                      );
+                    })()}
                   </tr>
                 ))}
                 {/* Bottom spacer -- same purpose as the top one, for rows not

@@ -328,6 +328,79 @@ class AreaExposureSummary(Base):
     typhoon = relationship("Typhoon")
 
 
+class SarObservation(Base):
+    """
+    One Sentinel-1 scene's polygon-mean VV/VH (dB) over one farm -- the
+    cached input to the automatic planted check (2026-10-12). Stored so a
+    re-run, or a later typhoon whose window overlaps, reads from here instead
+    of Google Earth Engine. See migrations/2026-10-12_sar_planted_check.sql.
+    """
+
+    __tablename__ = "tbl_sar_observation"
+    __table_args__ = (
+        UniqueConstraint("farm_id", "scene_date", "relative_orbit", name="uq_sar_observation_farm_scene"),
+    )
+
+    observation_id = Column(Integer, primary_key=True, index=True)
+    farm_id = Column(Integer, ForeignKey("tbl_farms.farm_id", ondelete="CASCADE"), nullable=False)
+    scene_date = Column(Date, nullable=False)
+    relative_orbit = Column(Integer, nullable=False)
+    vv_db = Column(Numeric(6, 2), nullable=False)
+    vh_db = Column(Numeric(6, 2), nullable=False)
+    fetched_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+class SarFetchCoverage(Base):
+    """
+    The date range tbl_sar_observation fully covers for one farm, and the
+    boundary it was measured on. A farm whose window falls inside
+    [covered_start, covered_end] with an unchanged geom_hash needs no Earth
+    Engine call. A scene with no valid pixels leaves no observation row,
+    which is why coverage is tracked separately from the rows themselves.
+    """
+
+    __tablename__ = "tbl_sar_fetch_coverage"
+
+    farm_id = Column(Integer, ForeignKey("tbl_farms.farm_id", ondelete="CASCADE"), primary_key=True)
+    covered_start = Column(Date, nullable=False)
+    covered_end = Column(Date, nullable=False)
+    # md5 of the farm's location_geom when fetched -- a re-uploaded GPX
+    # boundary invalidates the cached series.
+    geom_hash = Column(String(32), nullable=False)
+    fetched_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
+
+
+class SarPlantedCheck(Base):
+    """
+    Automatic planted-check result for one farm for one typhoon
+    (2026-10-12, docs/SAR_ISPLANTED_METHOD.md §3): GREEN "planted" when all
+    five conditions pass, YELLOW "field_verify" otherwise, with the first
+    failed condition in reason_code. Like PlantedVerification, NOT read by
+    AssessmentService or the PABS/PCIC export.
+    """
+
+    __tablename__ = "tbl_sar_planted_check"
+    __table_args__ = (
+        UniqueConstraint("farm_id", "typhoon_id", name="uq_sar_planted_check_farm_typhoon"),
+    )
+
+    check_id = Column(Integer, primary_key=True, index=True)
+    farm_id = Column(Integer, ForeignKey("tbl_farms.farm_id", ondelete="CASCADE"), nullable=False)
+    typhoon_id = Column(Integer, ForeignKey("tbl_typhoons.typhoon_id", ondelete="CASCADE"), nullable=False)
+    status = Column(String(20), nullable=False)
+    reason_code = Column(String(40), nullable=False)
+    t0_date = Column(Date)
+    tp_date = Column(Date)
+    vh_rise_db = Column(Numeric(5, 2))
+    ratio_drop_db = Column(Numeric(5, 2))
+    relative_orbit = Column(Integer)
+    scene_count = Column(Integer, nullable=False, default=0)
+    window_start = Column(Date, nullable=False)
+    window_end = Column(Date, nullable=False)
+    checked_by = Column(Integer, ForeignKey("tbl_system_users.user_id", ondelete="SET NULL"))
+    checked_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class PlantedVerification(Base):
     """
     The GIS Specialist's planted / not-planted verdict for one farm for one

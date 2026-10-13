@@ -4,7 +4,7 @@ import type { Layer } from "leaflet";
 import type { Feature, FeatureCollection } from "geojson";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
-import { Farm, Assessment, Bulletin, TcbSignal, GeoJsonMultiPolygon, TyphoonTrack, getBulletinSignals, getFarmsGeometry, getActiveTyphoons, getTyphoonTrack } from "@/lib/api";
+import { Farm, Assessment, Bulletin, TcbSignal, GeoJsonMultiPolygon, TyphoonTrack, PlantedCheckResult, PlantedCheckStatus, getBulletinSignals, getFarmsGeometry, getActiveTyphoons, getTyphoonTrack } from "@/lib/api";
 import { TyphoonTrackLayer, TyphoonTrackLegend } from "./TyphoonTrackLayer";
 
 // Mirrors backend/app/api/typhoons.py's PAR_CORNERS -- only used to still draw
@@ -36,26 +36,26 @@ interface GISLeafletMapProps {
   // Farm Records typhoon filter (2026-10-12): polygons of farms used for
   // this typhoon only; overrides activeOnly server-side.
   typhoonId?: number | null;
-  // "Affected Only" (2026-10-12): polygons of farms inside this bulletin's
-  // TCWS signal >= 2 areas. AND's with activeOnly/focusMunicipality/
+  // "Affected by" (2026-10-12): polygons of farms inside this typhoon's
+  // TCWS signal >= 2 areas (any bulletin). AND's with activeOnly/focusMunicipality/
   // focusFarmerId rather than overriding them, so the map always shows the
   // same set as the Farm Records table. null = filter off.
-  affectedBulletinId?: number | null;
+  affectedTyphoonId?: number | null;
   // "Verify Farm Planted" (2026-10-12): pre-event Sentinel-1 VV/VH tile layer
   // from Google Earth Engine (SarAnalysisPanel). While it's on, farm polygons
   // drop their fill so the colour underneath stays readable.
   sarTileUrl?: string | null;
   sarOpacity?: number;
-  // farm_id -> recorded planted verdict for the selected bulletin's typhoon.
-  // null = verdict UI off (Affected Only not active). Outlines are tinted by
-  // verdict and the Farm Details panel gets Planted / Not planted buttons.
-  plantedVerdicts?: Map<number, boolean> | null;
-  onSetPlantedVerdict?: (farmId: number, isPlanted: boolean | null) => void;
-  verdictSaving?: boolean;
+  // farm_id -> automatic planted-check result for the selected bulletin's
+  // typhoon. null = no stored check (or no Affected by typhoon). Outlines are
+  // tinted green / yellow and Farm Details shows the result and reason.
+  plantedResults?: Map<number, PlantedCheckResult> | null;
 }
 
-// Outline colours for a recorded planted verdict.
-const VERDICT_COLORS = { planted: "#16a34a", notPlanted: "#dc2626" };
+// Automatic planted check (2026-10-12): GREEN = planted, no field visit;
+// YELLOW = needs field verification. Shared with the Farm Records table.
+export const PLANTED_CHECK_COLORS: Record<PlantedCheckStatus, string> = { planted: "#16a34a", field_verify: "#ca8a04" };
+export const PLANTED_CHECK_LABELS: Record<PlantedCheckStatus, string> = { planted: "Planted", field_verify: "Field verify" };
 
 // Real, approximate town-center coordinates for the two municipalities actually
 // seeded today (per backend/pabs_results.csv: Bukidnon/Talakag and Misamis
@@ -321,7 +321,7 @@ function approximateFarmPosition(municipality: string | null, indexInMunicipalit
   return [base[0] + row * step, base[1] + (col - 1) * step];
 }
 
-export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBulletin, darkMode, focusMunicipality, focusFarmerId, activeOnly, typhoonId = null, affectedBulletinId = null, sarTileUrl = null, sarOpacity = 0.85, plantedVerdicts = null, onSetPlantedVerdict, verdictSaving = false }: GISLeafletMapProps) {
+export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBulletin, darkMode, focusMunicipality, focusFarmerId, activeOnly, typhoonId = null, affectedTyphoonId = null, sarTileUrl = null, sarOpacity = 0.85, plantedResults = null }: GISLeafletMapProps) {
   const [affectedAreas, setAffectedAreas] = useState<TcbSignal[]>([]);
   const [regionXBoundaries, setRegionXBoundaries] = useState<FeatureCollection | null>(null);
   const [showFarmsWmsOverlay, setShowFarmsWmsOverlay] = useState(false);
@@ -422,7 +422,7 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
 
   useEffect(() => {
     setGeomCache(new Map());
-  }, [activeOnly, focusMunicipality, focusFarmerId, typhoonId, affectedBulletinId]);
+  }, [activeOnly, focusMunicipality, focusFarmerId, typhoonId, affectedTyphoonId]);
 
   const bboxString = mapBounds
     ? `${mapBounds.west},${mapBounds.south},${mapBounds.east},${mapBounds.north}`
@@ -439,7 +439,7 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
     // either way).
     if (
       !activeOnly && !focusMunicipality && !focusFarmerId &&
-      typhoonId == null && affectedBulletinId == null
+      typhoonId == null && affectedTyphoonId == null
     ) return;
     getFarmsGeometry({
       bbox: bboxString,
@@ -447,11 +447,11 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
       municipality: focusMunicipality ?? undefined,
       farmer_id: focusFarmerId ?? undefined,
       typhoon_id: typhoonId ?? undefined,
-      affected_bulletin_id: affectedBulletinId ?? undefined,
+      affected_typhoon_id: affectedTyphoonId ?? undefined,
     })
       .then(res => mergeGeomEntries(res.data.map(d => ({ farmId: d.farm_id, geom: d.location_geom }))))
       .catch(() => { /* leave the cache as-is on failure -- next moveend/zoomend retries */ });
-  }, [bboxString, activeOnly, focusMunicipality, focusFarmerId, typhoonId, affectedBulletinId, mergeGeomEntries]);
+  }, [bboxString, activeOnly, focusMunicipality, focusFarmerId, typhoonId, affectedTyphoonId, mergeGeomEntries]);
 
   // Rendered-layer set -- viewport-culled subset of geomCache, used ONLY by
   // the polygon render loop below. Deliberately NOT used for `selectedFarm`,
@@ -598,10 +598,8 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
             because attributes haven't caught up. */}
         {visibleGeomEntries.map(({ farmId, geom }) => {
           const isSelected = farmId === selectedFarmId;
-          const verdict = plantedVerdicts?.get(farmId);
-          const outline = verdict === true ? VERDICT_COLORS.planted
-            : verdict === false ? VERDICT_COLORS.notPlanted
-            : "#1e3a5f";
+          const verdict = plantedResults?.get(farmId)?.status;
+          const outline = verdict ? PLANTED_CHECK_COLORS[verdict] : "#1e3a5f";
           return (
             <GeoJSON
               // Keyed on the style inputs too -- react-leaflet's GeoJSON
@@ -661,40 +659,14 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
         )}
       </div>
 
-      {/* Legend */}
-      <div className="absolute bottom-3 left-3 bg-card/90 border border-border rounded-lg px-3 py-2 shadow-md z-[1000]">
-        <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5">Farm Boundary</p>
-        <div className="flex items-center gap-1.5">
-          <span className="w-3 h-3 rounded-sm inline-block" style={{ backgroundColor: "#1e3a5f" }} />
-          <span className="text-[10px]">Surveyed (GPX)</span>
-        </div>
-        {plantedVerdicts && (
-          <>
-            <div className="flex items-center gap-1.5 mt-1">
-              <span className="w-3 h-3 rounded-sm inline-block border-2" style={{ borderColor: VERDICT_COLORS.planted }} />
-              <span className="text-[10px]">Verified planted</span>
-            </div>
-            <div className="flex items-center gap-1.5 mt-1">
-              <span className="w-3 h-3 rounded-sm inline-block border-2" style={{ borderColor: VERDICT_COLORS.notPlanted }} />
-              <span className="text-[10px]">Verified not planted</span>
-            </div>
-          </>
-        )}
-      </div>
-
-      {selectedBulletin && (
-        <div className="absolute bottom-3 left-52 bg-card/90 border border-border rounded-lg px-3 py-2 shadow-md z-[1000] max-w-[180px]">
-          <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5">Signal</p>
-          <div className="flex items-center gap-1.5">
-            <span className="w-3 h-3 rounded-full inline-block" style={{ backgroundColor: "#ff5200" }} />
-            <span className="text-[10px]">{selectedBulletin.typhoon_name} center</span>
-          </div>
-        </div>
-      )}
-
+      {/* Left-hand column: Farm Details on top, legends pinned to the bottom.
+          Sharing one flex column (like the right-hand one) keeps the panel
+          from running down over the legends -- once space runs out it
+          scrolls inside itself instead. */}
+      <div className="absolute top-3 left-3 bottom-3 flex flex-col items-start gap-1.5 z-[1000] pointer-events-none">
       {/* Selected Farm Info Panel */}
       {selectedFarm && (
-        <div className="absolute top-3 left-3 bg-card border-2 border-[#166534] rounded-lg shadow-xl p-3.5 min-w-[270px] z-[1000]">
+        <div className="pointer-events-auto min-h-0 overflow-y-auto bg-card border-2 border-[#166534] rounded-lg shadow-xl p-3.5 min-w-[270px]">
           <div className="flex items-center justify-between mb-2">
             <span className="text-[12px] font-bold text-[#166534] uppercase tracking-wide">Farm Details</span>
             <button onClick={() => onSelectFarm(null)} className="text-muted-foreground hover:text-foreground text-[12px]">✕</button>
@@ -728,52 +700,63 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
             <span className="font-bold text-[#166534]">
               {selectedFarm.amount_cover != null ? `₱${selectedFarm.amount_cover.toLocaleString()}` : "—"}
             </span>
-            {plantedVerdicts && (
-              <>
-                <span className="text-foreground/70">Planted (SAR):</span>
-                <span className="font-medium" style={{
-                  color: plantedVerdicts.get(selectedFarm.farm_id) === true ? VERDICT_COLORS.planted
-                    : plantedVerdicts.get(selectedFarm.farm_id) === false ? VERDICT_COLORS.notPlanted : undefined,
-                }}>
-                  {plantedVerdicts.get(selectedFarm.farm_id) === true ? "Planted"
-                    : plantedVerdicts.get(selectedFarm.farm_id) === false ? "Not planted" : "Not yet checked"}
-                </span>
-              </>
-            )}
+            {/* Automatic planted check (2026-10-12) -- read-only; a yellow
+                farm goes to field verification outside the app. Recorded
+                only, never gates a payout. */}
+            {plantedResults && (() => {
+              const check = plantedResults.get(selectedFarm.farm_id);
+              return (
+                <>
+                  <span className="text-foreground/70">Planted (SAR):</span>
+                  <span className="font-medium" style={{ color: check ? PLANTED_CHECK_COLORS[check.status] : undefined }}>
+                    {check ? PLANTED_CHECK_LABELS[check.status] : "Not checked (not insured at the typhoon)"}
+                  </span>
+                  {check && (
+                    <>
+                      <span className="text-foreground/70">SAR Reason:</span>
+                      <span className="font-medium">{check.reason}</span>
+                    </>
+                  )}
+                </>
+              );
+            })()}
           </div>
-          {/* Verify Farm Planted (2026-10-12): the Specialist's verdict after
-              checking the SAR colour. Recorded only -- never gates a payout. */}
-          {plantedVerdicts && onSetPlantedVerdict && (
-            <div className="flex gap-1.5 mt-3">
-              <button
-                disabled={verdictSaving}
-                onClick={() => onSetPlantedVerdict(selectedFarm.farm_id, true)}
-                className="flex-1 py-1 rounded-md text-[11px] font-medium text-white disabled:opacity-50"
-                style={{ background: VERDICT_COLORS.planted }}
-              >
-                Planted
-              </button>
-              <button
-                disabled={verdictSaving}
-                onClick={() => onSetPlantedVerdict(selectedFarm.farm_id, false)}
-                className="flex-1 py-1 rounded-md text-[11px] font-medium text-white disabled:opacity-50"
-                style={{ background: VERDICT_COLORS.notPlanted }}
-              >
-                Not planted
-              </button>
-              {plantedVerdicts.has(selectedFarm.farm_id) && (
-                <button
-                  disabled={verdictSaving}
-                  onClick={() => onSetPlantedVerdict(selectedFarm.farm_id, null)}
-                  className="px-2 py-1 rounded-md text-[11px] border border-border text-muted-foreground hover:text-foreground disabled:opacity-50"
-                >
-                  Clear
-                </button>
-              )}
-            </div>
-          )}
         </div>
       )}
+
+      <div className="mt-auto flex items-end gap-1.5">
+        {/* Legend */}
+        <div className="pointer-events-auto bg-card/90 border border-border rounded-lg px-3 py-2 shadow-md">
+          <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5">Farm Boundary</p>
+          <div className="flex items-center gap-1.5">
+            <span className="w-3 h-3 rounded-sm inline-block" style={{ backgroundColor: "#1e3a5f" }} />
+            <span className="text-[10px]">Farm Polygon</span>
+          </div>
+          {plantedResults && (
+            <>
+              <div className="flex items-center gap-1.5 mt-1">
+                <span className="w-3 h-3 rounded-sm inline-block border-2" style={{ borderColor: PLANTED_CHECK_COLORS.planted }} />
+                <span className="text-[10px]">Planted, no field visit</span>
+              </div>
+              <div className="flex items-center gap-1.5 mt-1">
+                <span className="w-3 h-3 rounded-sm inline-block border-2" style={{ borderColor: PLANTED_CHECK_COLORS.field_verify }} />
+                <span className="text-[10px]">Needs field verification</span>
+              </div>
+            </>
+          )}
+        </div>
+
+        {selectedBulletin && (
+          <div className="pointer-events-auto bg-card/90 border border-border rounded-lg px-3 py-2 shadow-md max-w-[180px]">
+            <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5">Signal</p>
+            <div className="flex items-center gap-1.5">
+              <span className="w-3 h-3 rounded-full inline-block" style={{ backgroundColor: "#ff5200" }} />
+              <span className="text-[10px]">{selectedBulletin.typhoon_name} center</span>
+            </div>
+          </div>
+        )}
+      </div>
+      </div>
     </div>
   );
 }
