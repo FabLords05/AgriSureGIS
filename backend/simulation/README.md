@@ -13,7 +13,8 @@ were deleted on 2026-10-13 — recover them from git history if ever needed.
 | Path | What it is |
 |---|---|
 | `tcb_opong/` | OPONG's 23 real PAGASA bulletin PDFs (`TCB#1_opong.pdf` … `TCB#23_opong.pdf`, NR. 23F final). Public PAGASA documents, committed on purpose. |
-| `seed_opong_assessment_test.py` | Replays those 23 bulletins through the app's own parser, date-shifted so OPONG is the newest TCB, and activates 20 existing insurance records to assess against it. |
+| `prepare_presentation.py` | One-shot presentation setup: clears OPONG's results and the activity log, re-runs the Tino CSV + GPKG ingestion, seeds OPONG with every record active. Keeps farms and SAR data (Recipe 0). |
+| `seed_opong_assessment_test.py` | Replays those 23 bulletins through the app's own parser, date-shifted so OPONG is the newest TCB, and activates 100 existing insurance records to assess against it. |
 | `reparse_opong_bulletins.py` | Re-parses OPONG's already-saved bulletins after a TCWS parser fix. Dry run by default. |
 | `backfill_tcb_track_radius.py` | Backfills the track-overlay columns (`wind_radius_km`, `storm_force_radius_km`, `forecast_track`) for bulletins saved before those columns existed. |
 | `simulate_new_bulletin_alert.py` | Simulates "a new TCB just arrived" and drives the email alert to active users. Dry run by default. |
@@ -38,6 +39,21 @@ PostgreSQL must be running and the schema applied. Per
 [`.claude/CLAUDE.md`](../../.claude/CLAUDE.md), `sudo`/`psql`/venv commands are
 Fabio's to run — the DB must already be provisioned before anything below.
 
+## Recipe 0 — Presentation-ready in one command
+
+```
+python simulation/prepare_presentation.py                 # or, from the repo root: simulate.bat ready
+python simulation/prepare_presentation.py --skip-ingest   # same, without the CSV/GPKG ingestion
+```
+
+Deletes no farm data and no SAR data. Clears OPONG's computed assessment
+results, its insurance usage (export locks included) and the activity log,
+re-runs the full Tino CSV + GeoPackage ingestion through the upload code
+(rows already in are skipped, so it only adds what's missing), then re-seeds
+OPONG with every record active (Recipe 1 with `--all`). Only Compute Exposure
+Summary and Compute Assessments are left to click. Asks you to type `YES`
+first.
+
 ## Recipe 1 — Put a real typhoon in the system (OPONG)
 
 ```
@@ -47,8 +63,16 @@ python simulation/seed_opong_assessment_test.py
 Parses all 23 bulletins, shifts every `issued_at` forward by one shared
 whole-day offset so NR. 23F lands today (relative timing, and therefore every
 exposure duration, is unchanged), applies the TEST-ONLY Signal 2 override for
-Surigao del Norte, and activates the 20 insurance records most likely to pay
+Surigao del Norte, and activates the 100 insurance records most likely to pay
 out. Safe to re-run.
+
+To activate **every** ingested insurance record instead of the top 100 (same
+coverage window, same backup, so `--restore` undoes it too) — run it after all
+uploads, since records ingested later keep their CSV dates:
+
+```
+python simulation/seed_opong_assessment_test.py --all
+```
 
 Then, in the app itself — this is the part being tested, so the scripts leave
 it alone:
@@ -60,7 +84,7 @@ To run the demo again from the top:
 
 ```
 python simulation/seed_opong_assessment_test.py --reset     # clear computed results
-python simulation/seed_opong_assessment_test.py --restore   # put the 20 records' dates back
+python simulation/seed_opong_assessment_test.py --restore   # put the 100 records' dates back
 ```
 
 ## Recipe 2 — Simulate a new TCB arriving (email alert)

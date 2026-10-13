@@ -7,7 +7,13 @@ rem backend\simulation\ with that venv, because those scripts import the `app`
 rem package and so need backend\ as the working directory. Same pattern as
 rem reset-demo-data.bat.
 rem
+rem   simulate.bat ready              one-shot presentation setup: clear OPONG's
+rem                                   results, ingest the Tino CSV + GPKG (adds only
+rem                                   what's missing), seed OPONG, activate all.
+rem                                   Deletes no farms or SAR data.
+rem   simulate.bat ready --skip-ingest  ...same, without the ingestion
 rem   simulate.bat opong              load OPONG's 23 real PAGASA bulletins
+rem   simulate.bat opong --all        ...and activate EVERY ingested record, not top 100
 rem   simulate.bat opong --reset      clear OPONG's computed assessment results
 rem   simulate.bat alert              simulate a new TCB arriving (dry run)
 rem   simulate.bat alert --send       ...and really send the email alert
@@ -29,14 +35,16 @@ if not exist "%BACKEND_PYTHON%" (
 )
 
 set "TARGET="
+if /i "%~1"=="ready"   set "TARGET=prepare_presentation.py"
 if /i "%~1"=="opong"   set "TARGET=seed_opong_assessment_test.py"
 if /i "%~1"=="alert"   set "TARGET=simulate_new_bulletin_alert.py"
 if /i "%~1"=="reparse" set "TARGET=reparse_opong_bulletins.py"
 if /i "%~1"=="track"   set "TARGET=backfill_tcb_track_radius.py"
 
 if not defined TARGET (
-    echo Usage: simulate.bat ^<opong^|alert^|reparse^|track^> [arguments]
+    echo Usage: simulate.bat ^<ready^|opong^|alert^|reparse^|track^> [arguments]
     echo.
+    echo   ready     prepare_presentation.py         - reset results + ingest + OPONG, all active
     echo   opong     seed_opong_assessment_test.py   - load OPONG's 23 real bulletins
     echo   alert     simulate_new_bulletin_alert.py  - new-TCB email alert ^(dry run^)
     echo   reparse   reparse_opong_bulletins.py      - re-parse saved bulletins

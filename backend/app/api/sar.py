@@ -20,33 +20,44 @@ before its first bulletin.
   typhoon in tbl_sar_planted_check. The Earth Engine series behind it is
   cached in tbl_sar_observation / tbl_sar_fetch_coverage, so only farms and
   dates not already stored are fetched.
+- GET /sar/field-verify, GET /sar/field-verify/export (2026-10-13): the
+  typhoon's YELLOW farms with farmer/policy/location, as JSON for the
+  Assessment & Reporting preview and as a CSV for field verification.
 
 Neither the verdict nor the check result gates anything -- AssessmentService
 and the PABS/PCIC export never read them (per Fabio: record, don't gate).
 """
+import io
 import json
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
 
+import pandas as pd
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from geoalchemy2 import Geography
 from pydantic import BaseModel
 from sqlalchemy import cast, func, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
+from app.api.assessments import _export_filename
 from app.api.farms import _affected_farm_ids
 from app.core.database import get_db
+from app.core.farmer_name import format_surname_first
 from app.core.security import get_current_user
 from app.models.models import (
+    AreaExposureSummary,
     Farm,
     InsuranceRecord,
     InsuranceUsage,
     PlantedVerification,
+    RiskAssessment,
     SarFetchCoverage,
     SarObservation,
     SarPlantedCheck,
     SystemUser,
     TropicalCycloneBulletin,
+    Typhoon,
 )
 from app.services import gee_sar_service
 from app.services import sar_planted_classifier as classifier
@@ -491,3 +502,122 @@ def list_planted_checks(typhoon_id: int = Query(...), db: Session = Depends(get_
         .all()
     )
     return {"status": "success", "data": {"summary": _summary(rows), "results": [_check_to_dict(r) for r in rows]}}
+
+
+# ---------------------------------------------------------------------------
+# Field verification list (2026-10-13, per Cristian)
+# ---------------------------------------------------------------------------
+
+# Row key -> CSV header, in export order. Farmer/farm/policy headers are
+# spelled like the PABS export's (assessments.PABS_CSV_HEADERS).
+FIELD_VERIFY_CSV_HEADERS = {
+    "FARMER_NAME": "FARMER NAME",
+    "FARMERID": "FARMERSID",
+    "FARMID": "FARMID",
+    "CIC_NO": "CIC NO",
+    "PROVINCE": "PROVINCE",
+    "MUNICIPALITY": "MUNICIPALITY",
+    "BARANGAY": "BARANGAY",
+    "AREA": "AREA",
+    "TYPHOON_NAME": "TYPHOON_NAME",
+    "SAR_REASON": "SAR REASON",
+}
+
+
+def _field_verify_list(db: Session, typhoon_id: int) -> dict:
+    """
+    The typhoon's YELLOW "field_verify" farms from its stored planted check,
+    with farmer, policy and location -- limited to farms eligible for
+    insurance on this typhoon, i.e. with a computed assessment for it (the
+    Assessment & Reporting / PABS rows; per Cristian, 2026-10-13). The check
+    itself covers every affected farm insured at the event, which is wider
+    (no signal/exposure/crop-stage/matrix rule). CIC NO and the farmer come
+    from the assessed policy. `checked` is every farm the check covered
+    (0 = never run); `assessed` is how many farms have an assessment
+    (0 = Compute Assessments not run). Read-only: nothing is locked.
+    """
+    typhoon = db.get(Typhoon, typhoon_id)
+    if typhoon is None:
+        raise HTTPException(status_code=404, detail="Typhoon not found.")
+
+    checks = db.query(SarPlantedCheck).filter(SarPlantedCheck.typhoon_id == typhoon_id).all()
+    checked_at = max((c.checked_at for c in checks if c.checked_at), default=None)
+
+    # Same "computed" filter as the PABS rows (matrix_id set).
+    policies: dict[int, InsuranceRecord] = {
+        a.insurance_record.farm_id: a.insurance_record
+        for a in db.query(RiskAssessment)
+        .join(AreaExposureSummary, RiskAssessment.summary_id == AreaExposureSummary.summary_id)
+        .options(joinedload(RiskAssessment.insurance_record).joinedload(InsuranceRecord.farmer))
+        .filter(AreaExposureSummary.typhoon_id == typhoon_id, RiskAssessment.matrix_id.isnot(None))
+        .all()
+        if a.insurance_record is not None
+    }
+    flagged = sorted(
+        (c for c in checks if c.status == classifier.STATUS_FIELD_VERIFY and c.farm_id in policies),
+        key=lambda c: c.farm_id,
+    )
+    rows: list[dict] = []
+    if flagged:
+        farms = {
+            f.farm_id: f
+            for f in db.query(Farm)
+            .options(joinedload(Farm.farmer), joinedload(Farm.boundary))
+            .filter(Farm.farm_id.in_([c.farm_id for c in flagged]))
+            .all()
+        }
+
+        for check in flagged:
+            farm = farms.get(check.farm_id)
+            policy = policies.get(check.farm_id)
+            # The policy's farmer, as in the PABS export; the farm's otherwise.
+            farmer = (policy.farmer if policy else None) or (farm.farmer if farm else None)
+            boundary = farm.boundary if farm else None
+            rows.append({
+                "farm_id": check.farm_id,
+                "FARMER_NAME": format_surname_first(farmer, with_middle_initial=True) if farmer else None,
+                "FARMERID": farmer.farmers_id if farmer else None,
+                "FARMID": farm.csv_farm_reference if farm else None,
+                "CIC_NO": policy.policy_no if policy else None,
+                "PROVINCE": boundary.province if boundary else None,
+                "MUNICIPALITY": boundary.municipality if boundary else None,
+                "BARANGAY": boundary.barangay if boundary else None,
+                "AREA": float(farm.area_size) if farm and farm.area_size is not None else None,
+                "TYPHOON_NAME": typhoon.name,
+                "SAR_REASON": classifier.REASON_LABELS.get(check.reason_code, check.reason_code),
+            })
+
+    return {
+        "typhoon_id": typhoon_id,
+        "typhoon_name": typhoon.name,
+        "checked": len(checks),
+        "assessed": len(policies),
+        "checked_at": checked_at.isoformat() if checked_at else None,
+        "rows": rows,
+    }
+
+
+@router.get("/field-verify")
+def get_field_verify_list(typhoon_id: int = Query(...), db: Session = Depends(get_db)):
+    """JSON version of the field verification list, for the on-screen preview."""
+    return {"status": "success", "data": _field_verify_list(db, typhoon_id)}
+
+
+@router.get("/field-verify/export")
+def export_field_verify_csv(typhoon_id: int = Query(...), db: Session = Depends(get_db)):
+    """The same list as a CSV download. 422 if the planted check has never
+    been run for the typhoon."""
+    data = _field_verify_list(db, typhoon_id)
+    if data["checked"] == 0:
+        raise HTTPException(status_code=422, detail="The SAR planted check hasn't been run for this typhoon yet.")
+    dataframe = pd.DataFrame(data["rows"], columns=list(FIELD_VERIFY_CSV_HEADERS)).rename(
+        columns=FIELD_VERIFY_CSV_HEADERS
+    )
+    buffer = io.StringIO()
+    dataframe.to_csv(buffer, index=False, float_format="%.2f")
+    filename = _export_filename([data["typhoon_name"]], "SAR_Field_Verification")
+    return StreamingResponse(
+        iter([buffer.getvalue()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

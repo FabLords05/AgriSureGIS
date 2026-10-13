@@ -4,6 +4,130 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-13] - Assessment & Reporting: Export the SAR Field Verification List (Sprint 3)
+
+Per Cristian: a way to export the farmers the automatic SAR planted check
+marked YELLOW ("field_verify") for a typhoon, so they can be sent for field
+verification. Read-only: unlike the PABS export it locks no policy, and
+AssessmentService / the PABS export still never read the SAR result.
+
+### 1. File: `backend/app/api/sar.py`
+* New **`FIELD_VERIFY_CSV_HEADERS`** and **`_field_verify_list(db, typhoon_id)`**:
+  the typhoon's `field_verify` rows from `tbl_sar_planted_check`, limited to
+  farms eligible for insurance on that typhoon, meaning a computed
+  `RiskAssessment` (`matrix_id` set, same as the PABS rows) under one of its
+  exposure summaries. The SAR check alone covers every affected farm insured
+  at the event, which is wider (no signal/exposure/crop-stage/matrix rule).
+  Joined to farm, admin boundary, the assessed policy (CIC NO) and farmer (the
+  policy's, else the farm's). Returns `checked` (0 = check never run),
+  `assessed` (0 = Compute Assessments not run), `checked_at` and the rows.
+* New **`GET /sar/field-verify?typhoon_id=`** (JSON, for the preview) and
+  **`GET /sar/field-verify/export?typhoon_id=`** (CSV named via
+  `assessments._export_filename(..., "SAR_Field_Verification")`, AREA to 2
+  decimals; 422 if the check was never run).
+
+### 2. File: `frontend/src/lib/api.ts`
+* New **`FieldVerifyRow`**, **`FieldVerifyList`**, **`getFieldVerifyList()`**,
+  **`downloadFieldVerifyCsv()`**.
+
+### 3. File: `frontend/src/app/components/AssessmentModule.tsx`
+* New **`FieldVerifyModal`**: preview of the list (FARMER NAME, FARMERSID,
+  FARMID, CIC NO, PROVINCE, MUNICIPALITY, BARANGAY, AREA, TYPHOON_NAME, SAR
+  REASON) with farm count, eligible-farm count and total area, then Download CSV.
+* **`AssessmentModule`**: loads the list whenever the selected typhoon
+  changes; new "Export SAR Field Verification List" button with the yellow
+  count in the selected typhoon's bar. Disabled with a hint when the check
+  hasn't been run, assessments haven't been computed, or no eligible farm
+  is yellow.
+
+---
+
+## [2026-10-13] - CSV Upload: Reject a Wrong File Up Front (Sprint 3)
+
+A wrong CSV was uploaded and the system went through every row before
+reporting it as wrong. Cause: `upload_csv()` checked only the extension and
+MIME type, and a missing column never raises in `prepare_row_payload()`
+(`get()` returns `None`). So each row failed on its own in `_ingest_row()`,
+and the problem only showed up as a failure count once the job finished.
+
+### 1. File: `backend/app/api/upload.py`
+* New **`_REQUIRED_CSV_COLUMNS`**: the columns a row can't be ingested
+  without (Province, Municipality, Barangay, `Policy No.`/`CIC NO`,
+  `FARMID`/`Farm ID`). Aliases match the ones `prepare_row_payload()` already
+  accepts, so both the legacy and the newer PABS layout pass.
+* New **`_missing_csv_columns(columns)`**: compares the CSV header against
+  those groups, using the same `_normalize_header()` as row parsing.
+* **`upload_csv()`**: after `pd.read_csv` and before
+  `upload_jobs.create_job()`, it returns a 400 that lists the missing columns
+  ("No rows were imported."). No background job starts. The existing frontend
+  `catch` in `App.tsx` `handleCsvFileSelected` shows the message as an error
+  toast and a notification, so the frontend is unchanged.
+
+---
+
+## [2026-10-13] - From-Scratch Demo: Empty-DB Reset, 100 / All Active Records, One-Shot Presentation Setup (Keeps SAR) (Sprint 3)
+
+Fabio wanted the demo to start from an empty database, like a fresh
+deployment, then walk the real flow (upload CSV + GPKG → OPONG bulletins →
+alert → exposure → assessment) with the client's real Typhoon Tino export,
+and with 100 -- then optionally all -- ingested insurance records active.
+Setup data stays: users, admin boundaries, RECSAP/indemnity matrices,
+crop-stage mapping and parser settings, since nothing logs in, matches
+signals or computes indemnity without them.
+
+### 1. File: `backend/prepare_ingestion_demo.py`
+* New **`--empty`** flag (mutually exclusive with `--split-only`) and new
+  **`empty_database(confirmed)`**: skips the split and pre-ingest, asks for
+  `YES` (unless `--yes`), and truncates `CLEARED_TABLES` plus the new
+  **`EMPTY_EXTRA_TABLES`** -- SAR planted check/observation/fetch coverage,
+  TCB signals, bulletins, typhoons, activity log.
+* **`clear_farmer_data()`** now takes the table list as a parameter
+  (default unchanged: `CLEARED_TABLES`), so both modes share one TRUNCATE.
+* `--empty` deletes `simulation/opong_test_original_dates.json`
+  (**`OPONG_BACKUP_FILE`**). `RESTART IDENTITY` reuses insurance-record ids, so
+  a stale backup would make the OPONG seeder's `restore_records()` write old
+  dates onto newly uploaded, unrelated records.
+
+### 2. File: `backend/simulation/seed_opong_assessment_test.py`
+* **`TARGET_ACTIVE_RECORDS`** 20 → 100 (docstring and `--reset` message
+  follow it).
+* New **`--all`** flag (in the `--reset`/`--restore` exclusive group):
+  **`select_records(..., activate_all=True)`** drops the Surigao del Norte
+  filter, outer-joins the boundary so farms without one are included, and
+  returns every ranked record instead of the top 100. Same coverage window and
+  same backup file, so `--restore` undoes it. Rows without a boundary rank as
+  signal 0 / 0h and print `no boundary`.
+* Checked before changing: on an empty DB the ranking still has crop stages to
+  work with -- CSV ingestion creates each record's seed `RiskAssessment` row
+  (`app/api/upload.py`), which is the `prior` the ranking reads.
+
+### 3. Files: `reset-demo-data.bat`, `simulate.bat`, `backend/simulation/README.md`
+Header/usage text for `--empty`, `opong --all` and the 100-record count.
+
+### 4. File: `backend/simulation/prepare_presentation.py` (new) -- `simulate.bat ready`
+Fabio: resetting and setting up by hand (reset results, upload CSV, upload
+GPKG, seed OPONG, activate) was too slow; he wanted one command that leaves
+the data and OPONG ready, with how ingestion is shown in the presentation
+decided later. Then: keep the SAR data, delete nothing. SAR rows cascade from
+`tbl_farms` (readings, fetch coverage) and from `tbl_typhoons` (planted
+checks, field verifications), so the script deletes no farms and not OPONG.
+* **`clear_results()`**: OPONG's computed results via the seeder's existing
+  `reset_assessment()` (= `opong --reset`: computed `tbl_risk_assessment`
+  rows, OPONG's `tbl_insurance_usage` rows including export locks, the
+  used-for-OPONG mirror; crop-stage seed rows kept), skipped when there is no
+  OPONG yet; then `TRUNCATE tbl_activity_log` (Fabio's choice).
+* **`main()`**: confirm (`YES`, or `--yes`) → `clear_results()` →
+  `ingest_csv()` / `ingest_gpkg()` on the full Tino export (existing rows
+  skipped, so it only adds what's missing) → `seed_opong_assessment_test.main()`
+  with `--all`. **`--skip-ingest`** leaves out the ingestion.
+* Reuses `prepare_ingestion_demo`'s ingest functions and the OPONG seeder
+  as-is; source paths come from the seeder's `_find_ustp_dir()`.
+* `opong_test_original_dates.json` is kept: ids are stable when nothing is
+  deleted, and the seeder restores the originals from it before re-activating.
+* `simulate.bat`: new `ready` target; README: Recipe 0.
+
+---
+
 ## [2026-10-13] - `backend/simulation/`: Real-Data Simulations Gathered, Fictional Ones Deleted (Sprint 3)
 
 Fabio asked for one folder holding everything needed to simulate an actual

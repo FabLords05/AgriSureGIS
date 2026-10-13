@@ -25,6 +25,15 @@ mapping, typhoons, bulletins/signals, parser settings, activity log.
     python prepare_ingestion_demo.py               # split, confirm, reset, pre-ingest
     python prepare_ingestion_demo.py --yes         # same, no confirmation prompt
     python prepare_ingestion_demo.py --split-only  # only (re)write the DEMO files
+    python prepare_ingestion_demo.py --empty       # empty the DB for a from-scratch demo
+
+--empty skips the split and the pre-ingest: it clears the farmer-side tables
+above PLUS every typhoon, bulletin, signal, SAR row and the activity log, so
+the system starts as a fresh deployment would. Setup data (users, admin
+boundaries, matrices, crop-stage mapping, parser settings) is still kept --
+nothing works without it. It also deletes the OPONG seeder's
+opong_test_original_dates.json: RESTART IDENTITY reuses insurance-record ids,
+so a stale backup would "restore" old dates onto newly uploaded records.
 """
 import argparse
 import csv
@@ -58,6 +67,18 @@ CLEARED_TABLES = (
     "tbl_farmers_profile",
     "tbl_area_exposure_summary",
 )
+
+# Extra tables --empty clears on top of CLEARED_TABLES.
+EMPTY_EXTRA_TABLES = (
+    "tbl_sar_planted_check",
+    "tbl_sar_observation",
+    "tbl_sar_fetch_coverage",
+    "tbl_tcb_signals",
+    "tbl_tropical_cyclone_bulletins",
+    "tbl_typhoons",
+    "tbl_activity_log",
+)
+OPONG_BACKUP_FILE = Path(__file__).resolve().parent / "simulation" / "opong_test_original_dates.json"
 
 
 def _normalize(value) -> str:
@@ -217,7 +238,7 @@ def split_source_files() -> dict[str, dict[str, int]]:
     return counts
 
 
-def clear_farmer_data() -> None:
+def clear_farmer_data(tables=CLEARED_TABLES) -> None:
     from sqlalchemy import text
 
     from app.core.database import SessionLocal
@@ -226,7 +247,7 @@ def clear_farmer_data() -> None:
 
     db = SessionLocal()
     try:
-        db.execute(text(f"TRUNCATE {', '.join(CLEARED_TABLES)} RESTART IDENTITY CASCADE"))
+        db.execute(text(f"TRUNCATE {', '.join(tables)} RESTART IDENTITY CASCADE"))
         db.commit()
         refresh_farm_latest_insurance_view(db)
     finally:
@@ -275,13 +296,37 @@ def ingest_gpkg(path: Path) -> dict:
         db.close()
 
 
+def empty_database(confirmed: bool) -> None:
+    if not confirmed:
+        print("This DELETES every farmer, farm, insurance record, assessment, insurance-usage,")
+        print("planted-verification, exposure-summary, typhoon, bulletin, signal, SAR and")
+        print("activity-log row. Users, boundaries, matrices, crop stages and parser settings are kept.")
+        if input("Type YES to continue: ").strip() != "YES":
+            print("Cancelled -- database not touched.")
+            return
+
+    print("\nEmptying the database ...")
+    clear_farmer_data(CLEARED_TABLES + EMPTY_EXTRA_TABLES)
+    if OPONG_BACKUP_FILE.exists():
+        OPONG_BACKUP_FILE.unlink()
+        print(f"  Deleted stale {OPONG_BACKUP_FILE.name}.")
+
+    print("\nDone. Database is empty. Upload the insurance-records CSV, then the .gpkg, in the UI.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Reset the DB to the ingestion-demo starting state.")
     parser.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
-    parser.add_argument("--split-only", action="store_true", help="only (re)write the DEMO files; don't touch the DB")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--split-only", action="store_true", help="only (re)write the DEMO files; don't touch the DB")
+    mode.add_argument("--empty", action="store_true", help="empty the DB (farmers, typhoons, bulletins, ...); no split/pre-ingest")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+    if args.empty:
+        empty_database(confirmed=args.yes)
+        return
 
     print(f"Splitting source files into {DEMO_DIR} ...")
     counts = split_source_files()

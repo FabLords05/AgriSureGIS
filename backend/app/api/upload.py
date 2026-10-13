@@ -268,6 +268,34 @@ def _normalize_header(key: str) -> str:
     return re.sub(r"[^a-z0-9]", "", key.lower())
 
 
+# Columns a row cannot be ingested without. Each tuple is one required field and
+# lists every header alias prepare_row_payload() already accepts for it (legacy
+# pabs_results.csv layout and the newer PABS export), so a legitimate file of
+# either layout passes. Everything else (names, dates, stage, amounts) stays
+# optional, exactly as prepare_row_payload() treats it.
+_REQUIRED_CSV_COLUMNS: tuple[tuple[str, ...], ...] = (
+    ("Province",),
+    ("Municipality",),
+    ("Barangay",),
+    ("Policy No.", "CIC NO"),
+    ("FARMID", "Farm ID"),
+)
+
+
+def _missing_csv_columns(columns: Iterable[Any]) -> list[str]:
+    """Returns a readable label for each required column group absent from the CSV
+    header. Checked in upload_csv() BEFORE the background job starts: a missing
+    column never raises in prepare_row_payload() (get() just returns None), so
+    without this a wrong file was only reported after every row had failed
+    one by one in _ingest_row()."""
+    present = {_normalize_header(str(c)) for c in columns}
+    return [
+        " / ".join(aliases)
+        for aliases in _REQUIRED_CSV_COLUMNS
+        if not any(_normalize_header(a) in present for a in aliases)
+    ]
+
+
 def prepare_row_payload(row: Any) -> dict[str, Any]:
     raw = row.to_dict() if hasattr(row, "to_dict") else dict(row)
     normalized = {_normalize_header(k): v for k, v in raw.items()}
@@ -809,6 +837,17 @@ def upload_csv(
             raise HTTPException(status_code=400, detail=f"Unable to parse CSV file: {exc}") from exc
     if dataframe is None:
         raise HTTPException(status_code=400, detail=f"Unable to decode CSV file: {last_error}")
+
+    missing_columns = _missing_csv_columns(dataframe.columns)
+    if missing_columns:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This doesn't look like a PABS insurance export -- missing column(s): "
+                + ", ".join(missing_columns)
+                + ". No rows were imported."
+            ),
+        )
 
     if dataframe.empty:
         job_id = upload_jobs.create_job(total=0)

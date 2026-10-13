@@ -11,6 +11,9 @@ rem are kept. Asks you to type YES before touching the database.
 rem
 rem   reset-demo-data.bat              split + reset + pre-ingest
 rem   reset-demo-data.bat --split-only only regenerate the DEMO files
+rem   reset-demo-data.bat --empty      empty the DB for a from-scratch demo:
+rem                                    also clears typhoons, bulletins, SAR and
+rem                                    the activity log; no split/pre-ingest
 rem
 rem See backend\prepare_ingestion_demo.py for details.
 rem ---------------------------------------------------------------------------

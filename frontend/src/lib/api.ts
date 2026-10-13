@@ -898,3 +898,43 @@ export function runPlantedCheck(typhoonId: number): Promise<{ status: string; da
 export function getPlantedChecks(typhoonId: number): Promise<{ status: string; data: PlantedCheckData }> {
   return request<{ status: string; data: PlantedCheckData }>(`/api/sar/checks?typhoon_id=${typhoonId}`);
 }
+
+// Field verification list (2026-10-13) -- a typhoon's YELLOW "field_verify"
+// farms with farmer, policy and location, for Assessment & Reporting's
+// preview + CSV. Only farms eligible for insurance on the typhoon (with a
+// computed assessment for it), not every affected farm SAR checked. Read-only: unlike the PABS export, nothing gets locked.
+// Keys match the CSV headers (backend FIELD_VERIFY_CSV_HEADERS).
+export interface FieldVerifyRow {
+  farm_id: number;
+  FARMER_NAME: string | null;
+  FARMERID: string | null;
+  FARMID: string | null;
+  CIC_NO: string | null;
+  PROVINCE: string | null;
+  MUNICIPALITY: string | null;
+  BARANGAY: string | null;
+  AREA: number | null;
+  TYPHOON_NAME: string | null;
+  SAR_REASON: string;
+}
+
+export interface FieldVerifyList {
+  typhoon_id: number;
+  typhoon_name: string;
+  // Farms the planted check covered; 0 = never run for this typhoon.
+  checked: number;
+  // Farms with a computed assessment for this typhoon; 0 = Compute
+  // Assessments not run yet.
+  assessed: number;
+  checked_at: string | null;
+  rows: FieldVerifyRow[];
+}
+
+export function getFieldVerifyList(typhoonId: number): Promise<{ status: string; data: FieldVerifyList }> {
+  return request<{ status: string; data: FieldVerifyList }>(`/api/sar/field-verify?typhoon_id=${typhoonId}`);
+}
+
+export function downloadFieldVerifyCsv(typhoonId: number): Promise<void> {
+  return downloadCsv(`/api/sar/field-verify/export?typhoon_id=${typhoonId}`,
+                     `sar_field_verification_typhoon_${typhoonId}.csv`);
+}

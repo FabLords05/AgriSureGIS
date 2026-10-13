@@ -6,8 +6,8 @@ import {
 } from "lucide-react";
 import {
   getAssessmentsPabsSummary, downloadAssessmentsPabsCsv, getBulletins, getTyphoonSummary, calculateAssessments,
-  getBulletinSignals,
-  PabsAssessmentRow, Bulletin, TyphoonSummary, TyphoonSummaryArea, TcbSignal,
+  getBulletinSignals, getFieldVerifyList, downloadFieldVerifyCsv,
+  PabsAssessmentRow, Bulletin, TyphoonSummary, TyphoonSummaryArea, TcbSignal, FieldVerifyList, FieldVerifyRow,
 } from "@/lib/api";
 
 function formatDateTime(iso: string | null): string {
@@ -119,6 +119,108 @@ function CSVPreviewModal({ rows, onClose }: { rows: PabsAssessmentRow[]; onClose
               className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-[#166534] text-white text-xs font-semibold hover:bg-[#14532d] transition-colors"
             >
               <Download size={12} /> Download CSV
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── SAR Field Verification Modal ────────────────────────────────────────────
+// The typhoon's YELLOW "field_verify" farms from its stored SAR planted check
+// (2026-10-13, per Cristian). Read-only: downloading locks nothing, unlike the
+// PABS export above.
+const FIELD_VERIFY_HEADERS: { label: string; field: keyof FieldVerifyRow }[] = [
+  { label: "FARMER NAME", field: "FARMER_NAME" },
+  { label: "FARMERSID", field: "FARMERID" },
+  { label: "FARMID", field: "FARMID" },
+  { label: "CIC NO", field: "CIC_NO" },
+  { label: "PROVINCE", field: "PROVINCE" },
+  { label: "MUNICIPALITY", field: "MUNICIPALITY" },
+  { label: "BARANGAY", field: "BARANGAY" },
+  { label: "AREA", field: "AREA" },
+  { label: "TYPHOON_NAME", field: "TYPHOON_NAME" },
+  { label: "SAR REASON", field: "SAR_REASON" },
+];
+
+// Left-aligned like FARMER NAME in the PABS preview; the rest are centered.
+const FIELD_VERIFY_LEFT = new Set<string>(["FARMER_NAME", "SAR_REASON"]);
+
+function FieldVerifyModal({ list, onClose }: { list: FieldVerifyList; onClose: () => void }) {
+  const [isDownloading, setIsDownloading] = useState(false);
+  const totalArea = list.rows.reduce((s, r) => s + (r.AREA ?? 0), 0);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+      <div className="bg-card border border-border rounded-2xl shadow-2xl w-[95vw] max-w-7xl max-h-[88vh] flex flex-col">
+        <div className="flex items-center justify-between px-5 py-3 border-b border-border shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-lg bg-[#ca8a04]/10 flex items-center justify-center">
+              <AlertCircle size={15} className="text-[#ca8a04]" />
+            </div>
+            <div>
+              <p className="text-sm font-bold">SAR Field Verification List — Typhoon {list.typhoon_name}</p>
+              <p className="text-[10px] text-muted-foreground">
+                Eligible farms the automatic planted check marked yellow · SAR checked {formatDateTime(list.checked_at)}
+              </p>
+            </div>
+          </div>
+          <button onClick={onClose} className="w-7 h-7 rounded flex items-center justify-center hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">✕</button>
+        </div>
+
+        <div className="flex items-center gap-2 px-5 py-2 bg-[#ca8a04]/10 border-b border-border shrink-0">
+          <AlertCircle size={11} className="text-[#ca8a04] shrink-0" />
+          <p className="text-[10px] text-[#8a5d00] dark:text-yellow-300">
+            Read-only export. Downloading does not lock any policy and does not change the PABS export.
+          </p>
+        </div>
+
+        <div className="overflow-auto flex-1 px-1">
+          <table className="w-full text-[10px]">
+            <thead className="sticky top-0 z-10">
+              <tr className="bg-[#ca8a04] text-white">
+                {FIELD_VERIFY_HEADERS.map(h => (
+                  <th key={h.field} className={`px-2 py-1.5 font-semibold whitespace-nowrap ${FIELD_VERIFY_LEFT.has(h.field) ? "text-left" : "text-center"}`}>{h.label}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {list.rows.map((r, i) => (
+                <tr key={r.farm_id} className={`border-t border-border hover:bg-muted/30 ${i % 2 === 0 ? "bg-card" : "bg-muted/10"}`}>
+                  {FIELD_VERIFY_HEADERS.map(h => (
+                    <td key={h.field} className={`px-2 py-1.5 whitespace-nowrap ${FIELD_VERIFY_LEFT.has(h.field) ? "text-left" : "text-center"} ${h.field === "AREA" ? "tabular-nums" : ""}`}>
+                      {h.field === "AREA"
+                        ? (r.AREA != null ? r.AREA.toFixed(2) : "—")
+                        : formatCell(r[h.field])}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="flex items-center justify-between px-5 py-3 border-t border-border bg-muted/20 shrink-0">
+          <div className="flex items-center gap-6 text-[11px]">
+            <span className="text-muted-foreground"><strong className="text-foreground">{list.rows.length}</strong> farms to verify</span>
+            <span className="text-muted-foreground">of <strong className="text-foreground">{list.assessed}</strong> eligible farms</span>
+            <span className="text-muted-foreground">Total Area: <strong className="text-[#166534]">{totalArea.toFixed(2)} ha</strong></span>
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={onClose} className="px-3 py-1.5 rounded-lg border border-border text-xs hover:bg-muted transition-colors">Cancel</button>
+            <button
+              onClick={() => {
+                setIsDownloading(true);
+                downloadFieldVerifyCsv(list.typhoon_id)
+                  .then(() => toast.success(`Field verification list exported (${list.rows.length} farms).`))
+                  .catch(e => toast.error(e.message))
+                  .finally(() => setIsDownloading(false));
+              }}
+              disabled={isDownloading}
+              className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-[#ca8a04] text-white text-xs font-semibold hover:bg-[#a16207] disabled:opacity-50 transition-colors"
+            >
+              <Download size={12} /> {isDownloading ? "Downloading…" : "Download CSV"}
             </button>
           </div>
         </div>
@@ -296,6 +398,23 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
   const [showAreasModal, setShowAreasModal] = useState(false);
 
   const [isComputingAssessments, setIsComputingAssessments] = useState(false);
+
+  // SAR field verification list for the selected typhoon (2026-10-13). null
+  // while loading, on error, or with no typhoon selected.
+  const [fieldVerify, setFieldVerify] = useState<FieldVerifyList | null>(null);
+  const [showFieldVerifyModal, setShowFieldVerifyModal] = useState(false);
+
+  useEffect(() => {
+    setFieldVerify(null);
+    setShowFieldVerifyModal(false);
+    if (selectedTyphoonId === null) return;
+    // Ignore a late response for a typhoon that's no longer selected.
+    let cancelled = false;
+    getFieldVerifyList(selectedTyphoonId)
+      .then(res => { if (!cancelled) setFieldVerify(res.data); })
+      .catch(() => { /* button stays disabled */ });
+    return () => { cancelled = true; };
+  }, [selectedTyphoonId]);
 
   const handleSelectTyphoon = (typhoonId: number) => {
     setShowAreasModal(false);
@@ -513,6 +632,25 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
           </p>
           {isLoadingTyphoonSummary && <RefreshCw size={11} className="animate-spin text-muted-foreground" />}
           <div className="ml-auto flex items-center gap-2">
+            {fieldVerify && fieldVerify.checked === 0 && (
+              <span className="text-[9px] text-muted-foreground">Run the SAR planted check in Spatial Analysis first</span>
+            )}
+            {fieldVerify && fieldVerify.checked > 0 && fieldVerify.assessed === 0 && (
+              <span className="text-[9px] text-muted-foreground">Compute Assessments first</span>
+            )}
+            {fieldVerify && fieldVerify.checked > 0 && fieldVerify.assessed > 0 && fieldVerify.rows.length === 0 && (
+              <span className="text-[9px] text-muted-foreground">No farms need field verification</span>
+            )}
+            <button
+              onClick={() => setShowFieldVerifyModal(true)}
+              disabled={!fieldVerify || fieldVerify.rows.length === 0}
+              className="flex items-center gap-1 px-2 py-1 rounded border border-[#ca8a04]/50 bg-[#ca8a04]/10 text-[#8a5d00] dark:text-yellow-300 text-[9px] font-medium hover:bg-[#ca8a04]/20 disabled:opacity-45 disabled:cursor-not-allowed transition-colors"
+            >
+              <Download size={10} /> Export SAR Field Verification List
+              {fieldVerify && fieldVerify.checked > 0 && fieldVerify.assessed > 0 && (
+                <span className="px-1.5 rounded-full bg-[#ca8a04] text-white font-bold tabular-nums">{fieldVerify.rows.length}</span>
+              )}
+            </button>
             <button
               onClick={() => setShowAreasModal(true)}
               className="flex items-center gap-1 px-2 py-1 rounded border border-[#1e3a5f]/30 text-[#1e3a5f] text-[9px] font-medium hover:bg-[#1e3a5f]/10 transition-colors"
@@ -535,6 +673,10 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
 
       {typhoonSummaryError && (
         <p className="mx-3 mt-2 px-3 py-2 text-[10px] text-red-600 border border-border rounded-xl shrink-0">{typhoonSummaryError}</p>
+      )}
+
+      {showFieldVerifyModal && fieldVerify && (
+        <FieldVerifyModal list={fieldVerify} onClose={() => setShowFieldVerifyModal(false)} />
       )}
 
       {showAreasModal && selectedTyphoonId !== null && (

@@ -1,6 +1,6 @@
 """
 One-off test setup for the Assessment module: makes Typhoon OPONG (BUALOI,
-Sep 2025) the latest TCB in the app and activates 20 EXISTING insurance
+Sep 2025) the latest TCB in the app and activates 100 EXISTING insurance
 records on farms in Surigao del Norte to assess against it.
 
 1. Parses the 23 real PAGASA bulletins (simulation/tcb_opong/TCB#1_opong.pdf ..
@@ -25,7 +25,7 @@ records on farms in Surigao del Norte to assess against it.
    Maturity (e.g. Dough Stage) gives 10% yield loss, and PCIC's indemnity
    brackets start above 10%. Step 3's ranking prefers records that pay.
 
-3. Picks the 20 existing insurance records on Surigao del Norte farms most
+3. Picks the 100 existing insurance records on Surigao del Norte farms most
    likely to produce a payout (same signal / hours / crop-stage / RECSAP-rule
    checks AssessmentService applies) and sets their coverage to span OPONG's
    shifted dates (effectivity 30 days before the first bulletin, 1-year
@@ -39,7 +39,7 @@ Does NOT run the assessment itself -- that is left to the app (Assessment &
 Reporting module) since that is what is being tested.
 
 Safe to re-run: bulletins already saved are skipped (same typhoon/bulletin
-number) and previously activated records are restored before the 20 are
+number) and previously activated records are restored before the 100 are
 re-selected.
 
 --reset   clears OPONG's assessment results so the demo can be run again:
@@ -47,13 +47,18 @@ re-selected.
           summaries (crop-stage seed rows, matrix_id IS NULL, are kept -- the
           assessment reads them), deletes OPONG's tbl_insurance_usage rows, and
           clears the is_used/used_for_typhoon_id/used_at mirror where it points
-          at OPONG. Bulletins, the override and the 20 active records stay.
---restore puts the 20 records' original effectivity/expiry dates back.
+          at OPONG. Bulletins, the override and the 100 active records stay.
+--restore puts the 100 records' original effectivity/expiry dates back.
+--all     activates EVERY ingested insurance record instead of the top 100
+          (any province, farms without a boundary included), with the same
+          coverage window and the same backup, so --restore undoes it too.
+          Only those passing step 3's checks will actually pay out.
 
 Run from backend/:
     python simulation/seed_opong_assessment_test.py
     python simulation/seed_opong_assessment_test.py --reset
     python simulation/seed_opong_assessment_test.py --restore
+    python simulation/seed_opong_assessment_test.py --all
 """
 
 import argparse
@@ -128,7 +133,7 @@ TCB_DIR = _LOCAL_TCB_DIR if any(_LOCAL_TCB_DIR.glob("TCB#*_opong.pdf")) else UST
 USTP_CSV = USTP_DIR / "INSURANCE RECORDS" / "PCIC10 GPX 11-05-2025 WITH EXISTING IC AFFECTED BY TY.csv"
 BACKUP_FILE = Path(__file__).resolve().parent / "opong_test_original_dates.json"
 
-TARGET_ACTIVE_RECORDS = 20
+TARGET_ACTIVE_RECORDS = 100
 COVERAGE_STARTS_DAYS_BEFORE = 30
 COVERAGE_DAYS = 365
 
@@ -279,21 +284,27 @@ def restore_records(db) -> int:
     return len(backup)
 
 
-def select_records(typhoon_id: int, db):
-    """Ranks Surigao del Norte insurance records by how likely AssessmentService is to pay them out."""
+def select_records(typhoon_id: int, db, activate_all: bool = False):
+    """Ranks Surigao del Norte insurance records by how likely AssessmentService is to pay them out.
+
+    activate_all ranks every insurance record instead (any province, farms with
+    no boundary included) and returns all of them, not just the top
+    TARGET_ACTIVE_RECORDS.
+    """
     # Keyed like AssessmentService matches: by the farm's (province, municipality).
     summaries = {
         (s.province, s.municipality): s for s in ExposureCalculatorService.compute_for_typhoon(typhoon_id, db)
     }
     matrix = ParametricAssessment(db)
 
-    rows = (
-        db.query(InsuranceRecord, Farm, AdminBoundary)
-        .join(Farm, InsuranceRecord.farm_id == Farm.farm_id)
-        .join(AdminBoundary, Farm.boundary_id == AdminBoundary.boundary_id)
-        .filter(AdminBoundary.province == OVERRIDE_PROVINCE)
-        .all()
-    )
+    query = db.query(InsuranceRecord, Farm, AdminBoundary).join(Farm, InsuranceRecord.farm_id == Farm.farm_id)
+    if activate_all:
+        query = query.outerjoin(AdminBoundary, Farm.boundary_id == AdminBoundary.boundary_id)
+    else:
+        query = query.join(AdminBoundary, Farm.boundary_id == AdminBoundary.boundary_id).filter(
+            AdminBoundary.province == OVERRIDE_PROVINCE
+        )
+    rows = query.all()
 
     ranked = []
     for insurance, farm, boundary in rows:
@@ -304,7 +315,7 @@ def select_records(typhoon_id: int, db):
             .first()
         )
         stage_ok = prior is not None and prior.crop_stage_no in ELIGIBLE_CROP_STAGES
-        summary = summaries.get((boundary.province, boundary.municipality))
+        summary = summaries.get((boundary.province, boundary.municipality)) if boundary else None
         signal = summary.max_signal_level if summary else 0
         hours = float(summary.total_exposure_hours) if summary else 0.0
         eligible = signal >= MIN_ELIGIBLE_SIGNAL and hours >= MIN_ELIGIBLE_HOURS
@@ -316,7 +327,7 @@ def select_records(typhoon_id: int, db):
         ranked.append(((has_rule, eligible, stage_ok, signal, hours), insurance, farm, boundary, prior))
 
     ranked.sort(key=lambda r: r[0], reverse=True)
-    return ranked[:TARGET_ACTIVE_RECORDS], len(rows)
+    return (ranked if activate_all else ranked[:TARGET_ACTIVE_RECORDS]), len(rows)
 
 
 def refresh_caches(db) -> None:
@@ -387,7 +398,7 @@ def reset_assessment(db) -> None:
     print(
         f"Reset {TYPHOON_NAME} (typhoon_id={typhoon.typhoon_id}): deleted {assessments_deleted} computed "
         f"assessment(s) and {usage_deleted} usage row(s); cleared {mirrors_cleared} used-for-{TYPHOON_NAME} "
-        f"mark(s). Bulletins and the 20 active records are unchanged -- ready to assess again."
+        f"mark(s). Bulletins and the {TARGET_ACTIVE_RECORDS} active records are unchanged -- ready to assess again."
     )
     refresh_caches(db)
 
@@ -397,6 +408,7 @@ def main() -> None:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--reset", action="store_true", help=f"clear {TYPHOON_NAME}'s assessment results only")
     mode.add_argument("--restore", action="store_true", help="put the activated records' original dates back")
+    mode.add_argument("--all", action="store_true", help="activate every ingested insurance record, not just the top 100")
     args = parser.parse_args()
 
     db = SessionLocal()
@@ -421,10 +433,11 @@ def main() -> None:
         if restored:
             print(f"Restored {restored} previously activated record(s) before re-selecting.")
 
-        selected, candidates = select_records(typhoon_id, db)
+        selected, candidates = select_records(typhoon_id, db, activate_all=args.all)
+        scope = "in the database" if args.all else f"on {OVERRIDE_PROVINCE} farms"
         if not selected:
-            sys.exit(f"No insurance records on farms in {OVERRIDE_PROVINCE} found.")
-        print(f"\n{candidates} insurance record(s) on {OVERRIDE_PROVINCE} farms; activating {len(selected)}:")
+            sys.exit(f"No insurance records {scope} found.")
+        print(f"\n{candidates} insurance record(s) {scope}; activating {len(selected)}:")
 
         first_issued = (
             db.query(TropicalCycloneBulletin.issued_at)
@@ -446,7 +459,7 @@ def main() -> None:
             expected_payouts += has_rule
             print(
                 f"  ir={insurance.insurance_records_id} policy={insurance.policy_no} farm={farm.farm_id} "
-                f"| {boundary.municipality}, {boundary.barangay} | TCWS {signal}, {hours:g}h "
+                f"| {f'{boundary.municipality}, {boundary.barangay}' if boundary else 'no boundary'} | TCWS {signal}, {hours:g}h "
                 f"| stage={prior.crop_stage if prior else None} | expected payout: {'yes' if has_rule else 'no'}"
             )
 
