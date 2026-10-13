@@ -494,7 +494,9 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
   }, []);
 
   return (
-    <div ref={mapWrapperRef} className="relative w-full h-full overflow-hidden rounded-lg border border-border bg-card">
+    // `isolate` keeps Leaflet's z-[1000] overlays inside the map, so the
+    // header's z-50 profile/notification menus open over them (2026-10-13).
+    <div ref={mapWrapperRef} className="relative isolate w-full h-full overflow-hidden rounded-lg border border-border bg-card">
       <MapContainer
         center={DEFAULT_CENTER}
         zoom={9}
