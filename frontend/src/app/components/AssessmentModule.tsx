@@ -17,7 +17,8 @@ function formatDateTime(iso: string | null): string {
   return d.toLocaleString(undefined, { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
 
-type SortField = "FARMER_NAME" | "municipality" | "TYPHOON_NAME" | "AREA" | "PERIOD_OF_EXPOSURE" | "wind_signal" | "crop_stage" | "AC";
+// TYPHOON_NAME isn't sortable (2026-10-13, per Cristian -- unnecessary).
+type SortField = "FARMER_NAME" | "province" | "municipality" | "barangay" | "AREA" | "PERIOD_OF_EXPOSURE" | "wind_signal" | "crop_stage" | "AC";
 type SortDir = "asc" | "desc";
 
 // `right` = numeric column (tabular-nums). Every column is centered except
@@ -409,10 +410,13 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
       : <ArrowUpDown size={10} className="opacity-30" />;
 
   // Every column is centered except Farmer, left-aligned (2026-10-12, per Fabio).
-  const sortableCols: { l: string; f: SortField }[] = [
+  // `f: null` = header without sorting (Typhoon, 2026-10-13).
+  const sortableCols: { l: string; f: SortField | null }[] = [
     { l: "Farmer", f: "FARMER_NAME" },
+    { l: "Province", f: "province" },
     { l: "Municipality", f: "municipality" },
-    { l: "Typhoon", f: "TYPHOON_NAME" },
+    { l: "Barangay", f: "barangay" },
+    { l: "Typhoon", f: null },
     { l: "Area", f: "AREA" },
     { l: "Exp (h)", f: "PERIOD_OF_EXPOSURE" },
     { l: "Wind", f: "wind_signal" },
@@ -582,13 +586,15 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
               <table className="w-full text-[10px]">
                 <thead className="sticky top-0 z-10">
                   <tr className="bg-[#1e3a5f] text-white">
-                    {sortableCols.map(col => (
+                    {sortableCols.map(({ l, f }) => f === null ? (
+                      <th key={l} className="px-2 py-1.5 text-center font-semibold whitespace-nowrap">{l}</th>
+                    ) : (
                       <th
-                        key={col.f}
-                        className={`px-2 py-1.5 font-semibold cursor-pointer hover:bg-white/10 whitespace-nowrap ${col.f === "FARMER_NAME" ? "text-left" : "text-center"}`}
-                        onClick={() => handleSort(col.f)}
+                        key={f}
+                        className={`px-2 py-1.5 font-semibold cursor-pointer hover:bg-white/10 whitespace-nowrap ${f === "FARMER_NAME" ? "text-left" : "text-center"}`}
+                        onClick={() => handleSort(f)}
                       >
-                        <span className={`flex items-center gap-0.5 ${col.f === "FARMER_NAME" ? "" : "justify-center"}`}>{col.l}<SortIcon field={col.f} /></span>
+                        <span className={`flex items-center gap-0.5 ${f === "FARMER_NAME" ? "" : "justify-center"}`}>{l}<SortIcon field={f} /></span>
                       </th>
                     ))}
                     <th className="px-2 py-1.5 text-center font-semibold whitespace-nowrap">Farmer ID</th>
@@ -599,7 +605,9 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
                   {filtered.map((r, i) => (
                     <tr key={r.assessment_id} className={`border-t border-border hover:bg-muted/40 transition-colors ${i % 2 === 0 ? "" : "bg-muted/10"}`}>
                       <td className="px-2 py-1.5 text-left font-medium whitespace-nowrap">{formatCell(r.FARMER_NAME)}</td>
+                      <td className="px-2 py-1.5 text-center text-muted-foreground">{formatCell(r.province)}</td>
                       <td className="px-2 py-1.5 text-center text-muted-foreground">{formatCell(r.municipality)}</td>
+                      <td className="px-2 py-1.5 text-center text-muted-foreground">{formatCell(r.barangay)}</td>
                       <td className="px-2 py-1.5 text-center">{formatCell(r.TYPHOON_NAME)}</td>
                       <td className="px-2 py-1.5 text-center">{r.AREA != null ? r.AREA.toFixed(2) : "—"}</td>
                       <td className="px-2 py-1.5 text-center">{formatCell(r.PERIOD_OF_EXPOSURE)}</td>
@@ -615,7 +623,7 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
                 </tbody>
                 <tfoot>
                   <tr className="bg-[#166534]/10 border-t-2 border-[#166534] font-bold text-[11px]">
-                    <td colSpan={3} className="px-2 py-2 text-center">TOTAL ({filtered.length} records)</td>
+                    <td colSpan={5} className="px-2 py-2 text-center">TOTAL ({filtered.length} records)</td>
                     <td className="px-2 py-2 text-center">{totalArea.toFixed(2)}</td>
                     <td colSpan={3} />
                     <td className="px-2 py-2 text-center text-[#166534]">₱{totalAC.toLocaleString()}</td>

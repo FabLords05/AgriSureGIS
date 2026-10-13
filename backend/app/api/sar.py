@@ -7,7 +7,8 @@ Damage Assessment, against Google Earth Engine) -- Phase 1, 2026-10-12.
 
 Everything here is per typhoon, not per bulletin (per Cristian, 2026-10-12):
 the AOI is every farm under signal 2+ in any of the typhoon's bulletins
-(app/api/farms.py's _affected_farm_ids), and the imagery window ends the day
+(app/api/farms.py's _affected_farm_ids) that was insured when it hit
+(_insured_at_event_farm_ids), and the imagery window ends the day
 before its first bulletin.
 - /sar/verifications: the GIS Specialist's recorded Planted / Not planted
   verdict per farm per typhoon (tbl_planted_verification). No longer used
@@ -30,7 +31,7 @@ from datetime import date, datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 from geoalchemy2 import Geography
 from pydantic import BaseModel
-from sqlalchemy import cast, func
+from sqlalchemy import cast, func, select
 from sqlalchemy.orm import Session
 
 from app.api.farms import _affected_farm_ids
@@ -38,6 +39,8 @@ from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.models import (
     Farm,
+    InsuranceRecord,
+    InsuranceUsage,
     PlantedVerification,
     SarFetchCoverage,
     SarObservation,
@@ -87,21 +90,53 @@ def _event_date(db: Session, typhoon_id: int) -> date:
     return first.date()
 
 
-def _load_affected_polygons(db: Session, typhoon_id: int) -> tuple[list[tuple[int, dict]], int]:
-    """(farm_id, GeoJSON) for the typhoon's affected farms that have a GPX
-    polygon, capped at MAX_LAYER_FARMS + 1 so the caller can tell the cap was
-    hit, plus how many affected farms were skipped for having no polygon."""
-    affected = _affected_farm_ids(db, typhoon_id)
+def _insured_at_event_farm_ids(typhoon_id: int, event_date: date):
+    """
+    Farms with a policy in force on the typhoon's first-bulletin date that
+    isn't already spent on a DIFFERENT typhoon by a final PABS export.
+
+    Per Cristian (2026-10-12): SAR only checks affected farms that were
+    insured, so Earth Engine is never asked about the 100K+ farms with no
+    usable cover. Dated to the typhoon, not to today (unlike _active_farm_ids
+    in farms.py), so a past typhoon's farms still count after their policy
+    expires, and a policy already exported for THIS typhoon still counts --
+    those are exactly the farms being paid for it.
+    """
+    used_elsewhere = select(InsuranceUsage.insurance_records_id).where(
+        InsuranceUsage.is_used.is_(True),
+        InsuranceUsage.finalized_at.isnot(None),
+        InsuranceUsage.typhoon_id != typhoon_id,
+    )
+    return select(InsuranceRecord.farm_id).where(
+        InsuranceRecord.effectivity_date <= event_date,
+        InsuranceRecord.expiry_date >= event_date,
+        InsuranceRecord.insurance_records_id.not_in(used_elsewhere),
+    )
+
+
+def _sar_farm_filter(db: Session, typhoon_id: int, event_date: date):
+    """The SAR AOI: affected by the typhoon AND insured at it."""
+    return (
+        Farm.farm_id.in_(_affected_farm_ids(db, typhoon_id)),
+        Farm.farm_id.in_(_insured_at_event_farm_ids(typhoon_id, event_date)),
+    )
+
+
+def _load_affected_polygons(db: Session, typhoon_id: int, event_date: date) -> tuple[list[tuple[int, dict]], int]:
+    """(farm_id, GeoJSON) for the typhoon's affected, insured farms that have
+    a GPX polygon, capped at MAX_LAYER_FARMS + 1 so the caller can tell the
+    cap was hit, plus how many such farms were skipped for having no polygon."""
+    aoi = _sar_farm_filter(db, typhoon_id, event_date)
     rows = (
         db.query(Farm.farm_id, func.ST_AsGeoJSON(Farm.location_geom, 6))
-        .filter(Farm.farm_id.in_(affected), Farm.location_geom.isnot(None))
+        .filter(*aoi, Farm.location_geom.isnot(None))
         .order_by(Farm.farm_id)
         .limit(MAX_LAYER_FARMS + 1)
         .all()
     )
     skipped = (
         db.query(func.count(Farm.farm_id))
-        .filter(Farm.farm_id.in_(affected), Farm.location_geom.is_(None))
+        .filter(*aoi, Farm.location_geom.is_(None))
         .scalar()
     ) or 0
     return [(farm_id, json.loads(geojson)) for farm_id, geojson in rows], skipped
@@ -111,20 +146,21 @@ def _load_affected_polygons(db: Session, typhoon_id: int) -> tuple[list[tuple[in
 def get_planted_layer(body: LayerRequest, db: Session = Depends(get_db)):
     """
     Pre-event VV/VH-ratio tile layer clipped to the typhoon's affected farm
-    polygons (TCWS signal >= 2 municipalities in any bulletin, same set as
-    the Spatial Analysis "Affected by" filter). 404 unknown typhoon, 503 if
-    Earth Engine isn't configured, 422 if there's nothing to draw, 502 if
-    Earth Engine itself fails.
+    polygons that were insured at it (TCWS signal >= 2 municipalities in any
+    bulletin -- the Spatial Analysis "Affected by" set -- narrowed by
+    _insured_at_event_farm_ids). 404 unknown typhoon, 503 if Earth Engine
+    isn't configured, 422 if there's nothing to draw, 502 if Earth Engine
+    itself fails.
     """
     event_date = _event_date(db, body.typhoon_id)
     if not gee_sar_service.gee_configured():
         raise HTTPException(status_code=503, detail="Google Earth Engine is not configured on the server.")
 
-    polygons, skipped_no_geom = _load_affected_polygons(db, body.typhoon_id)
+    polygons, skipped_no_geom = _load_affected_polygons(db, body.typhoon_id, event_date)
     if not polygons:
         raise HTTPException(
             status_code=422,
-            detail="No affected farms with a surveyed (GPX) polygon for this typhoon.",
+            detail="No affected, insured farms with a surveyed (GPX) polygon for this typhoon.",
         )
     capped = len(polygons) > MAX_LAYER_FARMS
     polygons = polygons[:MAX_LAYER_FARMS]
@@ -214,12 +250,12 @@ def clear_verification(farm_id: int, typhoon_id: int = Query(...), db: Session =
 # Automatic planted check (Phase 2, 2026-10-12)
 # ---------------------------------------------------------------------------
 
-def _load_affected_farms(db: Session, typhoon_id: int) -> list[tuple]:
+def _load_affected_farms(db: Session, typhoon_id: int, event_date: date) -> list[tuple]:
     """(farm_id, GeoJSON, geom md5, area left after the inward buffer in m²)
-    for every farm the typhoon affected. The last three are None for a farm
-    with no GPX polygon. The buffered area is computed here, in PostGIS, so
-    farms too small to sample are never sent to Earth Engine."""
-    affected = _affected_farm_ids(db, typhoon_id)
+    for every farm the typhoon affected that was insured at it
+    (_insured_at_event_farm_ids). The last three are None for a farm with no
+    GPX polygon. The buffered area is computed here, in PostGIS, so farms too
+    small to sample are never sent to Earth Engine."""
     return (
         db.query(
             Farm.farm_id,
@@ -227,7 +263,7 @@ def _load_affected_farms(db: Session, typhoon_id: int) -> list[tuple]:
             func.md5(func.ST_AsEWKB(Farm.location_geom)),
             func.ST_Area(func.ST_Buffer(cast(Farm.location_geom, Geography), -INWARD_BUFFER_M)),
         )
-        .filter(Farm.farm_id.in_(affected))
+        .filter(*_sar_farm_filter(db, typhoon_id, event_date))
         .order_by(Farm.farm_id)
         .all()
     )
@@ -353,7 +389,8 @@ def run_planted_check(
 ):
     """
     Classify every farm the typhoon affected (signal 2+ in any of its
-    bulletins -- the "Affected by" filter's set) as GREEN "planted" or
+    bulletins -- the "Affected by" set) that was insured when it hit
+    (_insured_at_event_farm_ids) as GREEN "planted" or
     YELLOW "field_verify" (method doc §3), and store the result for the
     typhoon -- replacing any earlier run for it.
 
@@ -366,9 +403,9 @@ def run_planted_check(
     typhoon_id = body.typhoon_id
     event_date = _event_date(db, typhoon_id)
 
-    farms = _load_affected_farms(db, typhoon_id)
+    farms = _load_affected_farms(db, typhoon_id, event_date)
     if not farms:
-        raise HTTPException(status_code=422, detail="No affected farms for this typhoon.")
+        raise HTTPException(status_code=422, detail="No affected farms were insured when this typhoon hit.")
 
     start, end = classifier.observation_window(event_date)
 

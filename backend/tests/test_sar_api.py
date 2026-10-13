@@ -61,7 +61,7 @@ class GetPlantedLayerTests(unittest.TestCase):
              patch.object(sar.gee_sar_service, "build_planted_layer", return_value=_LAYER) as build:
             result = get_planted_layer(LayerRequest(typhoon_id=7), db=_layer_db())
 
-        self.assertEqual(load.call_args.args[1], 7)
+        self.assertEqual(load.call_args.args[1:], (7, date(2026, 9, 24)))  # typhoon + its event date
         _, polygons, event_date = build.call_args.args
         self.assertEqual(polygons, [_POLYGON, _POLYGON])
         self.assertEqual(event_date, date(2026, 9, 24))

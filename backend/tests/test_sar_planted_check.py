@@ -145,7 +145,7 @@ class RunPlantedCheckTests(unittest.TestCase):
             result = run_planted_check(CheckRequest(typhoon_id=7), db=db, current_user=_USER)
 
         # Scoped to the typhoon itself -- every bulletin's affected farms.
-        self.assertEqual(sar._load_affected_farms.call_args.args[1], 7)
+        self.assertEqual(sar._load_affected_farms.call_args.args[1:], (7, EVENT))
         self.assertEqual(sar._event_date.call_args.args[1], 7)
         fetch.assert_not_called()
         summary = result["data"]["summary"]
@@ -209,6 +209,21 @@ class ListPlantedChecksTests(unittest.TestCase):
         summary = list_planted_checks(typhoon_id=7, db=db)["data"]["summary"]
         self.assertEqual((summary["planted"], summary["field_verify"]), (1, 3))
         self.assertEqual(summary["reasons"][0], {"code": "no_canopy_closure", "label": "No canopy closure (C3)", "count": 2})
+
+
+class InsuredAtEventTests(unittest.TestCase):
+    """SAR only checks farms insured when the typhoon hit (per Cristian) --
+    dated to the event, not to today, and a policy spent on THIS typhoon
+    still counts."""
+
+    def test_policy_in_force_on_event_date_and_not_spent_elsewhere(self):
+        compiled = str(sar._insured_at_event_farm_ids(7, EVENT).compile(compile_kwargs={"literal_binds": True}))
+        self.assertIn("effectivity_date <= '2025-09-24'", compiled)
+        self.assertIn("expiry_date >= '2025-09-24'", compiled)
+        # Spent policies are excluded only when spent on a different typhoon.
+        self.assertIn("tbl_insurance_usage", compiled)
+        self.assertIn("typhoon_id != 7", compiled)
+        self.assertIn("NOT IN", compiled)
 
 
 if __name__ == "__main__":

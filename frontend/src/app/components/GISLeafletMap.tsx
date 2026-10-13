@@ -659,40 +659,14 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
         )}
       </div>
 
-      {/* Legend */}
-      <div className="absolute bottom-3 left-3 bg-card/90 border border-border rounded-lg px-3 py-2 shadow-md z-[1000]">
-        <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5">Farm Boundary</p>
-        <div className="flex items-center gap-1.5">
-          <span className="w-3 h-3 rounded-sm inline-block" style={{ backgroundColor: "#1e3a5f" }} />
-          <span className="text-[10px]">Farm Polygon</span>
-        </div>
-        {plantedResults && (
-          <>
-            <div className="flex items-center gap-1.5 mt-1">
-              <span className="w-3 h-3 rounded-sm inline-block border-2" style={{ borderColor: PLANTED_CHECK_COLORS.planted }} />
-              <span className="text-[10px]">Planted, no field visit</span>
-            </div>
-            <div className="flex items-center gap-1.5 mt-1">
-              <span className="w-3 h-3 rounded-sm inline-block border-2" style={{ borderColor: PLANTED_CHECK_COLORS.field_verify }} />
-              <span className="text-[10px]">Needs field verification</span>
-            </div>
-          </>
-        )}
-      </div>
-
-      {selectedBulletin && (
-        <div className="absolute bottom-3 left-52 bg-card/90 border border-border rounded-lg px-3 py-2 shadow-md z-[1000] max-w-[180px]">
-          <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5">Signal</p>
-          <div className="flex items-center gap-1.5">
-            <span className="w-3 h-3 rounded-full inline-block" style={{ backgroundColor: "#ff5200" }} />
-            <span className="text-[10px]">{selectedBulletin.typhoon_name} center</span>
-          </div>
-        </div>
-      )}
-
+      {/* Left-hand column: Farm Details on top, legends pinned to the bottom.
+          Sharing one flex column (like the right-hand one) keeps the panel
+          from running down over the legends -- once space runs out it
+          scrolls inside itself instead. */}
+      <div className="absolute top-3 left-3 bottom-3 flex flex-col items-start gap-1.5 z-[1000] pointer-events-none">
       {/* Selected Farm Info Panel */}
       {selectedFarm && (
-        <div className="absolute top-3 left-3 bg-card border-2 border-[#166534] rounded-lg shadow-xl p-3.5 min-w-[270px] z-[1000]">
+        <div className="pointer-events-auto min-h-0 overflow-y-auto bg-card border-2 border-[#166534] rounded-lg shadow-xl p-3.5 min-w-[270px]">
           <div className="flex items-center justify-between mb-2">
             <span className="text-[12px] font-bold text-[#166534] uppercase tracking-wide">Farm Details</span>
             <button onClick={() => onSelectFarm(null)} className="text-muted-foreground hover:text-foreground text-[12px]">✕</button>
@@ -735,7 +709,7 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
                 <>
                   <span className="text-foreground/70">Planted (SAR):</span>
                   <span className="font-medium" style={{ color: check ? PLANTED_CHECK_COLORS[check.status] : undefined }}>
-                    {check ? PLANTED_CHECK_LABELS[check.status] : "Not in the last check"}
+                    {check ? PLANTED_CHECK_LABELS[check.status] : "Not checked (not insured at the typhoon)"}
                   </span>
                   {check && (
                     <>
@@ -749,6 +723,40 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
           </div>
         </div>
       )}
+
+      <div className="mt-auto flex items-end gap-1.5">
+        {/* Legend */}
+        <div className="pointer-events-auto bg-card/90 border border-border rounded-lg px-3 py-2 shadow-md">
+          <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5">Farm Boundary</p>
+          <div className="flex items-center gap-1.5">
+            <span className="w-3 h-3 rounded-sm inline-block" style={{ backgroundColor: "#1e3a5f" }} />
+            <span className="text-[10px]">Farm Polygon</span>
+          </div>
+          {plantedResults && (
+            <>
+              <div className="flex items-center gap-1.5 mt-1">
+                <span className="w-3 h-3 rounded-sm inline-block border-2" style={{ borderColor: PLANTED_CHECK_COLORS.planted }} />
+                <span className="text-[10px]">Planted, no field visit</span>
+              </div>
+              <div className="flex items-center gap-1.5 mt-1">
+                <span className="w-3 h-3 rounded-sm inline-block border-2" style={{ borderColor: PLANTED_CHECK_COLORS.field_verify }} />
+                <span className="text-[10px]">Needs field verification</span>
+              </div>
+            </>
+          )}
+        </div>
+
+        {selectedBulletin && (
+          <div className="pointer-events-auto bg-card/90 border border-border rounded-lg px-3 py-2 shadow-md max-w-[180px]">
+            <p className="text-[10px] uppercase tracking-wider text-muted-foreground mb-1.5">Signal</p>
+            <div className="flex items-center gap-1.5">
+              <span className="w-3 h-3 rounded-full inline-block" style={{ backgroundColor: "#ff5200" }} />
+              <span className="text-[10px]">{selectedBulletin.typhoon_name} center</span>
+            </div>
+          </div>
+        )}
+      </div>
+      </div>
     </div>
   );
 }

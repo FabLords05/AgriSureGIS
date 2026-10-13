@@ -331,7 +331,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
             {/* Login Card */}
             <div className="bg-white rounded-2xl shadow-2xl overflow-hidden">
               {/* Card Header */}
-              <div className="px-6 pt-[clamp(0.75rem,2vh,1.5rem)] pb-[clamp(0.5rem,1.2vh,1rem)] border-b border-gray-100">
+              <div className="px-6 pt-[clamp(0.75rem,2vh,1.5rem)] pb-[clamp(0.5rem,1.2vh,1rem)] border-b border-gray-100 text-center">
                 <p className="text-sm font-bold text-gray-800">Sign in to your account</p>
                 <p className="text-[11px] text-gray-400 mt-0.5">Enter your institutional email and password</p>
               </div>
@@ -398,7 +398,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
                     onClick={() => setView("register")}
                     className="text-xs font-semibold text-[#166534] hover:text-[#14532d] hover:underline underline-offset-2 transition-colors inline-flex items-center gap-1"
                   >
-                    <UserPlus size={12} /> Request system access (new staff)
+                    <UserPlus size={12} /> Request System Access
                   </button>
                 </div>
               </form>

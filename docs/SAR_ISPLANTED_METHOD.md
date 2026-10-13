@@ -25,6 +25,14 @@ Implementation choices for Phase 2:
   typhoon's bulletins. It is picked in Spatial Analysis through an
   "Affected by" typhoon dropdown, which replaced the bulletin-scoped
   "Affected Only" toggle.
+- **Insured farms only** (Cristian, 2026-10-12). SAR checks only the affected
+  farms that were insured when the typhoon hit. "Insured" means a policy in
+  force on the first-bulletin date that isn't already spent on a different
+  typhoon by a final export. A policy exported for the same typhoon still
+  counts. This keeps Earth Engine away from the 100K+ farms with no usable
+  cover. The date is the typhoon's, not today's, so past typhoons still
+  work after their policies expire. The "Affected by" table and map still
+  list every affected farm; uninsured ones show "Not checked".
 - **One orbit per farm, not per request** (§5.1). Every descending relative
   orbit is fetched, and each farm uses the orbit with the most scenes over
   it.
