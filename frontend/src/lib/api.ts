@@ -683,6 +683,8 @@ export interface PabsAssessmentRow {
   REMARKS: string | null;
   municipality: string | null;
   province: string | null;
+  // On-screen only (not exported): the farm's barangay.
+  barangay: string | null;
   // TCWS signal number (not exported) -- drives the on-screen Wind column.
   wind_signal: number | null;
   // On-screen only (not exported): assessed crop stage.

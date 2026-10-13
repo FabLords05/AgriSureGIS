@@ -4,6 +4,34 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-13] - Farm Details Overlap Fix, Province/Barangay Columns, Login Text (Sprint 3)
+
+Per Cristian. No schema change; the PABS CSV export is unchanged.
+
+### 1. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* Farm Details and the bottom-left legends (Farm Boundary, Signal) now share
+  one left-hand flex column, like the right-hand toggles. The panel
+  (`min-h-0 overflow-y-auto`) scrolls inside itself instead of running down
+  over the legends, which the SAR rows had made it do on short maps.
+
+### 2. Assessment & Reporting table
+* `backend/app/api/assessments.py` (`_build_pabs_rows`): rows carry the
+  farm's `barangay` (on-screen only, not in `PABS_CSV_HEADERS`).
+* `frontend/src/lib/api.ts`: `PabsAssessmentRow.barangay`.
+* `frontend/src/app/components/AssessmentModule.tsx`: new sortable
+  **Province** (before Municipality) and **Barangay** (after it) columns,
+  centered like the rest (Farmer stays left). **Typhoon** is no longer
+  sortable (removed from `SortField`; `sortableCols` entries with `f: null`
+  render a plain header). TOTAL row's first span is now 5 columns.
+* `.claude/API_CONTRACT.md`: pabs-summary lists the on-screen
+  `province`/`municipality`/`barangay` keys.
+
+### 3. File: `frontend/src/app/components/LoginScreen.tsx`
+* Card header ("Sign in to your account" + subtitle) is centered.
+* "Request system access (new staff)" link now reads "Request System Access".
+
+---
+
 ## [2026-10-12] - SAR Checks Only Farms Insured When the Typhoon Hit (Sprint 3)
 
 Per Cristian: the planted check (and its colour layer) must not send every

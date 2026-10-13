@@ -568,6 +568,7 @@ def _build_pabs_rows(db: Session) -> list[dict]:
                 # (not written to the CSV export).
                 "municipality": farm.boundary.municipality if farm and farm.boundary else None,
                 "province": farm.boundary.province if farm and farm.boundary else None,
+                "barangay": farm.boundary.barangay if farm and farm.boundary else None,
                 # TCWS signal number, for the on-screen table's Wind column and
                 # signal filter (WIND_VELOCITY above is km/h now).
                 "wind_signal": a.wind_velocity,
