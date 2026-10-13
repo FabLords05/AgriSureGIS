@@ -3,8 +3,9 @@ One-off test setup for the Assessment module: makes Typhoon OPONG (BUALOI,
 Sep 2025) the latest TCB in the app and activates 20 EXISTING insurance
 records on farms in Surigao del Norte to assess against it.
 
-1. Parses the 23 real PAGASA bulletins (USTP CAPSTONE/TCB/TCB#1_opong.pdf ..
-   TCB#23_opong.pdf, NR. 23F is final) through the app's own
+1. Parses the 23 real PAGASA bulletins (simulation/tcb_opong/TCB#1_opong.pdf ..
+   TCB#23_opong.pdf, NR. 23F is final -- moved into the repo on 2026-10-13 out
+   of the gitignored client export) through the app's own
    BulletinParserService. Content is kept as issued -- only every `issued_at`
    is shifted forward by one shared whole-day offset, so the final bulletin
    lands on today (same time of day) and OPONG sorts as the newest TCB.
@@ -50,9 +51,9 @@ re-selected.
 --restore puts the 20 records' original effectivity/expiry dates back.
 
 Run from backend/:
-    python seed_opong_assessment_test.py
-    python seed_opong_assessment_test.py --reset
-    python seed_opong_assessment_test.py --restore
+    python simulation/seed_opong_assessment_test.py
+    python simulation/seed_opong_assessment_test.py --reset
+    python simulation/seed_opong_assessment_test.py --restore
 """
 
 import argparse
@@ -62,6 +63,12 @@ import re
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
+
+# This file lives in backend/simulation/ (moved 2026-10-13) but imports the
+# backend package `app`, so backend/ has to be on sys.path -- running
+# `python simulation/seed_opong_assessment_test.py` from backend/ puts only
+# backend/simulation/ there, not backend/ itself.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -83,8 +90,41 @@ from app.services.assessment_service import ELIGIBLE_CROP_STAGES, MIN_ELIGIBLE_H
 from app.services.bulletin_parser import PHT, BulletinParserService
 from app.services.exposure_calculator import ExposureCalculatorService
 
-USTP_DIR = Path(__file__).resolve().parent.parent / "USTP CAPSTONE-20261009T021551Z-1-001" / "USTP CAPSTONE"
-TCB_DIR = USTP_DIR / "TCB"
+# parent.parent.parent, not parent.parent: this file moved from backend/ into
+# backend/simulation/ on 2026-10-13, so the repo root is now three levels up.
+# Getting this wrong fails quietly -- the TCB glob just finds no PDFs.
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _find_ustp_dir() -> Path:
+    """
+    The client's export folder carries its Google Drive download timestamp in
+    the name ("USTP CAPSTONE-20261009T021551Z-1-001"), so it differs on every
+    machine and every re-download -- the hardcoded name was already stale on
+    Fabio's laptop ("...-20261008T140025Z-..."), and a stale name fails
+    quietly: the TCB glob finds nothing and the script reports no PDFs rather
+    than a bad path. So match whichever export is actually present, newest
+    first, and fall back to the original name purely so the downstream error
+    message still names a concrete path.
+    """
+    for candidate in sorted(_REPO_ROOT.glob("USTP CAPSTONE-*/USTP CAPSTONE"), reverse=True):
+        if candidate.is_dir():
+            return candidate
+    return _REPO_ROOT / "USTP CAPSTONE-20261009T021551Z-1-001" / "USTP CAPSTONE"
+
+
+USTP_DIR = _find_ustp_dir()
+
+# OPONG's 23 bulletins now live in the repo (moved out of the client export on
+# 2026-10-13, Fabio's decision, and committed on purpose): they are public
+# PAGASA documents, unlike the rest of that export, so the simulation set no
+# longer depends on a gitignored folder whose name varies per download. The
+# export stays the fallback for anyone who still has the PDFs only there.
+_LOCAL_TCB_DIR = Path(__file__).resolve().parent / "tcb_opong"
+TCB_DIR = _LOCAL_TCB_DIR if any(_LOCAL_TCB_DIR.glob("TCB#*_opong.pdf")) else USTP_DIR / "TCB"
+
+# Stays inside the gitignored export deliberately -- real PCIC farmer records
+# (PII). Only the bulletins above were moved into version control.
 USTP_CSV = USTP_DIR / "INSURANCE RECORDS" / "PCIC10 GPX 11-05-2025 WITH EXISTING IC AFFECTED BY TY.csv"
 BACKUP_FILE = Path(__file__).resolve().parent / "opong_test_original_dates.json"
 

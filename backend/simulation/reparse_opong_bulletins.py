@@ -22,19 +22,25 @@ what the PDF resolves to, and writes nothing.
          boundaries no bulletin covers any more (only those with no
          tbl_risk_assessment rows). Refuses to run while OPONG has
          assessment results or insurance-usage rows -- clear them first with
-         `python seed_opong_assessment_test.py --reset`.
+         `python simulation/seed_opong_assessment_test.py --reset`.
          This also removes the seeder's TEST-ONLY Signal 2 override for
-         Surigao del Norte; re-run `python seed_opong_assessment_test.py`
+         Surigao del Norte; re-run `python simulation/seed_opong_assessment_test.py`
          afterwards if the assessment demo still needs it.
 
 Run from backend/:
-    python reparse_opong_bulletins.py
-    python reparse_opong_bulletins.py --apply
+    python simulation/reparse_opong_bulletins.py
+    python simulation/reparse_opong_bulletins.py --apply
 """
 
 import argparse
 import collections
 import sys
+from pathlib import Path
+
+# See the same note in seed_opong_assessment_test.py: this file sits in
+# backend/simulation/ but imports `app` (and its sibling module below), so
+# backend/ must be on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.core.database import SessionLocal
 from app.models.models import (
@@ -101,7 +107,7 @@ def main() -> None:
             if usage or computed:
                 sys.exit(
                     f"{TYPHOON_NAME} has {computed} computed assessment(s) and {usage} insurance-usage row(s). "
-                    f"Run `python seed_opong_assessment_test.py --reset` first, then re-run with --apply."
+                    f"Run `python simulation/seed_opong_assessment_test.py --reset` first, then re-run with --apply."
                 )
 
         municipalities_by_province: dict[str, set[str]] = {}
@@ -173,7 +179,7 @@ def main() -> None:
         )
         print(
             "The seeder's TEST-ONLY Surigao del Norte Signal 2 override is gone -- re-run "
-            "`python seed_opong_assessment_test.py` if the assessment demo still needs it."
+            "`python simulation/seed_opong_assessment_test.py` if the assessment demo still needs it."
         )
         refresh_caches(db)
     finally:

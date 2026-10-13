@@ -18,6 +18,23 @@ Copy `.env.example` to `.env` in the `backend/` directory. **Do not commit `.env
 | `VITE_API_BASE_URL` | Backend base URL for frontend API calls. **No `/api` suffix** — every path in `frontend/src/lib/api.ts` already includes its own leading `/api/...`, so appending `/api` here causes a `/api/api/...` 404. | Default is `http://localhost:8000`. |
 | `VITE_GEOSERVER_URL` | GeoServer base URL for WMS/WFS spatial layer requests (farm boundary overlay, region boundaries). | Default is `http://localhost:8080/geoserver`. See `.claude/GEOSERVER_SETUP.md`. If unset or unreachable, the map falls back to the bundled static boundary file and skips the farm overlay. |
 
+## Activating Email Alerts (new-TCB notification)
+
+The alert in `email_alert_service.py` stays a silent no-op until **all three** of
+`SMTP_HOST`, `SMTP_USER`, `SMTP_PASSWORD` are set -- `SMTP_PORT` alone defaults to `587`.
+For a Gmail sender: `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=587`, `SMTP_USER=<the account>`,
+`SMTP_PASSWORD=<16-character App Password>` (an App Password requires 2-Step Verification on
+that account; a normal Google password is rejected). Outbound port 587 must not be blocked
+on the backend host.
+
+Recipients are every `tbl_system_users` row with `is_active = true` -- GIS Specialists **and**
+System Administrators -- so at least one of those rows needs a real, deliverable inbox.
+
+After editing `backend/.env`, restart the backend (env is read at process start, not hot-reloaded),
+then verify with `backend/simulate_new_bulletin_alert.py` (dry run by default; `--send` really
+delivers). The Monitoring dashboard's System Status panel also shows an "Email Alerts:
+Configured / Not configured" row, fed by `GET /api/system/status`.
+
 ## Key Security Rules
 1. Never put database passwords directly in the codebase. Always use environment variables.
 

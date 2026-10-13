@@ -168,7 +168,30 @@ async def upload_bulletin_pdf(file: UploadFile = File(...), db: Session = Depend
         # Clean up
         if os.path.exists(temp_path):
             os.remove(temp_path)
-            
+
+        # Same alert step /parse and the scheduled poll run -- a manually
+        # uploaded bulletin is still a new TCB arriving, so active users must
+        # be notified about it too (Fabio's decision, 2026-10-13; this route
+        # was the one ingestion path that saved a bulletin and told nobody).
+        # Deliberately NOT preceded by a PagasaStatusService sync, unlike
+        # /parse: this route exists precisely for when the PAGASA portal is
+        # unreachable, so a status fetch here would either fail or -- worse --
+        # succeed with an empty list and deactivate every typhoon right before
+        # the is_active gate is checked. Typhoon.is_active therefore reflects
+        # the last successful scheduled sync, which is the freshest available.
+        try:
+            send_new_bulletin_alerts(
+                [{
+                    "tcb_id": bulletin.tcb_id,
+                    "title": bulletin.title,
+                    "bulletin_count": bulletin.bulletin_count,
+                    "is_final": bulletin.is_final,
+                }],
+                db,
+            )
+        except Exception as alert_error:
+            print(f"Bulletin alert email step failed: {alert_error}")
+
         return {
             "status": "success",
             "message": "Manual bulletin successfully parsed and saved.",

@@ -4,6 +4,234 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-13] - `backend/simulation/`: Real-Data Simulations Gathered, Fictional Ones Deleted (Sprint 3)
+
+Fabio asked for one folder holding everything needed to simulate an actual
+typhoon, then: delete the obsolete simulations, "we need the real data", and
+move OPONG out of the client export but leave the USTP CAPSTONE files alone
+because they are sensitive. Decided with him: `backend/`, not the repo root --
+these scripts import the `app` package and the venv is `backend/.venv`, so they
+need `backend/` as the working directory (the existing `reset-demo-data.bat`
+already pushd's there for the same reason); root convenience comes from a thin
+launcher instead.
+
+### 1. New folder: `backend/simulation/`
+Moved in with `git mv` (history preserved): `seed_opong_assessment_test.py`,
+`reparse_opong_bulletins.py`, `backfill_tcb_track_radius.py`, and
+`simulate_new_bulletin_alert.py` (new earlier the same day, so plain `mv`).
+* Each moved file gained a `sys.path.insert(0, <backend/>)` bootstrap, per
+  Fabio's choice of run style: `python simulation/<name>.py` from `backend/`
+  puts only `backend/simulation/` on `sys.path`, so bare `from app...` and the
+  sibling `from seed_opong_assessment_test import ...` would both fail. The
+  documented commands therefore just gain a `simulation/` prefix.
+* Documented invocations inside all four docstrings were re-prefixed. Paths
+  passed as *arguments* (e.g. `backfill --dir "../docs"`) were deliberately
+  left alone -- they resolve against the working directory, which is still
+  `backend/`.
+
+### 2. File: `backend/simulation/tcb_opong/` (new, committed on purpose)
+OPONG's 23 real PAGASA bulletin PDFs (~12 MB), moved out of the gitignored
+`USTP CAPSTONE-*/USTP CAPSTONE/TCB/`. Fabio's explicit decision not to ignore
+them: they are public PAGASA documents and the simulation set should not depend
+on a gitignored folder whose name changes per download.
+* The export's `TC Opong (Bagui)_track per TCB.csv` and `TY TINO TCB MINDA.xlsx`
+  stayed -- nothing reads them.
+* **The PCIC insurance-records CSV stayed in the gitignored export** -- real
+  farmer PII, per Fabio. `USTP_CSV` still reads it in place; only bulletins
+  moved into version control, and the constant now carries a comment saying so.
+
+### 3. File: `backend/simulation/seed_opong_assessment_test.py`
+* New **`_find_ustp_dir()`** replaces the hardcoded export folder name.
+  `USTP_DIR` was pinned to `USTP CAPSTONE-20261009T021551Z-1-001`, but that
+  name carries the Google Drive download timestamp and was **already stale on
+  Fabio's laptop** (`...-20261008T140025Z-...`) -- and a stale name fails
+  *quietly*: the TCB glob simply finds no PDFs and the script reports "no
+  bulletins" rather than a bad path. Now globs `USTP CAPSTONE-*/USTP CAPSTONE`,
+  newest first, falling back to the original literal only so the downstream
+  error message still names a concrete path. Pre-existing bug, surfaced by the
+  move; verified against the real filesystem (23 PDFs found).
+* `_REPO_ROOT` is `parent.parent.parent`, not `parent.parent` -- the file is one
+  level deeper now. The same quiet-failure mode applied here.
+* **`TCB_DIR`** prefers the committed `simulation/tcb_opong/` and falls back to
+  the export's `TCB/` for anyone who still has the PDFs only there.
+
+### 4. Deleted (Fabio's call -- obsolete now that the real exports are the test material)
+* `backend/mock_data/seed_mock_typhoon.py` (fictional "MARISOL", 2 invented
+  bulletins) and `seed_mock_typhoon_albritch.py` (fictional "ALBRITCH", 10
+  invented bulletins that bypassed the parser entirely -- "no PDFs involved").
+* `backend/mock_data/mock_farmers_talakag_claveria.csv`,
+  `mock_farmers_albritch_bukidnon.csv` and the 12 `gpx/MOCK_*.gpx` files
+  (fictional farms 900001-900012). No test or script read them -- checked.
+* `backend/cleanup_typhoon_names.py` (one-off fix for a name-parsing bug fixed
+  long ago) and `backend/seed_100k_farms.py` (synthetic scale-test seeder).
+  I recommended keeping the latter as a performance tool; Fabio chose to
+  remove it, so it is in the delete list.
+* All recoverable from git history. Rows these scripts already created in a
+  live database are untouched -- removing those is a separate psql job.
+
+### 5. File: `backend/seed_all.py`
+* `STEPS` drops `("mock_data.seed_mock_typhoon", "run_seed")` and
+  `("seed_100k_farms", "run")`, leaving 5 steps. The docstring's numbered list
+  was renumbered and now points at `simulation/README.md` for typhoon data
+  instead of carrying a mock-typhoon step.
+
+### 6. File: `backend/simulation/README.md` (new)
+The folder's entry point: what each script does, the three recipes (load OPONG
+end to end -> compute exposure/assessments in the app; simulate a new TCB
+arriving -> email alert; re-parse/backfill an already-loaded typhoon), and an
+explicit "what is deliberately not here" section on the PII CSV. Also records
+*why* the alert needs a script rather than waiting for the real path.
+
+### 7. File: `simulate.bat` (new, repo root)
+Thin launcher mirroring `reset-demo-data.bat`: `pushd backend`, then runs
+`simulation\<script>` with `backend\.venv\Scripts\python.exe`. Subcommands
+`opong` / `alert` / `reparse` / `track`, usage text when called bare, up to 9
+arguments forwarded (`shift` makes `%*` unusable, hence `%1..%9`).
+
+### 8. Files: `.claude/BACKEND_DATABASE_WORKFLOW.md`, `backend/app/api/farms.py`
+* The workflow doc's `python mock_data/seed_mock_typhoon.py` bullet now points
+  at `backend/simulation/README.md` and notes the deletion.
+* `search_farmers()`'s docstring no longer cites `seed_100k_farms.py` as the
+  reason `tbl_farmers_profile` scales with farm count; the reason itself is
+  unchanged.
+
+### Status / Next Steps
+* **The deletions in section 4 have not happened yet** -- `git rm` was refused
+  by the permission layer, so the files are still on disk and tracked while
+  sections 5 and 8 already describe them as gone. Fabio runs the removal
+  himself; until then `seed_all.py` is correct (it no longer calls them) but
+  the dead files linger.
+* Nothing in this entry has been executed against a database or the venv. The
+  `_find_ustp_dir()` glob and the new `TCB_DIR` were verified against the real
+  filesystem only (23 PDFs resolved), not by running the scripts.
+* `git mv` preserved history for the three tracked scripts; `tcb_opong/`,
+  `README.md`, `simulate.bat`, `simulate_new_bulletin_alert.py` and
+  `tests/test_email_alert_service.py` are new and still untracked.
+
+---
+
+## [2026-10-13] - Activate the New-TCB Email Alert: Upload Route Wired, One Simulation Entry Point, First Tests (Sprint 3)
+
+Fabio asked how the system informs a GIS Specialist that a new TCB has arrived,
+and for the email side to be activated so it can be tested.
+
+Two channels already existed. The in-app one is live and needed nothing: the
+15-minute scheduler parses new bulletins, `App.tsx` polls `GET /api/bulletins`
+every 60s and raises a toast + notification-bell entry ("New TCB Parsed", plus
+"Final TCB -- Ready for Assessment" for an `is_final` bulletin). The email one
+(`send_new_bulletin_alerts`, 2026-08-16) had **never run once** -- it is a no-op
+until `SMTP_HOST`/`SMTP_USER`/`SMTP_PASSWORD` are set in `backend/.env`.
+
+Tracing it surfaced that the real arrival path cannot email off-season at all:
+`/parse` raises 404 before reaching the alert step when PAGASA has nothing
+posted, and the scheduler's `sync_active_typhoons([])` sets `is_active = False`
+on every typhoon *before* the alert step -- so hand-setting `is_active = true`
+in psql and waiting for the poll is wiped in the same tick. Hence the
+simulation entry point below rather than a psql-and-wait procedure.
+
+### 1. File: `backend/app/api/bulletins.py`
+* **`upload_bulletin_pdf()`** (`POST /api/bulletins/upload`) now calls
+  `send_new_bulletin_alerts()` with the just-saved bulletin, in the same
+  `[{"tcb_id", "title", "bulletin_count", "is_final"}]` shape
+  `scrape_and_save_all()` returns. Per Fabio's explicit go-ahead -- this was
+  the one ingestion path that saved a bulletin and notified nobody, while
+  `/parse` (line 138) and the scheduler (`core/scheduler.py:72`) both alerted.
+* Deliberately **not** preceded by a `PagasaStatusService` sync, unlike
+  `/parse`: this route exists for when the PAGASA portal is unreachable, so a
+  status fetch here would either fail or -- worse -- succeed with an empty list
+  and deactivate every typhoon immediately before the `is_active` gate is
+  checked. `Typhoon.is_active` therefore reflects the last successful
+  scheduled sync.
+* Wrapped in its own `try`/`except` so a mail failure can't be reported as the
+  route's "Failed to parse PDF" 500, matching `/parse`'s treatment.
+
+### 2. File: `backend/simulate_new_bulletin_alert.py` (new)
+Single entry point for activating/exercising every call site, per Fabio's
+"make a single file to activate them all". Dry run by default -- it swaps the
+service module's own `smtplib` reference (not the global module) for
+`_RecordingSMTP` and prints the composed subject, real recipient list and body,
+so the config read, `is_active` gate, recipient query and message body all run
+for real and only the socket is faked. `--send` performs real delivery.
+* **`_preflight(db)`**: SMTP configured or which keys are missing; every
+  `is_active` user with role; the newest bulletin and its typhoon's
+  `is_active`; and an `inspect.getsource()` check that each of the three
+  ingestion paths still contains the alert call (so a removed call site shows
+  as `MISSING` rather than a stale hardcoded claim).
+* **`_mode_service()`** (default): the exact call `scheduler.py:72` makes, built
+  from a bulletin already in the database (`--tcb-id`, default newest). Writes
+  no rows and touches no network.
+* **`_mode_upload()`**: drives the real `upload_bulletin_pdf()` route function
+  with `--pdf`, proving the wiring in file 1. **Inserts a real bulletin row**.
+* **`_mode_parse()`** / **`_mode_scheduler()`**: the real `/parse` route
+  function and one real `run_scheduled_scrape()` tick. Both insert rows and
+  re-sync `is_active`; `parse` exits with a plain explanation when PAGASA
+  returns its 404.
+* **`_temporarily_active()`**: holds the typhoon active for the alert call and
+  restores the original value in a `finally` (Fabio approved the temporary
+  flip on condition of auto-revert) -- an interrupted run can't leave a storm
+  falsely active and skew the Monitoring status panel.
+* **`_dry_run_smtp()`**, **`--preview-without-smtp`**: injects a placeholder
+  SMTP config so the body can still be previewed on a machine with no
+  credentials; refused together with `--send`.
+* `--confirm-db-write` is required by `upload`/`parse`/`scheduler`, the three
+  modes that insert real bulletin rows.
+* The call-site check's import is guarded: `app.api.bulletins` pulls in
+  `app.core.security`, which raises at import time without `JWT_SECRET_KEY`.
+  That is unrelated to email alerts, so the preflight reports it in one line
+  and carries on instead of dying with a confusing traceback.
+
+### 3. File: `backend/tests/test_email_alert_service.py` (new)
+First tests for this service (it had none). Same convention as
+`test_parser_settings_api.py` -- functions called directly, no `TestClient`,
+`smtplib` patched so no socket opens. `_FakeSession`/`_FakeQuery` route
+`query(TropicalCycloneBulletin)` and `query(SystemUser)` to separate row sets,
+honouring `filter(tcb_id == ...)` so the multi-bulletin cases are real.
+* No-op paths: empty `created`; unconfigured SMTP; **partial** config (host
+  only); inactive typhoon; a `tcb_id` that no longer resolves; no active users.
+* Send paths: `SMTP(host, port, timeout=10)` + `starttls` + `login`; envelope
+  recipients are every active user; recipients stay out of the `To:` header
+  (BCC-style); `SMTP_PORT` defaults to 587; subject pluralizes and the body
+  lists each bulletin; a mixed batch lists only the active typhoon's; an
+  `OSError` from `SMTP()` never propagates.
+* `RecipientTests`: the `SystemUser` query carries exactly one criterion and it
+  mentions `is_active`.
+* `SmtpConfiguredTests`: `smtp_configured()` both ways (the Monitoring
+  "Email Alerts" row reads it).
+* `UploadRouteWiringTests`: the upload route calls the alert with the
+  just-saved bulletin, with no real PDF or database. Its `setUpClass` imports
+  `app.api.bulletins` under a throwaway `JWT_SECRET_KEY` -- Fabio's first run
+  failed here (`RuntimeError: JWT_SECRET_KEY is not set`) because the dev
+  laptop has no `backend/.env`; the test never signs a token, so requiring a
+  configured secret was wrong. The other 15 tests passed on that first run.
+
+### 4. File: `.claude/ENV_GUIDE.md`
+* New "Activating Email Alerts (new-TCB notification)" section: all three SMTP
+  keys are required; the Gmail App Password specifics (2-Step Verification
+  needed, a normal password is rejected); recipients are every active user,
+  Specialists and Administrators alike; restart the backend after editing
+  `.env`; verify with `simulate_new_bulletin_alert.py`.
+
+### Status / Next Steps
+* **Nothing here has been run** -- no `pytest`, no live database, no SMTP. Per
+  project rules the venv/DB/test commands are Fabio's to run. Needed, in order:
+  1. SMTP keys in `backend/.env` on the server machine, then a backend restart.
+  2. `python -m pytest tests/test_email_alert_service.py` from `backend/`.
+  3. `python simulate_new_bulletin_alert.py` (dry run), then `--send`.
+* Email recipients stay **every active user**, not role-filtered to GIS
+  Specialists -- Fabio's explicit choice, so Administrators keep email
+  visibility of new TCBs.
+* Still absent by design: no web push. `frontend/public/sw.js` has no `push`
+  handler, so a specialist with the PWA closed learns of a new TCB only by
+  email, never in-app until they reopen it. The bell list is also in-memory
+  React state (cleared on refresh) and `seenMaxTcbId` rebaselines per login, so
+  a TCB parsed while nobody was logged in is never announced in-app at all.
+  Flagged, not changed.
+* `frontend/src/app/components/SettingsModule.tsx` has an "Email Notifications"
+  switch that controls nothing -- the component is not mounted anywhere
+  (`App.tsx` uses `AccountSettingsModule`). Dead code; left alone.
+
+---
+
 ## [2026-10-12] - Farm ID Shows PCIC's FARMID Everywhere; Farmer Names Left-Aligned (Sprint 3)
 
 Per Fabio: every on-screen Farm ID now follows the PABS-given FARMID

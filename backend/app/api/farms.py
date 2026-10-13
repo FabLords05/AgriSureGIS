@@ -608,9 +608,10 @@ def search_farmers(
     Farmer name search backing the Farm Records search box's farmer field
     (2026-08-18). Debounced, server-side, and capped at 20 results --
     unlike tbl_admin_boundaries (list_farm_municipalities above),
-    tbl_farmers_profile scales with the farm count (seed_100k_farms.py
-    adds one new synthetic farmer per new farm), so it can't be preloaded
-    whole for a client-side type-ahead the same way municipalities are.
+    tbl_farmers_profile scales with the farm count (one farmer row per farm),
+    so it can't be preloaded whole for a client-side type-ahead the same way
+    municipalities are. (The scale-test seeder this originally cited,
+    seed_100k_farms.py, was deleted on 2026-10-13.)
 
     Matches against `first_name || ' ' || last_name` as one concatenated
     string (a single ILIKE '%q%') rather than checking first_name/last_name

@@ -21,9 +21,12 @@ create:
   2. seed_database                -- real PABS CSV farmers/insurance + PSGC admin boundaries
   3. seed_system_users             -- login accounts (nothing logs in without this)
   4. backfill_admin_boundary_geom  -- municipality polygons for GeoServer/map
-  5. mock_data.seed_mock_typhoon   -- mock typhoon + bulletins, for exposure/assessment testing
-  6. seed_active_insurance         -- synthetic active-insurance boost (1,000 records)
-  7. seed_100k_farms               -- synthetic 100k-farm scale-test seed
+  5. seed_active_insurance         -- synthetic active-insurance boost (1,000 records)
+
+Typhoon data is no longer part of this sequence. The two fictional-storm
+seeders (MARISOL, ALBRITCH) and seed_100k_farms were deleted on 2026-10-13 --
+Fabio's call, now that the real PAGASA/PCIC exports are the test material.
+To load a typhoon, see simulation/README.md (OPONG's 23 real bulletins).
 
 Each step is independently wrapped: a failure partway through prints which
 step failed and stops immediately (every later step assumes the ones before
@@ -37,9 +40,7 @@ STEPS = [
     ("seed_database", "run_setup"),
     ("seed_system_users", "run"),
     ("backfill_admin_boundary_geom", "run_backfill"),
-    ("mock_data.seed_mock_typhoon", "run_seed"),
     ("seed_active_insurance", "run"),
-    ("seed_100k_farms", "run"),
 ]
 
 

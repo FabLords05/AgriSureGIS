@@ -13,15 +13,20 @@ nothing. When a PDF yields no wind radius, the lines mentioning "extend"
 are printed so the parser's wording can be checked against the real text.
 
 Run from backend/:
-    python backfill_tcb_track_radius.py
-    python backfill_tcb_track_radius.py --apply
-    python backfill_tcb_track_radius.py --typhoon KIYAPO --dir "../docs"
+    python simulation/backfill_tcb_track_radius.py
+    python simulation/backfill_tcb_track_radius.py --apply
+    python simulation/backfill_tcb_track_radius.py --typhoon KIYAPO --dir "../docs"
 """
 
 import argparse
 import re
 import sys
 from pathlib import Path
+
+# See the same note in seed_opong_assessment_test.py: this file sits in
+# backend/simulation/ but imports `app` (and its sibling module below), so
+# backend/ must be on sys.path.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from app.core.database import SessionLocal
 from app.models.models import TropicalCycloneBulletin, Typhoon

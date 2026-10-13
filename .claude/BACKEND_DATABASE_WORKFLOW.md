@@ -154,9 +154,11 @@ Execution rule):
    - `python backfill_admin_boundary_geom.py` — backfills `boundary_geom` on
      `tbl_admin_boundaries`, needed for the GeoServer/WFS boundary layer in
      Spatial Analysis (see `.claude/GEOSERVER_SETUP.md`).
-   - `python mock_data/seed_mock_typhoon.py` — mock Talakag/Claveria farmers
-     plus a mock typhoon, for exercising exposure/assessment without waiting
-     on a real PAGASA bulletin.
+   - For typhoon data, see [`backend/simulation/README.md`](../backend/simulation/README.md)
+     — it replays Typhoon OPONG's 23 real PAGASA bulletins through the app's
+     own parser. The old fictional-storm seeders (`mock_data/seed_mock_typhoon.py`
+     — MARISOL, and its ALBRITCH sibling) were deleted on 2026-10-13 now that
+     the real exports are available; recover them from git history if ever needed.
 
 If the database/user don't exist at all yet (fresh machine), see the
 Quickstart in the repo root [README.md](../README.md) instead.
