@@ -4,6 +4,19 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-13] - Header Menus No Longer Hidden Under the Map Overlays (Sprint 3)
+
+Per Cristian. On Spatial Analysis & Data Import, the open profile (and
+notifications) menu drew under the map's overlay toggles.
+
+### 1. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* The map's outer wrapper gets Tailwind `isolate`, so Leaflet's `z-[1000]`
+  overlays stack only inside the map and the header's `z-50` menus open over
+  them. Raising the header's z-index was avoided: it would put the header
+  above the `z-50` modal backdrops used across the app.
+
+---
+
 ## [2026-10-13] - Farm Details Overlap Fix, Province/Barangay Columns, Login Text (Sprint 3)
 
 Per Cristian. No schema change; the PABS CSV export is unchanged.
