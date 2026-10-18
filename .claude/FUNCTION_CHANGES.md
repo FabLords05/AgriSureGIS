@@ -4,6 +4,49 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-18] - Docs: SAR Phase 1 vs Phase 2 Explainer for the Documenter
+
+Per Fabio: a standalone document for Albritch (Documenter & System Analyst) so
+the SAR feature can be written about correctly without reading the backend.
+Documentation only — no code, schema or API surface touched.
+
+### 1. File: `docs/SAR_PHASE1_VS_PHASE2.md` (new)
+* Explicitly **non-normative**: it names `docs/SAR_ISPLANTED_METHOD.md` as the
+  spec that wins on any disagreement, so the two cannot drift into rival
+  sources of truth.
+* **Phase 1 vs Phase 2 comparison table** plus a plain-language walkthrough of
+  each: Phase 1's 24-day `VV − VH` composite read by eye (`POST /api/sar/layer`,
+  manual verdict in `tbl_planted_verification`), and Phase 2's 150-day VH /
+  VV-VH-ratio time series scored by the five conditions (`POST /api/sar/check`,
+  `tbl_sar_observation` / `tbl_sar_fetch_coverage` / `tbl_sar_planted_check`).
+* **Why Phase 2 superseded Phase 1**, stated as four defects rather than
+  preferences: a 24-day median cannot express a temporal signature; one orbit
+  for all farms left farms silently uncoloured; Earth Engine cost; and operator
+  load. Records that Phase 1 survives as an optional overlay and that
+  `/api/sar/verifications` is retired-but-readable (no frontend caller).
+* **§5 "Why not NDVI"** — written because NDVI appears in
+  `ui-prototype/.../AOISARPanel.tsx` as mock data and is easy to mistake for a
+  built feature. Notes the category error (NDVI is Sentinel-2 optical, not SAR),
+  the cloud-cover problem in the pre-event window, and that NDVI cannot express
+  C1/C3/C4 because standing water and bare soil both read low. The one
+  legitimate future use (corroborating a yellow farm) is named as unplanned.
+* **§6 "Known gaps — do not document these as finished"**: the §3.2 percentage
+  (what FR 3.4 literally asks for) is unimplemented; `RISE_VH_DB` /
+  `DROP_RATIO_DB` are still uncalibrated literature values against §6's
+  prohibition; the §7 sparkline is missing; Sentinel-1 revisit is unverified;
+  `tbl_planted_verification` is absent from the ERD.
+* **§7 verification pointers** to the method doc, `API_CONTRACT.md` §4c, the
+  classifier, the Earth Engine service, the routes and the panel, plus the two
+  source papers — so claims can be checked rather than taken on trust.
+* **§8** points at `CLAUDE.md` / `TEAM.md` for the same session's team-role
+  change instead of restating it.
+
+### Status / Next Steps
+* Nothing to test. Accurate as of commit `20c3d5e`.
+* `docs/README.md` left alone — it describes categories, not a file index.
+
+---
+
 ## [2026-10-18] - Team Roles: Two Core Developers, Design and Documentation Split Out
 
 Per Fabio: the team docs described a five-person split that no longer matches
