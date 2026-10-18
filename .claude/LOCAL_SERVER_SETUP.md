@@ -120,7 +120,18 @@ existing rows come back as skipped.
   polygons come from the backend's farm list, so they follow the same filter above.
 - **`crop_stage_no` NULL on ~312 rows** of the PCIC10 export
   (`Panicle Initiation/Booting`, `Harvested`, `Vegetative/Tillering`) — by design,
-  pending PCIC's days-per-stage table. See `HANDOFF_2026-10-09_CSV_CROP_STAGE.md` §4.
+  pending PCIC's days-per-stage table. Those rows ingest fine and simply never pay
+  out. Table 11 Note 1 excludes Panicle Initiation from wind damage while Booting
+  *is* eligible, and no PCIC document gives a days-after-transplanting threshold to
+  split the two, so the label is deliberately left unmapped in
+  `tbl_crop_stage_mapping` (the row's `notes` column says so). Do **not** hard-code
+  a day threshold without PCIC confirming it — day 66 was floated and explicitly
+  rejected as a guess. Enabling it later is one statement:
+  ```sql
+  UPDATE tbl_crop_stage_mapping
+     SET crop_stage_no = 1, stage_group = 'Reproductive'
+   WHERE source_label = 'panicle initiation/booting';
+  ```
 
 ## 9. Public deployment (Tailscale Funnel)
 

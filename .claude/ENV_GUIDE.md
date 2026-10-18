@@ -9,7 +9,7 @@ Copy `.env.example` to `.env` in the `backend/` directory. **Do not commit `.env
 | `DATABASE_URL` | PostGIS database connection string. | Provided by Fabio (DB Admin). |
 | `JWT_SECRET_KEY` | **Required** -- signs/verifies login session tokens (`backend/app/core/security.py`). No insecure hardcoded fallback like `DATABASE_URL` has; the backend refuses to start without it. | Generate your own: `python -c "import secrets; print(secrets.token_urlsafe(48))"`. Never share/commit the value. |
 | `REDIS_URL` | Optional -- `GET /api/farms/`'s page cache (`backend/app/core/farms_cache.py`). Unset/empty means caching is a no-op; nothing else changes. | A locally running Redis server, e.g. `redis://localhost:6379/0`. |
-| `PAGASA_SCRAPE_URL` | PAGASA Tropical Cyclone Bulletin webpage URL. | PAGASA official website. |
+| `PAGASA_SCRAPE_URL` | **Dead variable — nothing reads it.** Still present in `.env.example` for historical reasons. The bulletin index URL is hardcoded as `PAGASA_INDEX_URL` in `backend/app/services/bulletin_parser.py`; setting this has no effect. Either wire it up or drop it from `.env.example`. | n/a |
 | `SMTP_HOST` | SMTP server address for email alerts (`backend/app/services/email_alert_service.py`). Optional -- unset (along with `SMTP_USER`/`SMTP_PASSWORD`) means alerts are a no-op, same convention as `REDIS_URL` above. | Internal mail server / SMTP provider. |
 | `SMTP_PORT` | SMTP server port. Defaults to `587` (STARTTLS) if unset. | Mail administrator. |
 | `SMTP_USER` | SMTP server login username -- also used as the From/To address on outgoing alert emails unless `SMTP_FROM` is set. | Mail administrator. |

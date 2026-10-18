@@ -3,7 +3,10 @@
 You are the Lead Software Engineer and Architect for AgriSureGIS.
 
 I am Fabio.
-I am a Database Admin.
+I am a Core Developer on this system — Database Administrator and Backend.
+Cristian Aton is the other core developer (backend logic and frontend). We are
+the only two who write code here, and we own the system equally — no part of
+it is mine rather than his. See [.claude/TEAM.md](.claude/TEAM.md).
 
 Before doing anything:
 1. Read this file (`CLAUDE.md`).
@@ -34,12 +37,45 @@ If documentation conflicts:
 
 ## Developer Profile
 * **Name:** Fabio
-* **Role:** Database Admin
+* **Role:** Core Developer — Database Administrator & Backend
 * **Project Study:** AgriSureGIS (Parametric insurance assessment platform)
 
+## Team at a Glance
+Full roster and ownership rules: [.claude/TEAM.md](.claude/TEAM.md) and
+[.claude/TEAM_RESPONSIBILITIES.md](.claude/TEAM_RESPONSIBILITIES.md).
+* **Core developers — equal owners of the whole system.** The areas below are
+  focus areas, not boundaries; either works anywhere in the codebase.
+  * **Fabio** — database (Postgres + PostGIS), schema, migrations, ingestion,
+    and the backend over it.
+  * **Cristian** — backend logic (FastAPI, scraping, assessment/exposure/SAR/
+    payout) and frontend implementation.
+* **Supporting roles (they do not implement the system):**
+  * **James** — frontend design; `ui-prototype/` is his, and it is the design
+    source of truth the Scope Guard below refers to.
+  * **Albritch** — documenter of the system, and system analyst for payout/
+    export requirements and use cases.
+
 ## Current Status
-* **Current Sprint:** Sprint 3 - Spatial Processing & Data Ingestion (Current)
-* **Current Task:** Build the GPX boundary parser, GeoJSON mapping, geoprocessing of storm trajectories, and exposure calculations.
+*Reconciled against the code on 2026-10-18.*
+
+* **Sprint pointer:** unknown — do not assert one. The original Sprints 1-4 in
+  [.claude/DEVELOPMENT_PLAN.md](.claude/DEVELOPMENT_PLAN.md) are substantially
+  complete, changelog entries are still tagged "Sprint 3", and a large body of
+  shipped work (auth, user management, activity log, SAR/Earth Engine, email
+  alerts, PWA) belongs to no sprint at all. Ask Fabio before claiming a
+  current sprint anywhere.
+* **What is built:** ingestion (CSV / GPX / GeoPackage), PAGASA scraping and
+  bulletin parsing, exposure calculation, the parametric payout engine
+  (`I = (AC / 1000) * IF`), both CSV export shapes, per-typhoon insurance usage
+  locking, authentication and roles, the Activity Log, and SAR planted
+  verification. See `DEVELOPMENT_PLAN.md` for per-task status and
+  [.claude/FUNCTION_CHANGES.md](.claude/FUNCTION_CHANGES.md) (kept current) for
+  the detail.
+* **Known gaps:** no database backup/restore endpoint (UI only); end-to-end
+  manual validation against real PCIC figures still outstanding;
+  `panicle initiation/booting` deliberately unmapped pending PCIC's
+  days-per-stage table; not yet deployed on PCIC hardware.
+* **Current task:** ask Fabio — this line is not a reliable source.
 
 ## Core Development Rules
 * Follow project documentation strictly.
