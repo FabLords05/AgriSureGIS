@@ -3,9 +3,10 @@ Archive & Clear (2026-10-22).
 
 PCIC re-exports CSV/GPKG from PABS for every typhoon, so the live DB's
 uploaded records only matter until that typhoon's assessment is done. Once
-EVERY typhoon the live data was assessed/checked against is at least
-CLEAR_AFTER_DAYS past its last bulletin, a user (Admin or GIS Specialist) may
-clear it. Before anything is deleted, every uploaded record and polygon is
+the live data has been assessed/checked against at least one typhoon, a user
+(Admin or GIS Specialist) may clear it by re-entering their own password
+(checked in app/api/archives.py) -- there is no waiting period after the last
+bulletin (removed 2026-10-22). Before anything is deleted, every uploaded record and polygon is
 copied into the separate, read-only archive database (backend/archive_schema.sql),
 and a full pg_dump goes to BACKUP_DIR + Google Drive.
 
@@ -33,7 +34,6 @@ insert, so polygons copy byte-for-byte without a shapely round trip.
 import json
 import logging
 import threading
-from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import column, table, text
 from sqlalchemy.orm import Session
@@ -46,8 +46,6 @@ from app.services.backup_service import run_backup
 
 logger = logging.getLogger("agrisuregis.archive")
 
-CLEAR_AFTER_DAYS = 7
-CONFIRM_WORD = "CLEAR"
 _COPY_CHUNK = 1000
 
 # Only one Archive & Clear at a time -- a second click while the first is
@@ -177,40 +175,28 @@ def _live_typhoons(db: Session) -> list[dict]:
             "name": r.name,
             "year": r.year,
             "last_bulletin_at": r.last_bulletin_at,
-            "clear_after": r.last_bulletin_at + timedelta(days=CLEAR_AFTER_DAYS) if r.last_bulletin_at else None,
         }
         for r in rows
     ]
 
 
-def eligibility(db: Session, now: datetime | None = None) -> dict:
-    """Whether Archive & Clear may run now, and if not, why and from when.
-    Requires live data AND at least one typhoon assessed against it (the
-    feature exists to close out a typhoon -- fresh, never-assessed uploads
-    are not clearable). A typhoon with no bulletins on record imposes no
-    waiting period."""
-    now = now or datetime.now(timezone.utc)
+def eligibility(db: Session) -> dict:
+    """Whether Archive & Clear may run now, and if not, why. Requires live
+    data AND at least one typhoon assessed against it (the feature exists to
+    close out a typhoon -- fresh, never-assessed uploads are not clearable)."""
     counts = _live_counts(db)
     typhoons = _live_typhoons(db)
-
-    clear_afters = [t["clear_after"] for t in typhoons if t["clear_after"] is not None]
-    eligible_at = max(clear_afters) if clear_afters else None
 
     if counts["farms"] == 0 and counts["farmers"] == 0 and counts["policies"] == 0:
         eligible, reason = False, "There are no uploaded records to archive."
     elif not typhoons:
         eligible, reason = False, "No typhoon has been assessed against the current records yet."
-    elif eligible_at is not None and now < eligible_at:
-        eligible = False
-        reason = f"Allowed {CLEAR_AFTER_DAYS} days after the last bulletin of every assessed typhoon."
     else:
         eligible, reason = True, None
 
     return {
         "eligible": eligible,
         "reason": reason,
-        "eligible_at": eligible_at,
-        "clear_after_days": CLEAR_AFTER_DAYS,
         "counts": counts,
         "typhoons": typhoons,
         "label": _label(typhoons),
@@ -266,8 +252,7 @@ def _archive_and_clear(db: Session, user: SystemUser) -> dict:
     typhoon_ids = [t["typhoon_id"] for t in state["typhoons"]]
     params = {"typhoon_ids": typhoon_ids}
     typhoons_json = [
-        {**t, "last_bulletin_at": t["last_bulletin_at"].isoformat() if t["last_bulletin_at"] else None,
-         "clear_after": t["clear_after"].isoformat() if t["clear_after"] else None}
+        {**t, "last_bulletin_at": t["last_bulletin_at"].isoformat() if t["last_bulletin_at"] else None}
         for t in state["typhoons"]
     ]
     archived_by = f"{user.firstname} {user.lastname}".strip()

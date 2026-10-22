@@ -1092,19 +1092,15 @@ export interface ArchiveTyphoon {
   name: string;
   year: number;
   last_bulletin_at: string | null;
-  clear_after: string | null;
 }
 
 export interface ArchiveEligibility {
   eligible: boolean;
   reason: string | null;
-  eligible_at: string | null;
-  clear_after_days: number;
   counts: { farmers: number; farms: number; policies: number; assessments: number };
   typhoons: ArchiveTyphoon[];
   label: string;
   archive_configured: boolean;
-  confirm_word: string;
 }
 
 export interface ArchiveResult {
@@ -1238,11 +1234,11 @@ export function getArchiveEligibility(): Promise<{ status: string; data: Archive
   return request<{ status: string; data: ArchiveEligibility }>('/api/archives/eligibility');
 }
 
-export function archiveAndClear(confirm: string): Promise<{ status: string; data: ArchiveResult }> {
+export function archiveAndClear(password: string): Promise<{ status: string; data: ArchiveResult }> {
   return request<{ status: string; data: ArchiveResult }>('/api/archives', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ confirm }),
+    body: JSON.stringify({ password }),
   });
 }
 

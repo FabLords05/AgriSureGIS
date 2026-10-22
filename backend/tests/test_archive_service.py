@@ -1,7 +1,7 @@
 """
 Archive & Clear (2026-10-22). The guarantees under test: nothing is cleared
-before CLEAR_AFTER_DAYS past every assessed typhoon's last bulletin, and a
-failed archive copy never deletes anything from the live DB. Same convention
+without the user's own password or before the live data was assessed against
+a typhoon, and a failed archive copy never deletes anything from the live DB. Same convention
 as the rest of this suite: stand-in sessions, no live database.
 """
 import os
@@ -9,6 +9,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
+import bcrypt
 from fastapi import HTTPException
 
 from app.models.models import SystemUser
@@ -23,9 +24,8 @@ COUNTS = {"farmers": 10, "farms": 12, "policies": 12, "assessments": 8}
 
 
 def _typhoon(days_since_last_bulletin, typhoon_id=1, name="OPONG"):
-    last = NOW - timedelta(days=days_since_last_bulletin)
-    return {"typhoon_id": typhoon_id, "name": name, "year": 2025, "last_bulletin_at": last,
-            "clear_after": last + timedelta(days=archive_service.CLEAR_AFTER_DAYS)}
+    return {"typhoon_id": typhoon_id, "name": name, "year": 2025,
+            "last_bulletin_at": NOW - timedelta(days=days_since_last_bulletin)}
 
 
 def _eligibility(counts, typhoons):
@@ -33,12 +33,16 @@ def _eligibility(counts, typhoons):
         patch.object(archive_service, "_live_counts", return_value=counts),
         patch.object(archive_service, "_live_typhoons", return_value=typhoons),
     ):
-        return archive_service.eligibility(MagicMock(), now=NOW)
+        return archive_service.eligibility(MagicMock())
+
+
+_PASSWORD = "correct horse"
+_PASSWORD_HASH = bcrypt.hashpw(_PASSWORD.encode("utf-8"), bcrypt.gensalt(rounds=4)).decode("utf-8")
 
 
 def _user():
     return SystemUser(user_id=4, firstname="Ana", lastname="Cruz", role="GIS Specialist", email="a@x.ph",
-                      password_hash="")
+                      password_hash=_PASSWORD_HASH)
 
 
 class EligibilityTests(unittest.TestCase):
@@ -51,20 +55,16 @@ class EligibilityTests(unittest.TestCase):
         self.assertFalse(state["eligible"])
         self.assertIn("No typhoon", state["reason"])
 
-    def test_six_days_after_last_bulletin_is_too_early(self):
-        state = _eligibility(COUNTS, [_typhoon(6)])
-        self.assertFalse(state["eligible"])
-        self.assertEqual(state["eligible_at"], NOW + timedelta(days=1))
-
-    def test_seven_days_after_last_bulletin_is_clearable(self):
-        state = _eligibility(COUNTS, [_typhoon(7)])
+    def test_assessed_typhoon_is_clearable_right_after_its_last_bulletin(self):
+        # No waiting period (removed 2026-10-22) -- the password is the guard.
+        state = _eligibility(COUNTS, [_typhoon(0)])
         self.assertTrue(state["eligible"])
+        self.assertIsNone(state["reason"])
         self.assertEqual(state["label"], "OPONG 2025")
 
-    def test_latest_typhoon_sets_the_wait(self):
+    def test_label_names_every_assessed_typhoon(self):
         state = _eligibility(COUNTS, [_typhoon(20, 1, "OPONG"), _typhoon(3, 2, "RAMIL")])
-        self.assertFalse(state["eligible"])
-        self.assertEqual(state["eligible_at"], NOW + timedelta(days=4))
+        self.assertTrue(state["eligible"])
         self.assertEqual(state["label"], "OPONG 2025, RAMIL 2025")
 
 
@@ -170,13 +170,23 @@ class ArchivedTyphoonRowsTests(unittest.TestCase):
 
 
 class ArchiveRouteTests(unittest.TestCase):
-    def test_wrong_confirmation_word_is_rejected_before_anything_runs(self):
-        with patch.object(archives_api.archive_service, "archive_and_clear") as run:
-            with self.assertRaises(HTTPException) as ctx:
-                archives_api.archive_and_clear(archives_api.ArchiveRequest(confirm="clear it"),
-                                               db=MagicMock(), user=_user())
-        self.assertEqual(ctx.exception.status_code, 400)
-        run.assert_not_called()
+    def test_wrong_password_is_rejected_before_anything_runs(self):
+        for wrong in ("", "CLEAR", "correct horse "):
+            with patch.object(archives_api.archive_service, "archive_and_clear") as run:
+                with self.assertRaises(HTTPException) as ctx:
+                    archives_api.archive_and_clear(archives_api.ArchiveRequest(password=wrong),
+                                                   db=MagicMock(), user=_user())
+            self.assertEqual(ctx.exception.status_code, 400)
+            run.assert_not_called()
+
+    def test_correct_password_runs_the_archive(self):
+        result = {"archive_id": 1, "label": "Opong 2026", "row_counts": {}, "dump_file_name": "d.dump",
+                  "gdrive_uploaded": True}
+        with patch.object(archives_api.archive_service, "archive_and_clear", return_value=result) as run:
+            response = archives_api.archive_and_clear(archives_api.ArchiveRequest(password=_PASSWORD),
+                                                      db=MagicMock(), user=_user())
+        run.assert_called_once()
+        self.assertEqual(response["data"]["archive_id"], 1)
 
 
 if __name__ == "__main__":

@@ -5,8 +5,9 @@ import { archiveAndClear, getArchiveEligibility, ArchiveEligibility, ArchiveResu
 // Archive & Clear (2026-10-22) -- shared by DatabaseBackupModule (admin) and
 // AccountSettingsModule (GIS Specialist). Copies every uploaded PABS record and
 // polygon into the read-only archive DB, then removes it from the live system.
-// The backend re-checks the 7-day rule and the typed confirmation itself; the
-// disabled button here is only a convenience.
+// The user confirms with their own account password; there is no waiting
+// period after the last bulletin. The backend re-checks eligibility and the
+// password itself; the disabled button here is only a convenience.
 
 interface ArchiveClearCardProps {
   // Called after the user dismisses the success dialog.
@@ -21,7 +22,7 @@ export function ArchiveClearCard({ onArchived }: ArchiveClearCardProps) {
   const [state, setState] = useState<ArchiveEligibility | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
-  const [typed, setTyped] = useState("");
+  const [password, setPassword] = useState("");
   const [running, setRunning] = useState(false);
   const [runError, setRunError] = useState<string | null>(null);
   const [result, setResult] = useState<ArchiveResult | null>(null);
@@ -38,7 +39,7 @@ export function ArchiveClearCard({ onArchived }: ArchiveClearCardProps) {
   const closeDialog = () => {
     if (running) return;
     setDialogOpen(false);
-    setTyped("");
+    setPassword("");
     setRunError(null);
     if (result) {
       onArchived?.(result);
@@ -48,12 +49,15 @@ export function ArchiveClearCard({ onArchived }: ArchiveClearCardProps) {
   };
 
   const handleConfirm = () => {
-    if (!state || typed.trim() !== state.confirm_word) return;
+    if (!state || !password || running) return;
     setRunning(true);
     setRunError(null);
-    archiveAndClear(typed.trim())
+    archiveAndClear(password)
       .then(res => setResult(res.data))
-      .catch(error => setRunError(error instanceof Error ? error.message : "Archive & Clear failed."))
+      .catch(error => {
+        setPassword("");
+        setRunError(error instanceof Error ? error.message : "Archive & Clear failed.");
+      })
       .finally(() => setRunning(false));
   };
 
@@ -67,8 +71,8 @@ export function ArchiveClearCard({ onArchived }: ArchiveClearCardProps) {
       <p className="text-[11px] text-muted-foreground mb-3">
         This permanently removes all uploaded PABS data (farmers, farms and their polygons, policies,
         assessments, SAR checks) from the live system. A read-only copy goes to the archive database and a
-        full backup to Google Drive. You'll need to re-upload the CSV/GPKG for the next typhoon. Allowed{" "}
-        {state?.clear_after_days ?? 7} days after the last bulletin of every assessed typhoon.
+        full backup to Google Drive. You'll need to re-upload the CSV/GPKG for the next typhoon. Allowed once the
+        current records have been assessed for a typhoon; you'll confirm with your password.
       </p>
 
       {loadError && <p className="text-[11px] text-red-600 mb-2">{loadError}</p>}
@@ -83,7 +87,7 @@ export function ArchiveClearCard({ onArchived }: ArchiveClearCardProps) {
           <p>Assessed for: <strong>{state.typhoons.length ? state.label : "—"}</strong></p>
           {state.typhoons.map(t => (
             <p key={t.typhoon_id} className="text-[10px] text-muted-foreground">
-              {t.name} {t.year}: last bulletin {formatDate(t.last_bulletin_at)} → clearable from {formatDate(t.clear_after)}
+              {t.name} {t.year}: last bulletin {formatDate(t.last_bulletin_at)}
             </p>
           ))}
           {!state.archive_configured && (
@@ -95,7 +99,7 @@ export function ArchiveClearCard({ onArchived }: ArchiveClearCardProps) {
 
       <div className="flex items-center justify-between gap-2">
         <span className="text-[10px] text-muted-foreground">
-          {state?.eligible ? "Eligible now." : state?.eligible_at ? `Eligible after: ${formatDate(state.eligible_at)}` : ""}
+          {state?.eligible ? "Eligible now." : ""}
         </span>
         <button
           onClick={() => setDialogOpen(true)}
@@ -141,11 +145,14 @@ export function ArchiveClearCard({ onArchived }: ArchiveClearCardProps) {
                   <li>This cannot be undone in the live system.</li>
                 </ul>
                 <label className="text-[11px] font-semibold block mb-1">
-                  Type <span className="font-mono">{state.confirm_word}</span> to confirm
+                  Enter your password to confirm
                 </label>
                 <input
-                  value={typed}
-                  onChange={e => setTyped(e.target.value)}
+                  type="password"
+                  autoComplete="current-password"
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  onKeyDown={e => { if (e.key === "Enter") handleConfirm(); }}
                   disabled={running}
                   autoFocus
                   className="w-full border border-border rounded-lg px-3 py-2 text-[11px] bg-background focus:outline-none focus:border-red-500 mb-3"
@@ -157,7 +164,7 @@ export function ArchiveClearCard({ onArchived }: ArchiveClearCardProps) {
                   </button>
                   <button
                     onClick={handleConfirm}
-                    disabled={running || typed.trim() !== state.confirm_word}
+                    disabled={running || !password}
                     className="flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded-lg bg-red-600 text-white text-xs font-semibold hover:bg-red-700 disabled:opacity-50 transition-colors"
                   >
                     {running ? <><RefreshCw size={12} className="animate-spin" /> Archiving…</> : "Archive & Clear"}
