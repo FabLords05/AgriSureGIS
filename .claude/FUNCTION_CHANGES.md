@@ -32,6 +32,16 @@ With the password as the safeguard, Archive & Clear no longer waits 7 days after
 
 ---
 
+## [2026-10-22] - Assessment & Reporting Filter Lists
+
+* **`frontend/src/app/components/AssessmentModule.tsx`**:
+  * The **Wind Velocity** filter always lists All plus Signal 2, 3, 4 and 5 (new module constant `WIND_SIGNAL_OPTIONS`, the payout-eligible TCWS levels). It used to list only the signals present in the loaded rows, often just "Signal 2". The `signals` memo is removed.
+  * The **Municipality** filter lists only the selected typhoon's affected municipalities (every typhoon's when none is selected). Before, it listed towns from every typhoon's rows, e.g. OPONG's Surigao del Norte towns while ROSAL was selected.
+  * A new `useEffect` resets `filterMuni` to "All" when the picked town is no longer in the list, so switching typhoon can't leave the table empty under a hidden filter.
+* No backend change.
+
+---
+
 ## [2026-10-22] - Signal 1 Left Out of Eligibility Counts; Explanatory Messages
 
 Payout and assessment already skipped Signal-1-only municipalities (`max_signal_level >= 2`). Signal 1 still leaked into the stored eligibility flag and the typhoon summary's farmer count. Fixed here, with the eligibility rule itself unchanged.
