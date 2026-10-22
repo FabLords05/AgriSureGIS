@@ -84,3 +84,6 @@ webgis-pcic-*.json
 gcp-credentials*.json
 # Local backup written by backend/seed_opong_assessment_test.py
 backend/opong_test_original_dates.json
+
+## Database backups (pg_dump -- see backend/app/services/backup_service.py)
+backend/backups/

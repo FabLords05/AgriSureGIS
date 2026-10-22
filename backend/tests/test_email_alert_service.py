@@ -11,7 +11,11 @@ from unittest.mock import MagicMock, patch
 
 from app.models.models import SystemUser, TropicalCycloneBulletin, Typhoon
 from app.services import email_alert_service
-from app.services.email_alert_service import send_new_bulletin_alerts, smtp_configured
+from app.services.email_alert_service import (
+    send_account_status_email,
+    send_new_bulletin_alerts,
+    smtp_configured,
+)
 
 SMTP_ENV = {
     "SMTP_HOST": "smtp.test.invalid",
@@ -208,20 +212,27 @@ class SendPathTests(unittest.TestCase):
             send_new_bulletin_alerts([_created(bulletin)], db)
         mock_smtplib.SMTP.assert_called_once_with("smtp.test.invalid", 587, timeout=10)
 
-    def test_subject_pluralizes_and_body_lists_each_bulletin(self):
+    def test_one_email_per_new_bulletin(self):
+        """Fabio's decision (2026-10-22): each new TCB is its own email, not a digest."""
         first = _bulletin(1, 16, "OPONG", is_active=True)
         second = _bulletin(2, 3, "TINO", is_active=True, category="Tropical Storm")
-        _, server, _ = self._send([first, second], [SystemUser(email="gis@test.invalid")])
-        _, _, message = server.sendmail.call_args.args
-        self.assertIn("Tropical Cyclone Bulletins", message)
-        self.assertIn("OPONG", message)
-        self.assertIn("TINO", message)
-        self.assertIn("Tropical Storm", message)
+        mock_smtplib, server, _ = self._send([first, second], [SystemUser(email="gis@test.invalid")])
 
-    def test_only_active_typhoons_are_listed_in_a_mixed_batch(self):
+        mock_smtplib.SMTP.assert_called_once()  # one login for the whole batch
+        self.assertEqual(server.sendmail.call_count, 2)
+        first_msg = server.sendmail.call_args_list[0].args[2]
+        second_msg = server.sendmail.call_args_list[1].args[2]
+        self.assertIn("Bulletin #16 for OPONG", first_msg)
+        self.assertNotIn("TINO", first_msg)
+        self.assertIn("Bulletin #3 for TINO", second_msg)
+        self.assertIn("Tropical Storm", second_msg)
+        self.assertNotIn("OPONG", second_msg)
+
+    def test_only_active_typhoons_are_emailed_in_a_mixed_batch(self):
         active = _bulletin(1, 16, "OPONG", is_active=True)
         stale = _bulletin(2, 9, "NANDO", is_active=False)
         _, server, _ = self._send([active, stale], [SystemUser(email="gis@test.invalid")])
+        self.assertEqual(server.sendmail.call_count, 1)
         _, _, message = server.sendmail.call_args.args
         self.assertIn("OPONG", message)
         self.assertNotIn("NANDO", message)
@@ -280,24 +291,30 @@ class UploadRouteWiringTests(unittest.TestCase):
             from app.api import bulletins as bulletins_api
         cls.bulletins_api = bulletins_api
 
-    def test_upload_route_sends_the_alert(self):
+    def _upload(self, saved, created):
         import asyncio
 
         bulletins_api = self.bulletins_api
-
-        saved = _bulletin(7, 4, "OPONG", is_active=True)
         upload = MagicMock(filename="TCB#4_opong.pdf")
 
         with patch.object(bulletins_api.BulletinParserService, "parse_bulletin_text",
                           return_value={"is_final": False}), \
-                patch.object(bulletins_api.BulletinParserService, "save_bulletin_to_db",
-                             return_value=saved), \
+                patch.object(bulletins_api.BulletinParserService, "upsert_bulletin",
+                             return_value=(saved, created)), \
                 patch.object(bulletins_api, "send_new_bulletin_alerts") as mock_alert, \
                 patch.object(bulletins_api.shutil, "copyfileobj"), \
                 patch("builtins.open", MagicMock()), \
                 patch.object(bulletins_api.os.path, "exists", return_value=False), \
                 patch.object(bulletins_api.os, "makedirs"):
             asyncio.run(bulletins_api.upload_bulletin_pdf(file=upload, db=MagicMock()))
+        return mock_alert
+
+    def test_reuploading_an_already_saved_bulletin_sends_no_alert(self):
+        mock_alert = self._upload(_bulletin(7, 4, "OPONG", is_active=True), created=False)
+        mock_alert.assert_not_called()
+
+    def test_upload_route_sends_the_alert(self):
+        mock_alert = self._upload(_bulletin(7, 4, "OPONG", is_active=True), created=True)
 
         mock_alert.assert_called_once()
         created_arg = mock_alert.call_args.args[0]
@@ -307,6 +324,77 @@ class UploadRouteWiringTests(unittest.TestCase):
             "bulletin_count": 4,
             "is_final": False,
         }])
+
+
+class AccountStatusEmailTests(unittest.TestCase):
+    """send_account_status_email -- added 2026-10-22."""
+
+    def _send(self, activated, env=SMTP_ENV):
+        with patch.dict(os.environ, env, clear=True), \
+                patch.object(email_alert_service, "smtplib") as mock_smtplib:
+            send_account_status_email("ana@test.invalid", "Ana Reyes", activated)
+        return mock_smtplib, mock_smtplib.SMTP.return_value.__enter__.return_value
+
+    def test_activation_email_goes_only_to_that_user(self):
+        _, server = self._send(activated=True)
+        from_addr, to_addrs, message = server.sendmail.call_args.args
+        self.assertEqual(from_addr, "alerts@test.invalid")
+        self.assertEqual(to_addrs, ["ana@test.invalid"])
+        self.assertIn("To: ana@test.invalid", message)
+        self.assertIn("Subject: AgriSureGIS: Your account has been activated", message)
+        self.assertIn("Hello Ana Reyes", message)
+
+    def test_deactivation_email(self):
+        _, server = self._send(activated=False)
+        _, _, message = server.sendmail.call_args.args
+        self.assertIn("Subject: AgriSureGIS: Your account has been deactivated", message)
+
+    def test_unconfigured_smtp_is_a_noop(self):
+        mock_smtplib, _ = self._send(activated=True, env={})
+        mock_smtplib.SMTP.assert_not_called()
+
+    def test_smtp_failure_never_raises(self):
+        with patch.dict(os.environ, SMTP_ENV, clear=True), \
+                patch.object(email_alert_service, "smtplib") as mock_smtplib:
+            mock_smtplib.SMTP.side_effect = OSError("connection refused")
+            send_account_status_email("ana@test.invalid", "Ana Reyes", True)  # must not raise
+
+
+class UpdateUserRouteWiringTests(unittest.TestCase):
+    """PATCH /api/users/{user_id} queues the status email only when is_active changes."""
+
+    @classmethod
+    def setUpClass(cls):
+        # Same JWT_SECRET_KEY import guard as UploadRouteWiringTests.
+        with patch.dict(os.environ, {"JWT_SECRET_KEY": "test-only-not-a-real-secret"}, clear=False):
+            from app.api import users as users_api
+        cls.users_api = users_api
+
+    def _patch(self, was_active, payload):
+        users_api = self.users_api
+        user = SystemUser(user_id=5, email="ana@test.invalid", firstname="Ana", lastname="Reyes",
+                          role="GIS Specialist", is_active=was_active)
+        db = MagicMock()
+        db.query.return_value.filter.return_value.first.return_value = user
+        background_tasks = MagicMock()
+        users_api.update_user(5, users_api.UpdateUserRequest(**payload), background_tasks, db=db, _admin=MagicMock())
+        return background_tasks
+
+    def test_activating_queues_the_activation_email(self):
+        background_tasks = self._patch(was_active=False, payload={"is_active": True})
+        background_tasks.add_task.assert_called_once_with(
+            send_account_status_email, "ana@test.invalid", "Ana Reyes", True,
+        )
+
+    def test_deactivating_queues_the_deactivation_email(self):
+        background_tasks = self._patch(was_active=True, payload={"is_active": False})
+        background_tasks.add_task.assert_called_once_with(
+            send_account_status_email, "ana@test.invalid", "Ana Reyes", False,
+        )
+
+    def test_unchanged_status_sends_nothing(self):
+        background_tasks = self._patch(was_active=True, payload={"is_active": True, "name": "Ana Reyes"})
+        background_tasks.add_task.assert_not_called()
 
 
 if __name__ == "__main__":

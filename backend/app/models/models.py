@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, Boolean, UniqueConstraint, func
+from sqlalchemy import BigInteger, Column, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, Boolean, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from geoalchemy2 import Geometry
@@ -30,9 +30,12 @@ class ActivityLog(Base):
 
     log_id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("tbl_system_users.user_id", ondelete="SET NULL"), nullable=True)
-    action = Column(String(20), nullable=False)  # LOGIN, LOGOUT, POST, PUT, PATCH, DELETE
+    action = Column(String(20), nullable=False)  # LOGIN, LOGOUT, POST, PUT, PATCH, DELETE, GET, INGEST, SYSTEM
     endpoint = Column(String(255), nullable=False)
     status_code = Column(Integer, nullable=False)
+    # Full sentence of what was done -- see app/core/activity_log.py. NULL only
+    # for entries written before 2026-10-22.
+    remarks = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
     user = relationship("SystemUser")
@@ -70,6 +73,9 @@ class Farm(Base):
 
     csv_farm_reference = Column(String(50))
     georef_id = Column(String(50))
+    # PCIC's GPX file name for this farm (CSV "trackFileName", 2026-10-22) --
+    # GpxFarmerMatcherService's first and most reliable match.
+    track_file_name = Column(String(255))
     area_size = Column(Numeric(10, 2), nullable=False)
     location_geom = Column(Geometry(geometry_type="MULTIPOLYGON", srid=4326))
     created_at = Column(DateTime, server_default=func.now())
@@ -286,6 +292,15 @@ class TropicalCycloneBulletin(Base):
     wind_radius_km = Column(Integer, nullable=True)
     storm_force_radius_km = Column(Integer, nullable=True)
     forecast_track = Column(JSONB, nullable=True)
+    # Traceability + corrected-bulletin detection (see backend/migrations/
+    # 2026-10-22_exposure_signal_hours.sql). raw_text: the PDF's extracted
+    # text. tcws_hash: sha256 of the parsed TCWS table -- a re-scrape with a
+    # different hash is a corrected bulletin. issued_at_parsed: False when
+    # "Issued at ..." couldn't be read and issued_at is the ingestion time;
+    # such bulletins are left out of exposure timelines.
+    raw_text = Column(Text, nullable=True)
+    tcws_hash = Column(String(64), nullable=True)
+    issued_at_parsed = Column(Boolean, nullable=False, default=True)
 
     typhoon = relationship("Typhoon")
 
@@ -306,8 +321,30 @@ class TcbSignal(Base):
     # which collides once AdminBoundary covers the whole country (e.g.
     # multiple "Santa Cruz" across different provinces).
     province = Column(String(100), nullable=True)
+    # The PAGASA clause this LGU was resolved from (2026-10-22), e.g.
+    # "Batanes" or "the northern portion of Cagayan (Santa Ana, Gonzaga)".
+    source_clause = Column(Text, nullable=True)
 
     bulletin = relationship("TropicalCycloneBulletin")
+
+
+class TcbUnresolvedClause(Base):
+    """
+    A TCWS clause that resolved to no municipality (2026-10-22): an unknown
+    name ("no_boundary_match"), or partial provincial coverage stated without
+    a town list ("partial_coverage_no_list"), which is deliberately never
+    expanded to the whole province. Shown as a warning beside the exposure
+    tables so a specialist can see what was not assigned.
+    """
+
+    __tablename__ = "tbl_tcb_unresolved_clauses"
+
+    unresolved_id = Column(Integer, primary_key=True, index=True)
+    tcb_id = Column(Integer, ForeignKey("tbl_tropical_cyclone_bulletins.tcb_id", ondelete="CASCADE"), nullable=False)
+    signal_level = Column(Integer, nullable=False)
+    island_group = Column(Integer, nullable=False)
+    clause = Column(Text, nullable=False)
+    reason = Column(String(40), nullable=False)
 
 
 class AreaExposureSummary(Base):
@@ -319,13 +356,44 @@ class AreaExposureSummary(Base):
     province = Column(String(100), nullable=False)
     municipality = Column(String(100), nullable=False)
     max_signal_level = Column(Integer, nullable=False)
-    start_time = Column(DateTime, nullable=False)
-    end_time = Column(DateTime, nullable=False)
+    start_time = Column(DateTime(timezone=True), nullable=False)
+    end_time = Column(DateTime(timezone=True), nullable=False)
     is_eligible_6hr = Column(Boolean, default=False)
-    total_exposure_hours = Column(Numeric(5, 2), nullable=False)
-    computed_at = Column(DateTime, server_default=func.now())
+    # Hours accumulated under each TCWS level, and their sum (2026-10-22 --
+    # see ExposureCalculatorService for how intervals are built).
+    # payout_hours = the hours under max_signal_level, which AssessmentService
+    # buckets into the PCIC matrix's 6/12/24h brackets.
+    total_exposure_hours = Column(Numeric(7, 2), nullable=False)
+    computed_at = Column(DateTime(timezone=True), server_default=func.now())
+    island_group = Column(Integer, nullable=True)
+    signal_1_hours = Column(Numeric(7, 2), nullable=False, default=0)
+    signal_2_hours = Column(Numeric(7, 2), nullable=False, default=0)
+    signal_3_hours = Column(Numeric(7, 2), nullable=False, default=0)
+    signal_4_hours = Column(Numeric(7, 2), nullable=False, default=0)
+    signal_5_hours = Column(Numeric(7, 2), nullable=False, default=0)
+    payout_hours = Column(Numeric(7, 2), nullable=True)
+    has_open_interval = Column(Boolean, nullable=False, default=False)
+    has_long_gap = Column(Boolean, nullable=False, default=False)
 
     typhoon = relationship("Typhoon")
+
+
+class ExposureInterval(Base):
+    """One continuous stretch a municipality spent under one signal level
+    during a typhoon (2026-10-22). Rebuilt on every exposure recompute; the
+    audit trail behind tbl_area_exposure_summary's per-signal hours."""
+
+    __tablename__ = "tbl_exposure_intervals"
+
+    interval_id = Column(Integer, primary_key=True, index=True)
+    typhoon_id = Column(Integer, ForeignKey("tbl_typhoons.typhoon_id", ondelete="CASCADE"), nullable=False)
+    province = Column(String(100), nullable=False)
+    municipality = Column(String(100), nullable=False)
+    signal_level = Column(Integer, nullable=False)
+    start_time = Column(DateTime(timezone=True), nullable=False)
+    end_time = Column(DateTime(timezone=True), nullable=False)
+    start_tcb_id = Column(Integer, ForeignKey("tbl_tropical_cyclone_bulletins.tcb_id", ondelete="SET NULL"))
+    end_tcb_id = Column(Integer, ForeignKey("tbl_tropical_cyclone_bulletins.tcb_id", ondelete="SET NULL"))
 
 
 class SarObservation(Base):
@@ -441,3 +509,43 @@ class ParserSettings(Base):
     # converts (x * 60) any existing value for already-provisioned DBs.
     polling_interval_minutes = Column(Integer, nullable=False, default=180)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class SystemSetting(Base):
+    """Admin-editable key/value settings (2026-10-22) -- see
+    migrations/2026-10-22_system_settings_backup_log.sql and
+    app/core/system_settings.py for the keys and their defaults."""
+
+    __tablename__ = "tbl_system_settings"
+
+    setting_key = Column(String(50), primary_key=True)
+    setting_value = Column(JSONB, nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    updated_by = Column(Integer, ForeignKey("tbl_system_users.user_id", ondelete="SET NULL"), nullable=True)
+
+
+class BackupLog(Base):
+    """One row per pg_dump the app runs -- see app/services/backup_service.py."""
+
+    __tablename__ = "tbl_backup_log"
+
+    backup_id = Column(Integer, primary_key=True, index=True)
+    kind = Column(String(20), nullable=False)  # manual | scheduled | archive
+    file_name = Column(String(255))
+    size_bytes = Column(BigInteger)
+    gdrive_file_id = Column(String(255))
+    status = Column(String(20), nullable=False)  # success | failed
+    error = Column(Text)
+    gdrive_error = Column(Text)
+    created_at = Column(DateTime, server_default=func.now())
+    created_by = Column(Integer, ForeignKey("tbl_system_users.user_id", ondelete="SET NULL"), nullable=True)
+    # Integrity + verification (2026-10-22, see backup_service.verify_backup).
+    # row_counts: {table: rows} read from the dump's own snapshot.
+    # encrypted: the Drive copy is AES-GCM encrypted (app/core/backup_crypto.py).
+    sha256 = Column(String(64))
+    row_counts = Column(JSONB)
+    encrypted = Column(Boolean, nullable=False, default=False)
+    gdrive_md5 = Column(String(32))
+    verify_status = Column(String(20))  # pending | verified | failed
+    verify_detail = Column(JSONB)
+    verified_at = Column(DateTime(timezone=True))

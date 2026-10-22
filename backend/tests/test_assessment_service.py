@@ -25,7 +25,7 @@ class AssessmentServiceTests(unittest.TestCase):
             issued_at=datetime(2026, 8, 20, tzinfo=timezone.utc),
         )
 
-    def _summary(self, boundary_id=5, max_signal_level=3, total_exposure_hours=12.0):
+    def _summary(self, boundary_id=5, max_signal_level=3, total_exposure_hours=12.0, payout_hours=12.0):
         return MagicMock(
             summary_id=99,
             boundary_id=boundary_id,
@@ -33,6 +33,7 @@ class AssessmentServiceTests(unittest.TestCase):
             municipality="Mainit",
             max_signal_level=max_signal_level,
             total_exposure_hours=total_exposure_hours,
+            payout_hours=payout_hours,
         )
 
     def _insurance_record(self, insurance_records_id=7, area_size="2.5", amount_cover="50000.00"):
@@ -238,6 +239,20 @@ class AssessmentServiceTests(unittest.TestCase):
     def test_calculate_for_bulletin_skips_summary_below_signal_threshold(self, mock_compute):
         bulletin = self._bulletin()
         summary = self._summary(max_signal_level=1)
+        mock_compute.return_value = [summary]
+
+        mock_db = self._build_mock_db(bulletin, [], prior_assessment=None, yield_loss_rule=None)
+
+        results = AssessmentService.calculate_for_bulletin(1, 12, mock_db)
+
+        self.assertEqual(results, [])
+
+    @patch("app.services.assessment_service.ExposureCalculatorService.compute_for_typhoon")
+    def test_calculate_for_bulletin_uses_hours_at_max_signal_not_total(self, mock_compute):
+        # 30h of total exposure, but only 4h of it under Signal 3 (the max):
+        # payout eligibility reads payout_hours, so nothing is assessed.
+        bulletin = self._bulletin()
+        summary = self._summary(max_signal_level=3, total_exposure_hours=30.0, payout_hours=4.0)
         mock_compute.return_value = [summary]
 
         mock_db = self._build_mock_db(bulletin, [], prior_assessment=None, yield_loss_rule=None)

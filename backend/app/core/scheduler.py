@@ -4,7 +4,10 @@ from datetime import datetime, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
+from app.core.activity_log import describe_new_bulletins, plural, record_activity
 from app.core.database import SessionLocal
+from app.core.system_settings import AUTO_BACKUP_KEY, get_setting
+from app.services.backup_service import BackupError, run_backup
 from app.services.bulletin_parser import BulletinParserService
 from app.services.email_alert_service import send_new_bulletin_alerts
 from app.services.pagasa_status_scraper import PagasaStatusService
@@ -12,6 +15,7 @@ from app.services.pagasa_status_scraper import PagasaStatusService
 logger = logging.getLogger("agrisuregis.scheduler")
 
 BULLETIN_JOB_ID = "pagasa_bulletin_poll"
+BACKUP_JOB_ID = "nightly_db_backup"
 
 # Fixed at PAGASA's fastest meaningful cadence -- no longer admin-configurable
 # via the Calibration screen (tbl_parser_settings/api/bulletins/settings still
@@ -59,6 +63,12 @@ def run_scheduled_scrape() -> None:
     except Exception:
         logger.exception("PAGASA active-typhoon status sync failed.")
 
+    try:
+        _log_scheduled_run(db, created, scrape_ok, status_sync_ok)
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to record the scheduled poll in the activity log.")
+
     last_run.update(
         finished_at=datetime.now(timezone.utc),
         scrape_ok=scrape_ok,
@@ -76,6 +86,59 @@ def run_scheduled_scrape() -> None:
         db.close()
 
 
+def _log_scheduled_run(db, created: list[dict], scrape_ok: bool, status_sync_ok: bool) -> None:
+    """
+    SYSTEM Activity Log entry for the automatic TCB ingestion (2026-10-22).
+    Only written when something actually happened -- new bulletins saved, or
+    a step newly started failing -- not for every quiet poll: at one run per
+    15 minutes that would be ~96 "nothing new" rows a day burying the real
+    actions. A failure is logged once when it starts (last_run still holds the
+    previous run's outcome here), not again on every poll while PAGASA stays
+    unreachable.
+    """
+    parts = []
+    if created:
+        parts.append(
+            f"Automatic PAGASA poll ingested {plural(len(created), 'new TCB')}: "
+            f"{describe_new_bulletins(created, db)}."
+        )
+    if not scrape_ok and last_run["scrape_ok"] is not False:
+        parts.append("Automatic PAGASA TCB scrape failed (portal unreachable or returned an error); will retry next poll.")
+    if not status_sync_ok and last_run["status_sync_ok"] is not False:
+        parts.append("PAGASA active-typhoon status sync failed; typhoon active/inactive flags were not updated.")
+    if not parts:
+        return
+    status_code = 200 if scrape_ok and status_sync_ok else 500
+    record_activity(db, None, "SYSTEM", "scheduler/pagasa-poll", status_code, " ".join(parts))
+
+
+def run_scheduled_backup() -> None:
+    """
+    Nightly 23:00 PHT pg_dump (2026-10-22), the Database Backup tab's
+    "Automatic daily backup" checkbox. The job is always scheduled; the
+    checkbox (tbl_system_settings.auto_backup_enabled) is read each night, so
+    toggling it needs no reschedule. Logged to the Activity Log either way.
+    """
+    db = SessionLocal()
+    try:
+        if not get_setting(db, AUTO_BACKUP_KEY):
+            logger.info("Automatic daily backup is disabled; skipping.")
+            return
+        try:
+            entry = run_backup(db, "scheduled", None)
+        except BackupError as exc:
+            record_activity(db, None, "SYSTEM", "scheduler/nightly-backup", 500,
+                            f"Automatic daily backup failed: {exc}")
+            return
+        drive = "uploaded to Google Drive" if entry.gdrive_file_id else f"not uploaded ({entry.gdrive_error})"
+        record_activity(db, None, "SYSTEM", "scheduler/nightly-backup", 200,
+                        f"Automatic daily backup {entry.file_name} ({entry.size_bytes:,} bytes), {drive}.")
+    except Exception:
+        logger.exception("Nightly backup job crashed.")
+    finally:
+        db.close()
+
+
 def build_scheduler(initial_interval_minutes: int) -> BackgroundScheduler:
     scheduler = BackgroundScheduler()
     scheduler.add_job(
@@ -85,6 +148,16 @@ def build_scheduler(initial_interval_minutes: int) -> BackgroundScheduler:
         id=BULLETIN_JOB_ID,
         replace_existing=True,
         max_instances=1,  # guard against overlapping runs if a scrape outlasts the interval
+    )
+    scheduler.add_job(
+        run_scheduled_backup,
+        "cron",
+        hour=23,
+        minute=0,
+        timezone="Asia/Manila",
+        id=BACKUP_JOB_ID,
+        replace_existing=True,
+        max_instances=1,
     )
     return scheduler
 

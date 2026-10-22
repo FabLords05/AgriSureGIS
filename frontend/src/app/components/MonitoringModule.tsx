@@ -9,9 +9,12 @@ import {
 import {
   Bulletin, TcbSignal, InsuranceSummary, ActiveTyphoon, AssessmentsSummary,
   getBulletins, parseBulletins, getBulletinSignals,
-  computeExposure, ComputeExposureResult, getAssessmentsSummary, getInsuranceSummary,
-  getActiveTyphoons, TyphoonProgress, getTyphoonProgress, SystemStatus, getSystemStatus,
+  computeExposure, getTyphoonExposure, TyphoonExposure, getAssessmentsSummary, getInsuranceSummary,
+  getActiveTyphoons, TyphoonProgress, getTyphoonProgress, SystemStatus, getSystemStatus, AssessmentStageStatus,
 } from "@/lib/api";
+import { ExposureTable } from "./ExposureTable";
+import { DataImportPanel, ImportSummary } from "./DataImportPanel";
+import { AssessmentProgressBar } from "./AssessmentProgressBar";
 
 type BulletinSortField = "bulletin_count" | "typhoon_name" | "issued_at" | "category" | "max_sustained_winds" | "gustiness";
 type SortDir = "asc" | "desc";
@@ -83,7 +86,8 @@ function TyphoonProgressStrip({ progress, onNavigateToAssessment }: {
   progress: TyphoonProgress;
   onNavigateToAssessment?: () => void;
 }) {
-  const steps: { title: string; done: boolean; detail: string }[] = [
+  const job = progress.active_job;
+  const raw: { title: string; done: boolean; detail: string }[] = [
     {
       title: "Bulletins collected",
       done: progress.bulletin_count > 0,
@@ -105,10 +109,14 @@ function TyphoonProgressStrip({ progress, onNavigateToAssessment }: {
     },
     {
       title: "Assessment calculated",
-      done: progress.assessed_farms > 0,
-      detail: progress.assessed_farms > 0
-        ? `${progress.assessed_farms} farm${progress.assessed_farms === 1 ? "" : "s"} assessed`
-        : "Not calculated yet",
+      done: progress.assessed_farms > 0 && job?.status !== "processing" && job?.status !== "error",
+      detail: job?.status === "processing"
+        ? `${job.current_stage_label ?? "Running"} · ${job.percent}%`
+        : job?.status === "error"
+          ? "Last calculation failed"
+          : progress.assessed_farms > 0
+            ? `${progress.assessed_farms} farm${progress.assessed_farms === 1 ? "" : "s"} assessed`
+            : "Not calculated yet",
     },
     {
       title: "Exported to PABS",
@@ -118,7 +126,25 @@ function TyphoonProgressStrip({ progress, onNavigateToAssessment }: {
         : "Not exported yet",
     },
   ];
-  const currentIndex = steps.findIndex(s => !s.done);
+
+  // Strictly sequential (2026-10-22): a step only shows Completed when every
+  // step before it has, so a later step never visually jumps an earlier one
+  // (e.g. exposure is now computed as each bulletin arrives, before the
+  // final TCB). The first unfinished step is the one active stage; it is
+  // Failed / Processing from the real assessment job, else Processing while
+  // PAGASA is still issuing bulletins, else Pending (waiting on a user step).
+  const currentIndex = raw.findIndex(s => !s.done);
+  const steps = raw.map((s, i): { title: string; detail: string; status: AssessmentStageStatus } => {
+    if (currentIndex === -1 || i < currentIndex) return { ...s, status: "completed" };
+    if (i > currentIndex) return { ...s, status: "pending" };
+    if (i === 3 && job?.status === "error") return { ...s, status: "failed" };
+    if (i === 3 && job?.status === "processing") return { ...s, status: "processing" };
+    if (i <= 1 && progress.in_par) return { ...s, status: "processing" };
+    return { ...s, status: "pending" };
+  });
+  const statusLabel: Record<AssessmentStageStatus, string> = {
+    pending: "Pending", processing: "Processing", completed: "Completed", failed: "Failed",
+  };
 
   return (
     <div className="bg-card border border-border rounded-xl shrink-0">
@@ -140,21 +166,27 @@ function TyphoonProgressStrip({ progress, onNavigateToAssessment }: {
       <div className="grid grid-cols-5 px-4 py-4">
         {steps.map((s, i) => {
           const isCurrent = i === currentIndex;
+          const done = s.status === "completed";
           return (
             <div key={s.title} className="relative px-2 text-center">
               {i > 0 && (
-                <div className={`absolute top-[14px] -left-1/2 w-full h-[3px] ${s.done || isCurrent ? "bg-[#166534]" : "bg-border"}`} />
+                <div className={`absolute top-[14px] -left-1/2 w-full h-[3px] ${done || isCurrent ? "bg-[#166534]" : "bg-border"}`} />
               )}
               <div className={`relative z-10 mx-auto mb-1.5 w-[30px] h-[30px] rounded-full flex items-center justify-center text-[12px] font-bold border-[3px] ${
-                s.done
+                done
                   ? "bg-[#166534] border-[#166534] text-white"
-                  : isCurrent
-                    ? "bg-card border-[#ca8a04] text-[#ca8a04] ring-4 ring-[#ca8a04]/20"
-                    : "bg-card border-border text-muted-foreground"
+                  : s.status === "failed"
+                    ? "bg-card border-red-600 text-red-600 ring-4 ring-red-600/20"
+                    : isCurrent
+                      ? "bg-card border-[#ca8a04] text-[#ca8a04] ring-4 ring-[#ca8a04]/20"
+                      : "bg-card border-border text-muted-foreground"
               }`}>
-                {s.done ? <Check size={14} strokeWidth={3} /> : i + 1}
+                {done ? <Check size={14} strokeWidth={3} /> : s.status === "failed" ? <X size={14} strokeWidth={3} /> : i + 1}
               </div>
               <p className="text-[12px] font-semibold">{s.title}</p>
+              <p className={`text-[10px] font-semibold uppercase tracking-wide ${
+                s.status === "failed" ? "text-red-600" : s.status === "processing" ? "text-[#ca8a04]" : done ? "text-[#166534]" : "text-muted-foreground"
+              }`}>{statusLabel[s.status]}</p>
               <p className="text-[11px] text-muted-foreground">{s.detail}</p>
               {isCurrent && i >= 3 && onNavigateToAssessment && (
                 <button onClick={onNavigateToAssessment} className="mt-0.5 text-[11px] font-medium text-[#ca8a04] hover:underline">
@@ -165,6 +197,12 @@ function TyphoonProgressStrip({ progress, onNavigateToAssessment }: {
           );
         })}
       </div>
+      {/* The calculation's own stages, while running or after a failure. */}
+      {job && job.status !== "done" && (
+        <div className="px-4 pb-4">
+          <AssessmentProgressBar job={job} />
+        </div>
+      )}
     </div>
   );
 }
@@ -414,26 +452,31 @@ function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bull
 }
 
 // ─── TCB Exposure Summary Modal ──────────────────────────────────────────────
-// Per Fabio's request: a view showing, for a given TCB, the list of affected
-// areas and how long each was under a wind signal (POST /{tcb_id}/compute-exposure).
+// Per municipality: Max Signal, hours under each of Signal 1-5, and Total
+// Exposure (their sum) for the bulletin's typhoon, read from the same
+// endpoint as Assessment & Reporting's Areas Affected (2026-10-22).
 function ExposureSummaryModal({
-  bulletin, result, isLoading, error, onClose,
+  bulletin, result, isLoading, error, isRecomputing, onRecompute, onClose,
 }: {
   bulletin: Bulletin;
-  result: ComputeExposureResult | null;
+  result: TyphoonExposure | null;
   isLoading: boolean;
   error: string | null;
+  isRecomputing: boolean;
+  onRecompute: () => void;
   onClose: () => void;
 }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-      <div className="bg-card border border-border rounded-2xl shadow-2xl w-[640px] max-h-[80vh] flex flex-col overflow-hidden">
+      <div className="bg-card border border-border rounded-2xl shadow-2xl w-[95vw] max-w-5xl max-h-[85vh] flex flex-col overflow-hidden">
         <div className="flex items-center justify-between px-5 py-3 border-b border-border shrink-0" style={{ background: "#0f1e0f" }}>
           <div className="flex items-center gap-3">
             <MapPinned size={15} className="text-emerald-400" />
             <div>
-              <p className="text-[12px] font-bold text-white">Exposure Summary — TCB No. {bulletin.bulletin_count}, {bulletin.typhoon_name}</p>
-              <p className="text-[10px] text-white/60">Areas affected and total wind-signal exposure time</p>
+              <p className="text-[12px] font-bold text-white">Exposure Summary — {bulletin.typhoon_name}</p>
+              <p className="text-[10px] text-white/60">
+                Hours each municipality spent under each wind signal, across all {result?.bulletin_count ?? ""} TCB(s) of this typhoon
+              </p>
             </div>
           </div>
           <button onClick={onClose} className="w-6 h-6 flex items-center justify-center rounded hover:bg-white/10 text-white/60 hover:text-white transition-colors">
@@ -443,50 +486,30 @@ function ExposureSummaryModal({
 
         <div className="flex-1 overflow-auto p-4">
           {isLoading ? (
-            <p className="text-[11px] text-muted-foreground text-center py-6">Computing exposure summary…</p>
+            <p className="text-[11px] text-muted-foreground text-center py-6">Loading exposure summary…</p>
           ) : error ? (
             <div className="px-3 py-2 text-[11px] text-white bg-red-600 rounded-lg">{error}</div>
-          ) : !result || result.summaries.length === 0 ? (
-            <p className="text-[11px] text-muted-foreground text-center py-6">No affected areas recorded for this bulletin yet.</p>
-          ) : (
-            <table className="w-full text-[11px]">
-              <thead>
-                <tr className="bg-[#166534] text-white">
-                  <th className="px-3 py-2 text-left font-semibold">Province</th>
-                  <th className="px-3 py-2 text-left font-semibold">Municipality</th>
-                  <th className="px-3 py-2 text-left font-semibold">Max Signal</th>
-                  <th className="px-3 py-2 text-left font-semibold">Start</th>
-                  <th className="px-3 py-2 text-left font-semibold">End</th>
-                  <th className="px-3 py-2 text-left font-semibold">Exposure (h)</th>
-                  <th className="px-3 py-2 text-left font-semibold">6h+ Eligible</th>
-                </tr>
-              </thead>
-              <tbody>
-                {result.summaries.map((s, i) => (
-                  <tr key={s.summary_id} className={`border-t border-border ${i % 2 === 0 ? "" : "bg-muted/10"}`}>
-                    <td className="px-3 py-2">{s.province}</td>
-                    <td className="px-3 py-2 font-medium">{s.municipality}</td>
-                    <td className="px-3 py-2">No. {s.max_signal_level}</td>
-                    <td className="px-3 py-2 text-muted-foreground whitespace-nowrap">{s.start_time}</td>
-                    <td className="px-3 py-2 text-muted-foreground whitespace-nowrap">{s.end_time}</td>
-                    <td className="px-3 py-2 font-semibold">{s.total_exposure_hours.toFixed(1)}</td>
-                    <td className="px-3 py-2">
-                      {s.is_eligible_6hr
-                        ? <span className="text-emerald-600 font-medium">Yes</span>
-                        : <span className="text-muted-foreground">No</span>}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+          ) : result ? (
+            <ExposureTable exposure={result} />
+          ) : null}
         </div>
 
         <div className="flex items-center justify-between px-5 py-3 border-t border-border shrink-0">
           <p className="text-[10px] text-muted-foreground">
-            {result ? `${result.boundaries_computed} area(s) computed` : ""}
+            {result ? `${result.areas.length} municipality(ies)` : ""}
           </p>
-          <button onClick={onClose} className="px-3 py-1.5 rounded-lg border border-border text-xs hover:bg-muted transition-colors">Close</button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onRecompute}
+              disabled={isRecomputing || isLoading}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border text-xs hover:bg-muted transition-colors disabled:opacity-50"
+              title="Rebuild this typhoon's exposure from all of its bulletins"
+            >
+              <RefreshCw size={11} className={isRecomputing ? "animate-spin" : ""} />
+              {isRecomputing ? "Recomputing…" : "Recompute"}
+            </button>
+            <button onClick={onClose} className="px-3 py-1.5 rounded-lg border border-border text-xs hover:bg-muted transition-colors">Close</button>
+          </div>
         </div>
       </div>
     </div>
@@ -498,11 +521,24 @@ interface MonitoringModuleProps {
   selectedBulletin: Bulletin | null;
   onSelectBulletin: (bulletin: Bulletin | null) => void;
   onNavigateToAssessment?: () => void;
+  // Data Import / PCIC Data Upload (2026-10-22, moved from Spatial Analysis).
+  // Handlers + progress are owned by App.tsx so uploads survive tab switches.
+  csvUploadProgress: { processed: number; total: number } | null;
+  gpxUploadProgress: { current: number; total: number } | null;
+  onCsvFileSelected: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onGpxFilesSelected: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  lastImport: ImportSummary | null;
+  onViewImportDetails: (failures: string[]) => void;
 }
 
 const SYSTEM_STATUS_REFRESH_MS = 60_000;
+// Assessment Progress strip refresh while a calculation is running.
+const PROGRESS_POLL_MS = 1000;
 
-export function MonitoringModule({ selectedBulletin, onSelectBulletin, onNavigateToAssessment }: MonitoringModuleProps) {
+export function MonitoringModule({
+  selectedBulletin, onSelectBulletin, onNavigateToAssessment,
+  csvUploadProgress, gpxUploadProgress, onCsvFileSelected, onGpxFilesSelected, lastImport, onViewImportDetails,
+}: MonitoringModuleProps) {
   const [bulletins, setBulletins] = useState<Bulletin[]>([]);
   const [isLoadingBulletins, setIsLoadingBulletins] = useState(false);
   const [isParsing, setIsParsing] = useState(false);
@@ -522,8 +558,9 @@ export function MonitoringModule({ selectedBulletin, onSelectBulletin, onNavigat
   const [isLoadingViewingSignals, setIsLoadingViewingSignals] = useState(false);
 
   const [exposureBulletin, setExposureBulletin] = useState<Bulletin | null>(null);
-  const [exposureResult, setExposureResult] = useState<ComputeExposureResult | null>(null);
+  const [exposureResult, setExposureResult] = useState<TyphoonExposure | null>(null);
   const [isLoadingExposure, setIsLoadingExposure] = useState(false);
+  const [isRecomputingExposure, setIsRecomputingExposure] = useState(false);
   const [exposureError, setExposureError] = useState<string | null>(null);
 
   const [assessmentsSummary, setAssessmentsSummary] = useState<AssessmentsSummary | null>(null);
@@ -644,11 +681,26 @@ export function MonitoringModule({ selectedBulletin, onSelectBulletin, onNavigat
     setExposureError(null);
     setIsLoadingExposure(true);
     try {
-      setExposureResult(await computeExposure(b.tcb_id));
+      setExposureResult(await getTyphoonExposure(b.typhoon_id));
     } catch (error) {
-      setExposureError(error instanceof Error ? error.message : "Failed to compute exposure summary.");
+      setExposureError(error instanceof Error ? error.message : "Failed to load exposure summary.");
     } finally {
       setIsLoadingExposure(false);
+    }
+  };
+
+  const handleRecomputeExposure = async () => {
+    if (!exposureBulletin) return;
+    setIsRecomputingExposure(true);
+    setExposureError(null);
+    try {
+      await computeExposure(exposureBulletin.tcb_id);
+      setExposureResult(await getTyphoonExposure(exposureBulletin.typhoon_id));
+      toast.success("Exposure recomputed from all of this typhoon's bulletins.");
+    } catch (error) {
+      setExposureError(error instanceof Error ? error.message : "Failed to recompute exposure.");
+    } finally {
+      setIsRecomputingExposure(false);
     }
   };
 
@@ -757,6 +809,30 @@ export function MonitoringModule({ selectedBulletin, onSelectBulletin, onNavigat
     return () => { cancelled = true; };
   }, [primaryTyphoonId, primaryTyphoonBulletins.length, primaryTyphoonInPar]);
 
+  // While an assessment calculation runs, follow its real progress
+  // (2026-10-22). One sequential loop -- each request waits for the last --
+  // and it stops as soon as the job is no longer processing.
+  const progressJobRunning = typhoonProgress?.active_job?.status === "processing";
+  useEffect(() => {
+    if (primaryTyphoonId === null || !progressJobRunning) return;
+    let cancelled = false;
+    (async () => {
+      while (!cancelled) {
+        await new Promise(resolve => setTimeout(resolve, PROGRESS_POLL_MS));
+        if (cancelled) return;
+        try {
+          const p = await getTyphoonProgress(primaryTyphoonId);
+          if (cancelled) return;
+          setTyphoonProgress(p);
+          if (p.active_job?.status !== "processing") return;
+        } catch {
+          return; // keep the last known state; the next mount refetches
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [primaryTyphoonId, progressJobRunning]);
+
   const statCards: {
     label: string; value: string | number; sub: string; icon: React.ReactNode;
     color: string; bg: string; border: string; alert: string | null;
@@ -792,6 +868,8 @@ export function MonitoringModule({ selectedBulletin, onSelectBulletin, onNavigat
           result={exposureResult}
           isLoading={isLoadingExposure}
           error={exposureError}
+          isRecomputing={isRecomputingExposure}
+          onRecompute={handleRecomputeExposure}
           onClose={() => setExposureBulletin(null)}
         />
       )}
@@ -832,7 +910,7 @@ export function MonitoringModule({ selectedBulletin, onSelectBulletin, onNavigat
           <div className="flex items-center justify-between px-4 py-3 border-b border-border">
             <div className="flex items-center gap-2">
               <FileDown size={15} className="text-[#166534]" />
-              <span className="text-sm font-semibold">PAGASA TCB Bulletins</span>
+              <span className="text-sm font-semibold">PAGASA TCB Lists</span>
             </div>
             <button
               onClick={handleParseLatest}
@@ -937,7 +1015,19 @@ export function MonitoringModule({ selectedBulletin, onSelectBulletin, onNavigat
         {/* System Status took the slot Farms by Signal Number had (removed
             2026-10-11 per Cristian; Growth Stage Distribution and the TCB
             Download Timeline went 2026-10-09). */}
-        <SystemStatusPanel status={systemStatus} checkedAt={systemStatusCheckedAt} />
+        <div className="flex flex-col gap-4 min-h-0 overflow-auto">
+          <SystemStatusPanel status={systemStatus} checkedAt={systemStatusCheckedAt} />
+
+          {/* Directly below System Status (2026-10-22). */}
+          <DataImportPanel
+            csvUploadProgress={csvUploadProgress}
+            gpxUploadProgress={gpxUploadProgress}
+            onCsvFileSelected={onCsvFileSelected}
+            onGpxFilesSelected={onGpxFilesSelected}
+            lastImport={lastImport}
+            onViewDetails={onViewImportDetails}
+          />
+        </div>
       </div>
 
     </div>

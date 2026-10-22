@@ -14,6 +14,18 @@ const listeners = new Set<() => void>();
 const notify = () => listeners.forEach(fn => fn());
 
 export function initPwaInstall() {
+  // Mobile is blocked (main.tsx renders MobileBlockedScreen), so it must not
+  // be installable either. index.html already dropped the manifest link;
+  // also remove any service worker a phone registered before the block.
+  if (isMobileDevice()) {
+    if ("serviceWorker" in navigator) {
+      navigator.serviceWorker.getRegistrations()
+        .then(regs => regs.forEach(r => r.unregister()))
+        .catch(() => { /* nothing to clean up */ });
+    }
+    return;
+  }
+
   window.addEventListener("beforeinstallprompt", e => {
     // Stops Chrome's own mini-infobar -- we show our own prompt after login.
     e.preventDefault();
@@ -65,4 +77,15 @@ export function isIos(): boolean {
   const ua = navigator.userAgent;
   // iPadOS 13+ reports itself as a Mac -- touch support gives it away.
   return /iPad|iPhone|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+}
+
+// Phones and tablets (2026-10-13, per Cristian): AgriSureGIS is desktop-only.
+// Goes by the reported device, not the window width, so a narrowed desktop
+// window is never blocked. Android tablets match "Android"; iPads via isIos().
+// Keep the regex in step with the inline script in index.html.
+export function isMobileDevice(): boolean {
+  const uaData = (navigator as Navigator & { userAgentData?: { mobile?: boolean } }).userAgentData;
+  if (uaData?.mobile) return true;
+  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile|Silk|Kindle/i.test(navigator.userAgent)
+    || isIos();
 }

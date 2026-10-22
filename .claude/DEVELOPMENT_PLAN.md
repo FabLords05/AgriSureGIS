@@ -77,7 +77,7 @@ list and concludes a feature doesn't exist.
 
 ## Known gaps
 
-- **Database backup/restore** has UI (`DatabaseBackupModule.tsx`) but **no backend endpoint** — it is Fabio's `pg_dump`/`pg_restore` work outside the app.
+- **Database restore** is not in-app. Backups (`pg_dump` → Google Drive) and Archive & Clear (into the read-only `agrisure_archive` DB) are real as of 2026-10-22. Restoring a dump is Fabio's manual `pg_restore`.
 - **`panicle initiation/booting`** is deliberately left with `crop_stage_no = NULL` in `tbl_crop_stage_mapping`, so those rows ingest and never pay out. This waits on PCIC supplying a days-per-stage table, not on code. Do **not** hard-code a day threshold without PCIC confirming it (day 66 was floated and explicitly rejected as a guess). The row's `notes` column says this too; enabling it is one `UPDATE`.
 - **`PAGASA_SCRAPE_URL`** is in `.env.example` and `ENV_GUIDE.md` but nothing reads it — the index URL is hardcoded in `bulletin_parser.py`.
 - **The `/api/bulletins/settings` polling interval** is persisted and reschedulable, but app startup uses `scheduler.FIXED_POLL_INTERVAL_MINUTES` instead.

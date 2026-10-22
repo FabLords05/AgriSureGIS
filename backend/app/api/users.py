@@ -1,14 +1,15 @@
 from datetime import datetime, timezone
 
 import bcrypt
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 
-from app.core.activity_log import record_activity
+from app.core.activity_log import note_activity, record_activity
 from app.core.database import get_db
 from app.core.security import create_access_token, get_current_user, require_admin
 from app.models.models import SystemUser
+from app.services.email_alert_service import send_account_status_email
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -33,19 +34,19 @@ def _verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
-# Only two roles actually mean anything anywhere else in this app (Login's
-# role toggle, Registration's own restriction to GIS Specialist/System
-# Administrator) -- kept in sync with those, not the UI prototype's wider
-# 4-option dropdown (Data Analyst/Field Supervisor), which had no backing
-# permission logic anywhere in the app.
-ALLOWED_ROLES = {"GIS Specialist", "System Administrator"}
+# The only role this API creates, lists, or edits (2026-10-22). System
+# Administrator accounts are provisioned by the superuser outside the app
+# (seed_system_users.py / SQL), so admins manage GIS Specialists only: they
+# can't see, create, promote to, or edit an admin account, and public
+# registration can't request one.
+MANAGED_ROLE = "GIS Specialist"
 
 
 class RegisterRequest(BaseModel):
     full_name: str = Field(..., min_length=1)
     email: EmailStr
     employee_id: str = Field(..., min_length=1)
-    role: str
+    role: str = MANAGED_ROLE
     password: str = Field(..., min_length=8)
     division: str | None = None
 
@@ -58,7 +59,7 @@ class LoginRequest(BaseModel):
 class CreateUserRequest(BaseModel):
     name: str = Field(..., min_length=1)
     email: EmailStr
-    role: str
+    role: str = MANAGED_ROLE
     password: str = Field(..., min_length=8)
 
 
@@ -102,9 +103,33 @@ def _user_to_dict(u: SystemUser) -> dict:
     }
 
 
+def _full_name(u: SystemUser) -> str:
+    return f"{u.firstname} {u.lastname}".strip()
+
+
+def _account_changes(user: SystemUser, payload) -> list[str]:
+    """Before -> after phrases for the Activity Log remarks, computed BEFORE the
+    payload is applied. Passwords are only ever named, never logged."""
+    changes = []
+    fields = payload.model_fields_set
+    if "name" in fields and payload.name is not None and payload.name.strip() != _full_name(user):
+        changes.append(f'name "{_full_name(user)}" → "{payload.name.strip()}"')
+    if "email" in fields and payload.email is not None and payload.email != user.email:
+        changes.append(f"email {user.email} → {payload.email}")
+    if getattr(payload, "role", None) is not None and payload.role != user.role:
+        changes.append(f"role {user.role} → {payload.role}")
+    if getattr(payload, "is_active", None) is not None and payload.is_active != user.is_active:
+        changes.append("account activated" if payload.is_active else "account deactivated")
+    if payload.session_timeout_minutes is not None and payload.session_timeout_minutes != user.session_timeout_minutes:
+        changes.append(f"session timeout {user.session_timeout_minutes} → {payload.session_timeout_minutes} min")
+    if getattr(payload, "new_password", None) is not None:
+        changes.append("password changed")
+    return changes
+
+
 def _require_role(role: str) -> None:
-    if role not in ALLOWED_ROLES:
-        raise HTTPException(status_code=400, detail=f"Role must be one of: {', '.join(sorted(ALLOWED_ROLES))}")
+    if role != MANAGED_ROLE:
+        raise HTTPException(status_code=400, detail=f"Role must be {MANAGED_ROLE}.")
 
 
 @router.post("/register")
@@ -114,6 +139,10 @@ def register_user(payload: RegisterRequest, db: Session = Depends(get_db)):
     creates a pending account (is_active=False) awaiting administrator
     approval via the Calibration & Settings User Account Management panel.
     """
+    note_activity(
+        f"Access request from {payload.full_name.strip()} <{payload.email}> "
+        f"(employee ID {payload.employee_id}, role {payload.role})."
+    )
     _require_role(payload.role)
 
     firstname, lastname = _split_name(payload.full_name)
@@ -133,6 +162,11 @@ def register_user(payload: RegisterRequest, db: Session = Depends(get_db)):
         db.rollback()
         raise HTTPException(status_code=409, detail="An account with this employee ID or email already exists.")
     db.refresh(user)
+    note_activity(
+        f"Access request from {payload.full_name.strip()} <{payload.email}> "
+        f"(employee ID {payload.employee_id}, role {payload.role}) submitted; "
+        "account created inactive, pending administrator approval."
+    )
     return {"status": "success", "message": "Registration submitted. Pending administrator approval."}
 
 
@@ -150,15 +184,26 @@ def login_user(payload: LoginRequest, db: Session = Depends(get_db)):
         # user_id logged as None on a wrong-email/wrong-password attempt (no
         # confirmed identity), or the real one on a right-email-wrong-password
         # attempt -- both worth an audit trail entry either way.
-        record_activity(db, user.user_id if user else None, "LOGIN", "/api/users/login", 401)
+        reason = "wrong password" if user else "no account with this email"
+        record_activity(
+            db, user.user_id if user else None, "LOGIN", "/api/users/login", 401,
+            f"Failed login attempt for {payload.email}: {reason}.",
+        )
         raise HTTPException(status_code=401, detail="Invalid credentials.")
     if not user.is_active:
-        record_activity(db, user.user_id, "LOGIN", "/api/users/login", 403)
+        record_activity(
+            db, user.user_id, "LOGIN", "/api/users/login", 403,
+            f"Login blocked for {payload.email}: the account is not active "
+            "(pending administrator approval or deactivated).",
+        )
         raise HTTPException(status_code=403, detail="This account is pending administrator approval.")
 
     user.last_login = datetime.now(timezone.utc)
     db.commit()
-    record_activity(db, user.user_id, "LOGIN", "/api/users/login", 200)
+    record_activity(
+        db, user.user_id, "LOGIN", "/api/users/login", 200,
+        f"Logged in as {_full_name(user)} ({user.role}).",
+    )
     return {
         "status": "success",
         "token": create_access_token(user),
@@ -180,20 +225,29 @@ def logout_user(db: Session = Depends(get_db), current_user: SystemUser = Depend
     purely so a LOGOUT event gets recorded before the frontend clears its
     local storage.
     """
-    record_activity(db, current_user.user_id, "LOGOUT", "/api/users/logout", 200)
+    record_activity(
+        db, current_user.user_id, "LOGOUT", "/api/users/logout", 200,
+        f"{_full_name(current_user)} logged out.",
+    )
     return {"status": "success"}
 
 
 @router.get("/")
 def list_users(db: Session = Depends(get_db), _admin: SystemUser = Depends(require_admin)):
-    """Backs Calibration & Settings' User Account Management table (admin-exclusive in the UI)."""
-    users = db.query(SystemUser).order_by(SystemUser.user_id.asc()).all()
+    """Backs the User Management tab -- GIS Specialist accounts only, never admins."""
+    users = (
+        db.query(SystemUser)
+        .filter(SystemUser.role == MANAGED_ROLE)
+        .order_by(SystemUser.user_id.asc())
+        .all()
+    )
     return {"status": "success", "data": [_user_to_dict(u) for u in users]}
 
 
 @router.post("/")
 def create_user(payload: CreateUserRequest, db: Session = Depends(get_db), _admin: SystemUser = Depends(require_admin)):
     """Admin-created account (Calibration's "Add User") -- active immediately, no approval step needed."""
+    note_activity(f"Create {payload.role} account for {payload.name.strip()} <{payload.email}>.")
     _require_role(payload.role)
 
     firstname, lastname = _split_name(payload.name)
@@ -216,6 +270,7 @@ def create_user(payload: CreateUserRequest, db: Session = Depends(get_db), _admi
         db.rollback()
         raise HTTPException(status_code=409, detail="An account with this email already exists.")
     db.refresh(user)
+    note_activity(f"Created {user.role} account for {_full_name(user)} <{user.email}>; active immediately.")
     return {"status": "success", "data": _user_to_dict(user)}
 
 
@@ -228,6 +283,8 @@ def update_me(payload: UpdateMeRequest, db: Session = Depends(get_db), current_u
     as a static path first, not swallowed by the int-typed {user_id} route.
     """
     user = current_user
+    changes = _account_changes(user, payload)
+    note_activity(f"Update own account ({'; '.join(changes) or 'no changes'}).")
 
     if payload.name is not None:
         user.firstname, user.lastname = _split_name(payload.name)
@@ -247,15 +304,34 @@ def update_me(payload: UpdateMeRequest, db: Session = Depends(get_db), current_u
         db.rollback()
         raise HTTPException(status_code=409, detail="An account with this email already exists.")
     db.refresh(user)
+    note_activity(f"Updated own account: {'; '.join(changes) or 'no changes'}.")
     return {"status": "success", "data": _user_to_dict(user)}
 
 
 @router.patch("/{user_id}")
-def update_user(user_id: int, payload: UpdateUserRequest, db: Session = Depends(get_db), _admin: SystemUser = Depends(require_admin)):
-    """Admin edit / activate / deactivate (Calibration's Edit modal + Deactivate button)."""
+def update_user(
+    user_id: int,
+    payload: UpdateUserRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    _admin: SystemUser = Depends(require_admin),
+):
+    """
+    Admin edit / activate / deactivate (User Management's Edit modal +
+    Deactivate button), GIS Specialist accounts only. When is_active actually changes, the affected user is emailed
+    about it (any role) after the response is sent, so the admin's save never
+    waits on the mail server.
+    """
+    note_activity(f"Update user account #{user_id}.")
     user = db.query(SystemUser).filter(SystemUser.user_id == user_id).first()
-    if not user:
+    # Admin accounts answer 404 like a missing one -- they're outside this
+    # API's scope, and that doesn't confirm to the caller that one exists.
+    if not user or user.role != MANAGED_ROLE:
         raise HTTPException(status_code=404, detail="User not found.")
+    was_active = user.is_active
+    target = f"{_full_name(user)} <{user.email}>"
+    changes = _account_changes(user, payload)
+    note_activity(f"Update user account {target} ({'; '.join(changes) or 'no changes'}).")
 
     if payload.role is not None:
         _require_role(payload.role)
@@ -277,4 +353,14 @@ def update_user(user_id: int, payload: UpdateUserRequest, db: Session = Depends(
         db.rollback()
         raise HTTPException(status_code=409, detail="An account with this email already exists.")
     db.refresh(user)
+
+    if user.is_active != was_active:
+        background_tasks.add_task(
+            send_account_status_email,
+            user.email,
+            f"{user.firstname} {user.lastname}".strip(),
+            user.is_active,
+        )
+        changes.append(f"{'activation' if user.is_active else 'deactivation'} email sent to {user.email}")
+    note_activity(f"Updated user account {target}: {'; '.join(changes) or 'no changes'}.")
     return {"status": "success", "data": _user_to_dict(user)}

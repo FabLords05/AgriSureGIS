@@ -32,6 +32,12 @@ class GpxParserService:
             raise ValueError(
                 "GPX file must contain at least 3 track points to form a farm boundary polygon."
             )
+        if any(not (-180 <= lon <= 180 and -90 <= lat <= 90) for lon, lat in points):
+            raise ValueError("GPX file has coordinates outside valid longitude/latitude ranges.")
+        # A walk recorded while standing still (every point the same, or two
+        # spots) can't enclose an area -- reject rather than store a sliver.
+        if len(set(points)) < 3:
+            raise ValueError("GPX track has fewer than 3 distinct points; it does not outline a farm.")
 
         if points[0] != points[-1]:
             points.append(points[0])

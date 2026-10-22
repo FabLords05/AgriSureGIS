@@ -1,5 +1,7 @@
 import io
+import logging
 import re
+import threading
 from collections.abc import Iterable
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -11,10 +13,13 @@ from pydantic import BaseModel
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
-from app.core.database import get_db
+from app.core import assessment_jobs
+from app.core.activity_log import note_activity, plural, record_activity
+from app.core.database import SessionLocal, get_db
 from app.core.farmer_name import format_surname_first
 from app.core.farms_cache import invalidate_farms_cache
 from app.core.security import get_current_user
+from app.models.models import SystemUser
 from app.models.models import AdminBoundary, AreaExposureSummary, FarmerProfile, InsuranceRecord, RiskAssessment, Typhoon
 from app.models.models import (
     AdminBoundary,
@@ -29,6 +34,7 @@ from app.models.models import (
 from app.services.assessment_service import AssessmentService
 
 router = APIRouter(prefix="/assessments", tags=["assessments"], dependencies=[Depends(get_current_user)])
+logger = logging.getLogger(__name__)
 
 
 class CalculateAssessmentsRequest(BaseModel):
@@ -36,37 +42,106 @@ class CalculateAssessmentsRequest(BaseModel):
     bulletin_id: int
 
 
-@router.post("/calculate")
-def calculate_assessments(payload: CalculateAssessmentsRequest, db: Session = Depends(get_db)):
+def _run_assessment_job(job_id: str, typhoon_id: int, bulletin_id: int, typhoon_label: str, user_id: int | None) -> None:
     """
-    Computes exposure hours, checks payout eligibility (wind signal >= 2, exposure
-    >= 6h, crop stage in Booting/Flowering/Maturity), and calculates final indemnity
-    payments for every active policy in the typhoon-affected area.
+    The calculation itself, off the request thread (2026-10-22) so the
+    frontend can poll real stage-by-stage progress. Own DB session -- the
+    request's is closed as soon as POST /calculate returns. Its outcome gets
+    its own ASSESS Activity Log entry, like a CSV job's INGEST entry.
     """
+    progress = assessment_jobs.JobProgress(job_id)
+    db = SessionLocal()
     try:
-        results = AssessmentService.calculate_for_bulletin(payload.typhoon_id, payload.bulletin_id, db)
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        results = AssessmentService.calculate_for_bulletin(typhoon_id, bulletin_id, db, progress=progress)
+        total_payout = sum(float(r.final_indemnity_payment or 0) for r in results)
+        with_payout = sum(1 for r in results if (r.final_indemnity_payment or 0) > 0)
+        progress.done({
+            "assessments_computed": len(results),
+            "with_payout": with_payout,
+            "total_indemnity": round(total_payout, 2),
+        })
+        status_code = 200
+        remarks = (
+            f"Calculated assessments for {typhoon_label} (TCB #{bulletin_id}): "
+            f"{plural(len(results), 'policy', 'policies')} assessed, {with_payout:,} with a payout, "
+            f"total indemnity ₱{total_payout:,.2f}."
+        )
+    except Exception as exc:
+        db.rollback()
+        logger.exception("Assessment job %s failed", job_id)
+        message = str(exc) if isinstance(exc, ValueError) else f"Assessment calculation failed: {exc}"
+        progress.fail(message)
+        status_code = 404 if isinstance(exc, ValueError) else 500
+        remarks = f"Assessment calculation for {typhoon_label} (TCB #{bulletin_id}) failed: {message}"
+    finally:
+        db.close()
 
-    return {
-        "status": "success",
-        "typhoon_id": payload.typhoon_id,
-        "bulletin_id": payload.bulletin_id,
-        "assessments_computed": len(results),
-        "assessments": [
-            {
-                "assessment_id": r.assessment_id,
-                "insurance_records_id": r.insurance_records_id,
-                "crop_stage": r.crop_stage,
-                "period_of_exposure": r.period_of_exposure,
-                "wind_velocity": r.wind_velocity,
-                "indemnity_factor": float(r.indemnity_factor) if r.indemnity_factor is not None else None,
-                "estimated_damage": float(r.estimated_damage),
-                "final_indemnity_payment": float(r.final_indemnity_payment),
-            }
-            for r in results
-        ],
-    }
+    log_db = SessionLocal()
+    try:
+        record_activity(log_db, user_id, "ASSESS", "/api/assessments/calculate", status_code, remarks)
+    finally:
+        log_db.close()
+
+
+@router.post("/calculate")
+def calculate_assessments(
+    payload: CalculateAssessmentsRequest,
+    db: Session = Depends(get_db),
+    current_user: SystemUser = Depends(get_current_user),
+):
+    """
+    Starts computing exposure hours, payout eligibility (wind signal >= 2, 6+
+    hours under the max signal, crop stage in Booting/Flowering/Maturity) and
+    final indemnity payments for every active policy in the typhoon-affected
+    area. Returns at once with a job_id; poll GET /assessments/jobs/{job_id}
+    for progress. A run already in progress for the same typhoon is returned
+    instead of starting a second one.
+    """
+    typhoon = db.get(Typhoon, payload.typhoon_id)
+    typhoon_label = typhoon.name if typhoon else f"typhoon #{payload.typhoon_id}"
+    note_activity(f"Calculate assessments for {typhoon_label} (TCB #{payload.bulletin_id}).")
+    bulletin = (
+        db.query(TropicalCycloneBulletin)
+        .filter(
+            TropicalCycloneBulletin.tcb_id == payload.bulletin_id,
+            TropicalCycloneBulletin.typhoon_id == payload.typhoon_id,
+        )
+        .first()
+    )
+    if bulletin is None:
+        raise HTTPException(status_code=404, detail="Bulletin not found for this typhoon.")
+
+    job, created = assessment_jobs.start_job(payload.typhoon_id, payload.bulletin_id, "manual")
+    if created:
+        threading.Thread(
+            target=_run_assessment_job,
+            args=(job.job_id, payload.typhoon_id, payload.bulletin_id, typhoon_label, current_user.user_id),
+            daemon=True,
+        ).start()
+        note_activity(
+            f"Started assessment calculation for {typhoon_label} (TCB #{payload.bulletin_id}) -- "
+            "see the ASSESS entry for the outcome."
+        )
+    else:
+        note_activity(f"Assessment calculation for {typhoon_label} already running; joined the existing run.")
+
+    return {"status": "processing", "job_id": job.job_id, "already_running": not created}
+
+
+@router.get("/jobs/active")
+def get_active_assessment_job(typhoon_id: int = Query(...)):
+    """The running assessment job for this typhoon, else its latest finished
+    one (null if none since the backend started) -- lets a refreshed page
+    pick a running calculation's progress back up."""
+    return {"job": assessment_jobs.latest_job_for_typhoon(typhoon_id)}
+
+
+@router.get("/jobs/{job_id}")
+def get_assessment_job(job_id: str):
+    job = assessment_jobs.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Unknown assessment job (the backend may have restarted).")
+    return job
 
 
 @router.get("/")
@@ -380,6 +455,11 @@ def export_assessments_csv(
         _typhoon_names_for_summaries({a.summary_id for a in assessments if a.summary_id}, db),
         "PCIC_Payout",
     )
+    total_payout = sum(float(a.final_indemnity_payment or 0) for a in assessments)
+    note_activity(
+        f'Exported PCIC payout CSV "{filename}": {plural(len(rows), "assessment row")}'
+        f"{' (all typhoons)' if typhoon_id is None else ''}, total indemnity ₱{total_payout:,.2f}."
+    )
 
     return StreamingResponse(
         iter([buffer.getvalue()]),
@@ -598,7 +678,7 @@ def export_assessments_pabs_csv(db: Session = Depends(get_db)):
     it. POST rather than GET because exporting now changes data.
     """
     rows = _build_pabs_rows(db)
-    AssessmentService.finalize_exported_usage(
+    newly_locked = AssessmentService.finalize_exported_usage(
         [
             (row["insurance_records_id"], row["typhoon_id"], row["assessment_id"])
             for row in rows
@@ -620,6 +700,11 @@ def export_assessments_pabs_csv(db: Session = Depends(get_db)):
 
     filename = _export_filename(
         (row["TYPHOON_NAME"] for row in rows), "Final_Indemnity_Payout"
+    )
+    total_payout = sum(float(row["final_indemnity_payment"] or 0) for row in rows)
+    note_activity(
+        f'Exported final PABS indemnity CSV "{filename}": {plural(len(rows), "row")}, '
+        f"total indemnity ₱{total_payout:,.2f}; {plural(newly_locked or 0, 'policy', 'policies')} newly locked as used."
     )
 
     return StreamingResponse(

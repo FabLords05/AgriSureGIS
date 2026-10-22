@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.assessment_jobs import NullProgress
 from app.core.indemnity_calc import ParametricAssessment
 from app.models.models import (
     AdminBoundary,
@@ -12,11 +13,13 @@ from app.models.models import (
     RiskAssessment,
     TropicalCycloneBulletin,
 )
-from app.services.exposure_calculator import ExposureCalculatorService
+from app.services.exposure_calculator import (
+    MIN_ELIGIBLE_HOURS,
+    MIN_ELIGIBLE_SIGNAL,
+    ExposureCalculatorService,
+)
 
 ELIGIBLE_CROP_STAGES = {1, 2, 3}  # Booting, Flowering, Maturity
-MIN_ELIGIBLE_SIGNAL = 2
-MIN_ELIGIBLE_HOURS = 6
 
 
 class AssessmentService:
@@ -35,7 +38,17 @@ class AssessmentService:
     """
 
     @classmethod
-    def calculate_for_bulletin(cls, typhoon_id: int, bulletin_id: int, db: Session) -> list[RiskAssessment]:
+    def calculate_for_bulletin(cls, typhoon_id: int, bulletin_id: int, db: Session, progress=None) -> list[RiskAssessment]:
+        """
+        `progress` (app.core.assessment_jobs.JobProgress) receives each stage
+        as it starts -- Data Preparation, Exposure Calculation, Spatial
+        Analysis, Indemnity Calculation, Completion -- with real done/total
+        counts inside the per-area and per-policy loops. Nothing is committed
+        before Completion except the exposure summaries, which
+        ExposureCalculatorService commits itself.
+        """
+        progress = progress or NullProgress()
+        progress.stage("data_preparation")
         bulletin = (
             db.query(TropicalCycloneBulletin)
             .filter(
@@ -47,11 +60,15 @@ class AssessmentService:
         if bulletin is None:
             raise ValueError("Bulletin not found for this typhoon.")
 
+        progress.stage("exposure_calculation")
         summaries = ExposureCalculatorService.compute_for_typhoon(typhoon_id, db)
+        # Payout hours = hours accumulated under the area's Max Signal (PCIC's
+        # "SN3_12" = Signal 3 for 12h), not Total Exposure across all levels
+        # (2026-10-22 decision; see ExposureCalculatorService).
         eligible_summaries = [
             s
             for s in summaries
-            if s.max_signal_level >= MIN_ELIGIBLE_SIGNAL and s.total_exposure_hours >= MIN_ELIGIBLE_HOURS
+            if s.max_signal_level >= MIN_ELIGIBLE_SIGNAL and (s.payout_hours or 0) >= MIN_ELIGIBLE_HOURS
         ]
 
         assessment = ParametricAssessment(db)
@@ -66,7 +83,10 @@ class AssessmentService:
             InsuranceUsage.finalized_at.isnot(None),
         )
 
-        for summary in eligible_summaries:
+        # Spatial Analysis: the insured farms inside each exposed municipality.
+        progress.stage("spatial_analysis", total=len(eligible_summaries))
+        matched: list[tuple] = []
+        for area_index, summary in enumerate(eligible_summaries, start=1):
             # Matched on the summary's (province, municipality), not its
             # boundary_id: a farm's boundary is its barangay, and the summary's
             # boundary_id is just one barangay row ExposureCalculatorService
@@ -85,63 +105,68 @@ class AssessmentService:
                 )
                 .all()
             )
+            matched.extend((summary, insurance) for insurance in insurance_records)
+            progress.advance(area_index)
 
-            for insurance in insurance_records:
-                prior = (
-                    db.query(RiskAssessment)
-                    .filter(RiskAssessment.insurance_records_id == insurance.insurance_records_id)
-                    .order_by(RiskAssessment.assessment_date.desc())
-                    .first()
+        progress.stage("indemnity_calculation", total=len(matched))
+        for policy_index, (summary, insurance) in enumerate(matched, start=1):
+            progress.advance(policy_index)
+            prior = (
+                db.query(RiskAssessment)
+                .filter(RiskAssessment.insurance_records_id == insurance.insurance_records_id)
+                .order_by(RiskAssessment.assessment_date.desc())
+                .first()
+            )
+            if prior is None or prior.crop_stage_no not in ELIGIBLE_CROP_STAGES:
+                continue
+
+            exposure_hours = int(summary.payout_hours)
+            # The seed row's own PCIC group, resolved at ingestion from the CSV's
+            # crop-stage column. Carried explicitly rather than derived from
+            # crop_stage_no, which cannot distinguish Milking (Late Reproductive)
+            # from Flowering (Reproductive) -- both are crop_stage_no 2.
+            stage_group = getattr(prior, "stage_group", None)
+            rule = assessment.get_matrix_rule(
+                prior.crop_stage_no, summary.max_signal_level, exposure_hours, stage_group
+            )
+            if rule is None:
+                continue
+
+            amount_cover = float(insurance.amount_cover)
+            payout = assessment.calculate_final_payout(
+                amount_cover, prior.crop_stage_no, summary.max_signal_level, exposure_hours, stage_group
+            )
+            estimated_damage = round(amount_cover * float(rule.estimated_yield_loss) / 100, 2)
+
+            existing = (
+                db.query(RiskAssessment)
+                .filter(
+                    RiskAssessment.insurance_records_id == insurance.insurance_records_id,
+                    RiskAssessment.summary_id == summary.summary_id,
                 )
-                if prior is None or prior.crop_stage_no not in ELIGIBLE_CROP_STAGES:
-                    continue
-
-                exposure_hours = int(summary.total_exposure_hours)
-                # The seed row's own PCIC group, resolved at ingestion from the CSV's
-                # crop-stage column. Carried explicitly rather than derived from
-                # crop_stage_no, which cannot distinguish Milking (Late Reproductive)
-                # from Flowering (Reproductive) -- both are crop_stage_no 2.
-                stage_group = getattr(prior, "stage_group", None)
-                rule = assessment.get_matrix_rule(
-                    prior.crop_stage_no, summary.max_signal_level, exposure_hours, stage_group
+                .first()
+            )
+            if existing is None:
+                existing = RiskAssessment(
+                    insurance_records_id=insurance.insurance_records_id,
+                    summary_id=summary.summary_id,
                 )
-                if rule is None:
-                    continue
+                db.add(existing)
 
-                amount_cover = float(insurance.amount_cover)
-                payout = assessment.calculate_final_payout(
-                    amount_cover, prior.crop_stage_no, summary.max_signal_level, exposure_hours, stage_group
-                )
-                estimated_damage = round(amount_cover * float(rule.estimated_yield_loss) / 100, 2)
+            existing.matrix_id = rule.matrix_id
+            existing.indemnity_matrix_id = rule.indemnity_matrix_id
+            existing.crop_stage_no = prior.crop_stage_no
+            existing.crop_stage = prior.crop_stage
+            existing.stage_group = stage_group
+            existing.period_of_exposure = exposure_hours
+            existing.wind_velocity = summary.max_signal_level
+            existing.indemnity_factor = rule.indemnity_factor
+            existing.estimated_damage = estimated_damage
+            existing.final_indemnity_payment = payout
 
-                existing = (
-                    db.query(RiskAssessment)
-                    .filter(
-                        RiskAssessment.insurance_records_id == insurance.insurance_records_id,
-                        RiskAssessment.summary_id == summary.summary_id,
-                    )
-                    .first()
-                )
-                if existing is None:
-                    existing = RiskAssessment(
-                        insurance_records_id=insurance.insurance_records_id,
-                        summary_id=summary.summary_id,
-                    )
-                    db.add(existing)
+            results.append(existing)
 
-                existing.matrix_id = rule.matrix_id
-                existing.indemnity_matrix_id = rule.indemnity_matrix_id
-                existing.crop_stage_no = prior.crop_stage_no
-                existing.crop_stage = prior.crop_stage
-                existing.stage_group = stage_group
-                existing.period_of_exposure = exposure_hours
-                existing.wind_velocity = summary.max_signal_level
-                existing.indemnity_factor = rule.indemnity_factor
-                existing.estimated_damage = estimated_damage
-                existing.final_indemnity_payment = payout
-
-                results.append(existing)
-
+        progress.stage("completion")
         db.commit()
         for result in results:
             db.refresh(result)

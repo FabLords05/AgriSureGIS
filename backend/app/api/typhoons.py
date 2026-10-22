@@ -4,6 +4,7 @@ from shapely.geometry import Point, Polygon
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from app.core import assessment_jobs
 from app.core.database import get_db
 from app.core.security import get_current_user
 from app.models.models import (
@@ -145,6 +146,11 @@ def get_typhoon_progress(typhoon_id: int, db: Session = Depends(get_db)):
     assessed_farms only counts RiskAssessment rows tied to this typhoon's
     exposure summaries (summary_id), which leaves out the CSV-seeded rows
     (summary_id NULL) that only carry crop stage.
+
+    active_job (2026-10-22) is the typhoon's running assessment calculation,
+    else its latest finished one since the backend started (null if none):
+    stage-by-stage status, so the strip can show "Assessment calculated" as
+    processing / failed instead of only done-or-not.
     """
     typhoon = db.query(Typhoon).filter(Typhoon.typhoon_id == typhoon_id).first()
     if typhoon is None:
@@ -193,4 +199,5 @@ def get_typhoon_progress(typhoon_id: int, db: Session = Depends(get_db)):
         "assessed_farms": assessed_farms or 0,
         "exported_policies": exported_policies,
         "exported_at": exported_at,
+        "active_job": assessment_jobs.latest_job_for_typhoon(typhoon.typhoon_id),
     }

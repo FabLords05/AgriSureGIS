@@ -34,7 +34,8 @@ permission logic and is not implemented.
    - Configures user accounts and permissions (approve pending registrations, create/edit/activate/deactivate accounts, set per-account session timeouts).
    - Reviews the Activity Log.
    - Calibration of system parameters (e.g., the TCB polling interval).
-   - Manages database backups and restores — **outside the app**: there is no backup endpoint, only `pg_dump`/`pg_restore` in Fabio's own terminal.
+   - Runs and schedules database backups in-app (`pg_dump` → Google Drive, 2026-10-22) and views read-only archives of past typhoons' records. Restores stay **outside the app**, as `pg_restore` in Fabio's own terminal.
+   - Archive & Clear (also open to GIS Specialists, from Account Settings): once every assessed typhoon is 7 days past its last bulletin, the uploaded PABS records move to the read-only archive database.
 
 Role enforcement is server-side: `require_admin` guards the admin routes, so an
 admin-only surface is not merely hidden in the UI.

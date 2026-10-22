@@ -6,6 +6,7 @@ import { LoggedOutNotice, LogoutReason } from "./components/LoggedOutNotice";
 import { InstallAppPrompt } from "./components/InstallAppPrompt";
 import { Header, ModuleId } from "./components/Header";
 import { MonitoringModule } from "./components/MonitoringModule";
+import { ImportSummary } from "./components/DataImportPanel";
 import { SpatialAnalysisModule } from "./components/SpatialAnalysisModule";
 import { AssessmentModule } from "./components/AssessmentModule";
 import { CalibrationModule } from "./components/CalibrationModule";
@@ -78,9 +79,10 @@ function UploadFailuresModal({ failures, onClose }: { failures: string[]; onClos
 }
 
 export default function App() {
-  // Lazy initializer reads localStorage synchronously on first render, so a
+  // Lazy initializer reads sessionStorage synchronously on first render, so a
   // refresh never flashes the login screen before rehydrating -- the user
-  // stays logged in until they explicitly log out (see handleLogout below).
+  // stays logged in until they log out (see handleLogout below), go idle, or
+  // close the app (authStorage.ts, 2026-10-22).
   const [currentUser, setCurrentUser]     = useState<CurrentUser | null>(loadPersistedUser);
   // System Administrators only ever see the Calibration/Admin panel (see
   // Header.tsx's ADMIN_MODULES) -- default there directly instead of
@@ -123,15 +125,14 @@ export default function App() {
   // instead, and only clears back to null (reaching LoginScreen) once the
   // user clicks through it.
   const [logoutReason, setLogoutReason]   = useState<LogoutReason | null>(null);
-  const [coverageRatePerHa, setCoverageRatePerHa] = useState(25000);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [selectedBulletin, setSelectedBulletin] = useState<Bulletin | null>(null);
   const seenMaxTcbId = useRef<number | null>(null);
 
   // CSV/GPX upload progress + the failure-details modal that backs it --
-  // owned here (not in SpatialAnalysisModule) for the same reason farmsData
-  // is owned here: that module is conditionally mounted (only while
-  // activeModule === "spatial"), so a local-state polling loop would freeze
+  // owned here (not in a module) for the same reason farmsData is owned
+  // here: modules are conditionally mounted (the upload buttons now live on
+  // the Main Dashboard, 2026-10-22), so a local-state polling loop would freeze
   // -- and its completion toast could be missed entirely -- the moment the
   // user switched to another module tab before the upload finished
   // (2026-08-20, per Fabio: "there is no way to tell user is it done or
@@ -140,6 +141,9 @@ export default function App() {
   const [gpxUploadProgress, setGpxUploadProgress] = useState<{ current: number; total: number } | null>(null);
   const [uploadFailureDetails, setUploadFailureDetails] = useState<string[] | null>(null);
   const [showUploadDetails, setShowUploadDetails] = useState(false);
+  // Shown in the Main Dashboard's Data Import panel (2026-10-22).
+  const [lastImport, setLastImport] = useState<ImportSummary | null>(null);
+  const showUploadFailures = (failures: string[]) => { setUploadFailureDetails(failures); setShowUploadDetails(true); };
 
   // SpatialAnalysisModule's Farm Records table/map filters -- owned here
   // (not locally in that module) because useFarmsData is owned here too:
@@ -214,7 +218,7 @@ export default function App() {
   };
 
   // Account Settings tab hands back the full updated row after a save --
-  // reconcile it into currentUser/localStorage immediately (no re-login
+  // reconcile it into currentUser/sessionStorage immediately (no re-login
   // needed) so the idle-timeout effect below picks up a changed session
   // timeout right away, and the Header user menu reflects a changed
   // name/email without a refresh.
@@ -273,11 +277,24 @@ export default function App() {
           const rowFailures = (result.failures ?? []).map(
             f => `Row ${f.row}${f.policy_no ? ` (policy ${f.policy_no})` : ""}: ${f.error}`,
           );
+          setLastImport({
+            kind: "CSV",
+            finishedAt: new Date().toLocaleTimeString("en-PH", { hour: "2-digit", minute: "2-digit" }) + " PHT",
+            ok: result.rows_failed === 0,
+            message: result.message,
+            counts: [
+              ["Inserted", result.rows_inserted],
+              ["Duplicates", result.rows_duplicate ?? 0],
+              ["Skipped", result.rows_skipped - (result.rows_duplicate ?? 0)],
+              ["Failed", result.rows_failed],
+            ],
+            failures: rowFailures,
+          });
           if (rowFailures.length > 0) {
             toast.warning(message, {
               action: {
                 label: "View details",
-                onClick: () => { setUploadFailureDetails(rowFailures); setShowUploadDetails(true); },
+                onClick: () => showUploadFailures(rowFailures),
               },
             });
           } else {
@@ -296,6 +313,11 @@ export default function App() {
         }
         if (status.status === "error") {
           const message = status.error ?? "CSV upload failed.";
+          setLastImport({
+            kind: "CSV",
+            finishedAt: new Date().toLocaleTimeString("en-PH", { hour: "2-digit", minute: "2-digit" }) + " PHT",
+            ok: false, message, counts: [], failures: [],
+          });
           toast.error(message);
           setNotifications(ns => [{
             id: `csv-upload-${job_id}`,
@@ -310,6 +332,11 @@ export default function App() {
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : "CSV upload failed.";
+      setLastImport({
+        kind: "CSV",
+        finishedAt: new Date().toLocaleTimeString("en-PH", { hour: "2-digit", minute: "2-digit" }) + " PHT",
+        ok: false, message, counts: [], failures: [],
+      });
       toast.error(message);
       setNotifications(ns => [{
         id: `csv-upload-${Date.now()}`,
@@ -363,6 +390,14 @@ export default function App() {
 
       const timestamp = new Date().toLocaleTimeString("en-PH", { hour: "2-digit", minute: "2-digit" }) + " PHT";
       const duplicateSuffix = duplicatesSkipped > 0 ? ` (${duplicatesSkipped} older duplicate walk(s) skipped)` : "";
+      setLastImport({
+        kind: "GPX",
+        finishedAt: timestamp,
+        ok: failures.length === 0,
+        message: `${files.length} file(s) processed.`,
+        counts: [["Farm boundaries updated", succeeded], ["Duplicate walks skipped", duplicatesSkipped], ["Failed", failures.length]],
+        failures,
+      });
       if (failures.length === 0) {
         const message = `Updated ${succeeded} farm boundary(ies) successfully.${duplicateSuffix}`;
         toast.success(message);
@@ -379,7 +414,7 @@ export default function App() {
         toast.error(message, {
           action: {
             label: "View details",
-            onClick: () => { setUploadFailureDetails(failures); setShowUploadDetails(true); },
+            onClick: () => showUploadFailures(failures),
           },
         });
         setNotifications(ns => [{
@@ -566,10 +601,7 @@ export default function App() {
             ) : activeModule === "activity" ? (
               <ActivityLogModule />
             ) : (
-              <CalibrationModule
-                coverageRatePerHa={coverageRatePerHa}
-                onCoverageRateChange={setCoverageRatePerHa}
-              />
+              <CalibrationModule />
             )
           ) : (
             <>
@@ -579,6 +611,12 @@ export default function App() {
                   selectedBulletin={selectedBulletin}
                   onSelectBulletin={setSelectedBulletin}
                   onNavigateToAssessment={() => setActiveModule("assessment")}
+                  csvUploadProgress={csvUploadProgress}
+                  gpxUploadProgress={gpxUploadProgress}
+                  onCsvFileSelected={handleCsvFileSelected}
+                  onGpxFilesSelected={handleGpxFilesSelected}
+                  lastImport={lastImport}
+                  onViewImportDetails={showUploadFailures}
                 />
               )}
               {activeModule === "spatial"     && (
@@ -596,10 +634,6 @@ export default function App() {
                   onFilterTyphoonIdChange={setFilterTyphoonId}
                   affectedTyphoonId={affectedTyphoonId}
                   onAffectedTyphoonIdChange={setAffectedTyphoonId}
-                  csvUploadProgress={csvUploadProgress}
-                  gpxUploadProgress={gpxUploadProgress}
-                  onCsvFileSelected={handleCsvFileSelected}
-                  onGpxFilesSelected={handleGpxFilesSelected}
                 />
               )}
               {activeModule === "assessment"  && (

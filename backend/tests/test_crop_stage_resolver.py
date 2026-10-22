@@ -6,6 +6,7 @@ from app.services.crop_stage_resolver import (
     CropStageResolver,
     coerce_stage_code,
     normalize_stage_label,
+    pcic_label_to_code,
 )
 
 
@@ -21,6 +22,9 @@ def _mapping(source_code=None, source_label=None, pcic_stage="XX", crop_stage_no
 
 # The subset of init_schema.sql's seed the assertions below actually lean on.
 SEED = [
+    _mapping(source_code=0, pcic_stage="S/T", crop_stage_no=None, stage_group="Early Vegetative"),
+    _mapping(source_code=2, pcic_stage="MxTl", crop_stage_no=None, stage_group="Late Vegetative"),
+    _mapping(source_code=5, pcic_stage="FS", crop_stage_no=2, stage_group="Reproductive"),
     _mapping(source_code=1, pcic_stage="MnTl", crop_stage_no=None, stage_group="Early Vegetative"),
     _mapping(source_code=3, pcic_stage="PI", crop_stage_no=None, stage_group="Reproductive"),
     _mapping(source_code=4, pcic_stage="BS", crop_stage_no=1, stage_group="Reproductive"),
@@ -150,6 +154,44 @@ class CropStageResolverTests(unittest.TestCase):
             resolver = CropStageResolver.load(_mock_db(rows=[]))
 
         self.assertIsNone(resolver.resolve(stage_label="Dough Stage").crop_stage_no)
+
+
+class PcicStageLabelTests(unittest.TestCase):
+    """The official Region III CSV's "Stage of Crop" is PCIC's long stage name with
+    no code column filled in -- resolved through the code it stands for."""
+
+    def setUp(self):
+        self.resolver = CropStageResolver.load(_mock_db())
+
+    def test_labels_from_the_official_file_resolve_via_their_code(self):
+        cases = {
+            "S/T Stg (EARLY VEGETATIVE)": ("S/T", None, "Early Vegetative"),
+            "Mn. Tl. Stg. (EARLY VEGETATIVE)": ("MnTl", None, "Early Vegetative"),
+            "Mx. Tl. Stg. (LATE VEGETATIVE)": ("MxTl", None, "Late Vegetative"),
+        }
+        for label, (pcic_stage, crop_stage_no, stage_group) in cases.items():
+            resolved = self.resolver.resolve(stage_label=label)
+            self.assertEqual(resolved.pcic_stage, pcic_stage, msg=label)
+            self.assertEqual(resolved.crop_stage_no, crop_stage_no, msg=label)
+            self.assertEqual(resolved.stage_group, stage_group, msg=label)
+            self.assertEqual(resolved.matched_by, "label", msg=label)
+
+    def test_assessable_labels_get_their_table_11_row(self):
+        self.assertEqual(self.resolver.resolve(stage_label="Booting Stg. (REPRODUCTIVE)").crop_stage_no, 1)
+        self.assertEqual(self.resolver.resolve(stage_label="Flowering Stg. (REPRODUCTIVE)").crop_stage_no, 2)
+        milking = self.resolver.resolve(stage_label="Milking Stg. (LATE REPRODUCTIVE)")
+        self.assertEqual((milking.crop_stage_no, milking.stage_group), (2, "Late Reproductive"))
+        self.assertEqual(self.resolver.resolve(stage_label="Dough Stg. (MATURITY)").crop_stage_no, 3)
+        self.assertEqual(self.resolver.resolve(stage_label="P. I. Stg. (REPRODUCTIVE)").pcic_stage, "PI")
+
+    def test_legacy_numbered_label_resolves_too(self):
+        self.assertEqual(pcic_label_to_code("4 - Booting Stg. (REPRODUCTIVE)"), 4)
+
+    def test_unseen_pcic_label_stays_unmapped(self):
+        # HD/YR's real labels have not appeared in any file -- never guessed.
+        with self.assertLogs("app.services.crop_stage_resolver", level="WARNING"):
+            resolved = self.resolver.resolve(stage_label="Hard Dough Stg. (MATURITY)")
+        self.assertIsNone(resolved.matched_by)
 
 
 if __name__ == "__main__":

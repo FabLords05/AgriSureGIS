@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import threading
 import time
+import unicodedata
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import date
@@ -20,10 +21,12 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core import upload_jobs
+from app.core.activity_log import note_activity, plural, record_activity
 from app.core.database import SessionLocal, get_db
 from app.core.farms_cache import invalidate_farms_cache
 from app.core.farms_view import refresh_farm_latest_insurance_view
 from app.core.security import get_current_user
+from app.core.system_settings import COVERAGE_RATE_KEY, DEFAULTS, get_coverage_rate
 from app.models import models
 from app.services.crop_stage_resolver import CropStageResolver
 from app.services.gpkg_parser import GpkgParserService
@@ -66,6 +69,37 @@ def _boundary_key(province: str, municipality: str, barangay: str) -> tuple[str,
     return (province.strip().upper(), municipality.strip().upper(), barangay.strip().upper())
 
 
+def _fold_upper(name: str) -> str:
+    """Accent-insensitive comparison key: PCIC's Region II export writes
+    'SANTO NINO' where the PSGC reference has 'SANTO NIÑO' (2026-10-22)."""
+    name = unicodedata.normalize("NFKD", name)
+    return "".join(ch for ch in name if not unicodedata.combining(ch)).upper().strip()
+
+
+_REPLACEMENT_CHAR = "�"
+
+
+def _repair_enye(text: str) -> str:
+    """Restores the letter a lossy re-save turned into '�' (U+FFFD) as Ñ/ñ.
+    The official Region III export stores Ñ as cp1252 byte 0xD1, which
+    upload_csv() decodes correctly -- but once the file goes through a UTF-8
+    tool (Excel, Sheets, Notepad) that byte becomes a literal '�', and
+    'SANTO NI�O' then misses PSGC entirely. Ñ is by far the most common
+    non-ASCII letter in Filipino names and places (2026-10-22): uppercase at the
+    start of a word or next to an uppercase letter, lowercase otherwise."""
+    if _REPLACEMENT_CHAR not in text:
+        return text
+    chars = list(text)
+    for i, ch in enumerate(chars):
+        if ch != _REPLACEMENT_CHAR:
+            continue
+        prev = chars[i - 1] if i > 0 else ""
+        nxt = chars[i + 1] if i + 1 < len(chars) else ""
+        upper = not prev.isalpha() or prev.isupper() or nxt.isupper()
+        chars[i] = "Ñ" if upper else "ñ"
+    return "".join(chars)
+
+
 @functools.lru_cache(maxsize=1)
 def _load_psgc_lookup() -> dict[tuple[str, str, str], str]:
     """Same reference file backend/seed_database.py already uses. Loaded once per
@@ -73,6 +107,17 @@ def _load_psgc_lookup() -> dict[tuple[str, str, str], str]:
     lookup_df = pd.read_csv(_PSGC_LOOKUP_PATH)
     return {
         _boundary_key(row["province"], row["municipality"], row["barangay"]): str(row["psgc_code"])
+        for _, row in lookup_df.iterrows()
+    }
+
+
+@functools.lru_cache(maxsize=1)
+def _load_psgc_names() -> dict[str, tuple[str, str, str]]:
+    """psgc_code -> the reference file's own (province, municipality, barangay)
+    spelling, which is what tbl_admin_boundaries is seeded with."""
+    lookup_df = pd.read_csv(_PSGC_LOOKUP_PATH)
+    return {
+        str(row["psgc_code"]): (row["province"], row["municipality"], row["barangay"])
         for _, row in lookup_df.iterrows()
     }
 
@@ -100,12 +145,40 @@ def _municipality_alias_variants(municipality: str) -> list[str]:
         variants.append(f"CITY OF {municipality[: -len(' CITY')]}")
     elif municipality.startswith("CITY OF "):
         variants.append(f"{municipality[len('CITY OF '):]} CITY")
-    for abbrev, full in (("STA. ", "SANTA "), ("STO. ", "SANTO ")):
-        if municipality.startswith(abbrev):
-            variants.append(full + municipality[len(abbrev):])
-        elif municipality.startswith(full):
-            variants.append(abbrev + municipality[len(full):])
+    else:
+        # PCIC's Region II export writes a component city bare ('ILAGAN');
+        # PSGC has 'CITY OF ILAGAN'. Still scoped to the row's own province.
+        variants.append(f"CITY OF {municipality}")
+    variants.extend(_saint_abbrev_variants(municipality))
     return variants
+
+
+def _saint_abbrev_variants(name: str) -> list[str]:
+    """'Sta. Ana' <-> 'Santa Ana', 'Sto. Niño' <-> 'Santo Niño'. Used for
+    barangays too (2026-10-22): the Region II export writes Gattaran's
+    'SANTA ANA' where PSGC has 'Sta. Ana'."""
+    for abbrev, full in (("STA. ", "SANTA "), ("STO. ", "SANTO ")):
+        if name.startswith(abbrev):
+            return [full + name[len(abbrev):]]
+        if name.startswith(full):
+            return [abbrev + name[len(full):]]
+    return []
+
+
+@functools.lru_cache(maxsize=1)
+def _load_folded_psgc_lookup() -> dict[tuple[str, str, str], str]:
+    """_load_psgc_lookup() keyed on accent-folded names. A folded key that two
+    different PSGC codes share is left out rather than guessed."""
+    folded: dict[tuple[str, str, str], str] = {}
+    ambiguous: set[tuple[str, str, str]] = set()
+    for key, code in _load_psgc_lookup().items():
+        fkey = tuple(_fold_upper(part) for part in key)
+        if fkey in folded and folded[fkey] != code:
+            ambiguous.add(fkey)
+        folded[fkey] = code
+    for fkey in ambiguous:
+        del folded[fkey]
+    return folded
 
 
 def _resolve_psgc_code(boundary_key: tuple[str, str, str], lookup: dict[tuple[str, str, str], str]) -> str | None:
@@ -125,6 +198,8 @@ def _resolve_psgc_code(boundary_key: tuple[str, str, str], lookup: dict[tuple[st
     stripped_barangay = _strip_trailing_parenthetical(barangay)
     if stripped_barangay != barangay:
         barangay_candidates.append(stripped_barangay)
+    for b in list(barangay_candidates):
+        barangay_candidates.extend(_saint_abbrev_variants(b))
 
     for muni in municipality_candidates:
         muni_candidates = [muni]
@@ -136,6 +211,18 @@ def _resolve_psgc_code(boundary_key: tuple[str, str, str], lookup: dict[tuple[st
                 psgc_code = lookup.get((province, m, b))
                 if psgc_code is not None:
                     return psgc_code
+
+    # Accent-insensitive retry over the same candidates (Santo Nino/Niño).
+    # Only when `lookup` is the reference file itself -- unit tests pass
+    # their own small lookup.
+    if lookup is _load_psgc_lookup():
+        folded = _load_folded_psgc_lookup()
+        for muni in municipality_candidates:
+            for m in {muni, _strip_trailing_parenthetical(muni)}:
+                for b in barangay_candidates:
+                    psgc_code = folded.get((_fold_upper(province), _fold_upper(m), _fold_upper(b)))
+                    if psgc_code is not None:
+                        return psgc_code
     return None
 
 
@@ -153,7 +240,7 @@ def _normalize_value(value: Any) -> Any:
         value = value.strip()
         if value == "" or value.lower() in {"nan", "none", "null"}:
             return None
-        return value
+        return _repair_enye(value)
 
     return value
 
@@ -274,9 +361,13 @@ def _normalize_header(key: str) -> str:
 # either layout passes. Everything else (names, dates, stage, amounts) stays
 # optional, exactly as prepare_row_payload() treats it.
 _REQUIRED_CSV_COLUMNS: tuple[tuple[str, ...], ...] = (
-    ("Province",),
-    ("Municipality",),
-    ("Barangay",),
+    # "... Address" is PCIC's "List of Farms with GPX File" export (Region II,
+    # 2026-10-22); without these aliases that file was rejected outright. Its
+    # Region III edition is the official ingestion layout -- see
+    # docs/Region III List of Farms with GPX File_Corrected Format.csv.
+    ("Province", "Province Address"),
+    ("Municipality", "Municipality Address"),
+    ("Barangay", "Barangay Address"),
     ("Policy No.", "CIC NO"),
     ("FARMID", "Farm ID"),
 )
@@ -299,6 +390,9 @@ def _missing_csv_columns(columns: Iterable[Any]) -> list[str]:
 def prepare_row_payload(row: Any) -> dict[str, Any]:
     raw = row.to_dict() if hasattr(row, "to_dict") else dict(row)
     normalized = {_normalize_header(k): v for k, v in raw.items()}
+    # Counted per upload so the INGEST remark can say the file was re-saved lossy;
+    # the repair itself happens in _normalize_value().
+    repaired_enye = any(isinstance(v, str) and _REPLACEMENT_CHAR in v for v in raw.values())
 
     def get(*header_names: str) -> Any:
         for name in header_names:
@@ -312,9 +406,9 @@ def prepare_row_payload(row: Any) -> dict[str, Any]:
     # matches the case used to look it up, instead of two parallel normalizations that
     # can (and did) diverge.
     province, municipality, barangay = _boundary_key(
-        _normalize_value(get("Province")) or "",
-        _normalize_value(get("Municipality")) or "",
-        _normalize_value(get("Barangay")) or "",
+        _normalize_value(get("Province", "Province Address")) or "",
+        _normalize_value(get("Municipality", "Municipality Address")) or "",
+        _normalize_value(get("Barangay", "Barangay Address")) or "",
     )
     boundary = {
         "province": province,
@@ -327,13 +421,17 @@ def prepare_row_payload(row: Any) -> dict[str, Any]:
     # GeoPackage path uses on the same field, so a farmer created here and the .gpkg
     # feature that later carries its boundary agree on the name -- that agreement is
     # what makes GpxFarmerMatcherService's name-based fallback work.
+    # full_middle_name: the official Region III export writes the whole middle
+    # name ('DIMALANTA, EDUARDO MENDOZA'); a trailing initial still reads as before.
     last_name = _normalize_text_upper(get("Surname"))
     first_name = _normalize_text_upper(get("Firstname"))
     middle_name = _normalize_text_upper(get("Middlename"))
     if not last_name and not first_name:
         combined = _normalize_value(get("FARMER NAME"))
         if combined:
-            parsed_last, parsed_first, parsed_middle = GpxFarmerMatcherService.parse_farmer_name(str(combined))
+            parsed_last, parsed_first, parsed_middle = GpxFarmerMatcherService.parse_farmer_name(
+                str(combined), full_middle_name=True
+            )
             last_name = _normalize_text_upper(parsed_last)
             first_name = _normalize_text_upper(parsed_first)
             middle_name = middle_name or _normalize_text_upper(parsed_middle)
@@ -350,6 +448,10 @@ def prepare_row_payload(row: Any) -> dict[str, Any]:
         "csv_farm_reference": _stringify_id(_normalize_value(get("FARMID", "Farm ID"))),
         "georef_id": _stringify_id(_normalize_value(get("Georef ID"))),
         "area_size": _parse_decimal(get("AreaInsured", "AREA")),
+        # The exact GPX file PCIC walked for this farm -- the most reliable
+        # CSV<->GPX link (matches 1,434 of 1,456 Region II rows); see
+        # GpxFarmerMatcherService.match().
+        "track_file_name": _normalize_value(get("trackFileName", "Track File Name")),
     }
 
     insurance = {
@@ -357,9 +459,12 @@ def prepare_row_payload(row: Any) -> dict[str, Any]:
         "policy_no": _stringify_id(_normalize_value(get("Policy No.", "CIC NO"))) or "",
         "program_type": _normalize_value(get("Program Type")),
         "product_name": _normalize_value(get("Product Name", "VARIETY NAME")),
-        "effectivity_date": _parse_date(get("Effectivity Date")),
-        "expiry_date": _parse_date(get("Expiry Date")),
-        "amount_cover": _parse_decimal(get("AmountofCover", "AMOUNT OF COVER")),
+        # "Date Effectivity"/"Date Expiry": Region II export. Without them both
+        # dates were NULL and AssessmentService never found the policy in effect.
+        "effectivity_date": _parse_date(get("Effectivity Date", "Date Effectivity")),
+        "expiry_date": _parse_date(get("Expiry Date", "Date Expiry")),
+        # "Amount Cover": the official Region III export's spelling.
+        "amount_cover": _parse_decimal(get("AmountofCover", "AMOUNT OF COVER", "Amount Cover")),
     }
 
     # Not a real computed assessment -- just carries the CSV's own crop-stage/damage
@@ -371,6 +476,9 @@ def prepare_row_payload(row: Any) -> dict[str, Any]:
     # "Stage No." is the legacy export's PCIC 0-9 agronomic code, NOT the Table 11
     # 1/2/3 scale AssessmentService reads; writing it straight through (as this did
     # before 2026-10-09) silently mis-staged every assessable row.
+    # The Region III export's "StgeCode" is deliberately not read: it is blank in
+    # every row so far and its numbering is unknown, so stage_code stays None and
+    # "Stage of Crop" ('Mn. Tl. Stg. (EARLY VEGETATIVE)') drives the stage.
     crop_stage_seed = {
         "stage_code": _normalize_value(get("Stage No.")),
         "stage_label": _normalize_value(get("Stage of Crop")),
@@ -385,6 +493,7 @@ def prepare_row_payload(row: Any) -> dict[str, Any]:
         "farm": farm,
         "insurance": insurance,
         "crop_stage_seed": crop_stage_seed,
+        "repaired_enye": repaired_enye,
     }
 
 
@@ -404,6 +513,9 @@ class _IngestCaches:
     # is a ~17-row lookup nothing in this path writes to, so it is loaded once and
     # never invalidated per row.
     crop_stage: CropStageResolver | None = None
+    # Admin Panel's default RSBSA rate, ₱/ha (2026-10-22) -- the Amount of Cover
+    # for a row whose AmountofCover is blank or zero. Read once per upload.
+    coverage_rate_per_ha: Decimal = Decimal(DEFAULTS[COVERAGE_RATE_KEY])
 
 
 def _prefetch_caches(prepared_rows: list[tuple[int, dict[str, Any]]], db: Session) -> _IngestCaches:
@@ -424,6 +536,7 @@ def _prefetch_caches(prepared_rows: list[tuple[int, dict[str, Any]]], db: Sessio
     """
     caches = _IngestCaches()
     caches.crop_stage = CropStageResolver.load(db)
+    caches.coverage_rate_per_ha = Decimal(str(get_coverage_rate(db)))
 
     # tbl_admin_boundaries now covers the whole country (~42k barangay-level
     # rows as of the nationwide PSGC expansion, 2026-08-20) -- still cheaper to
@@ -467,6 +580,8 @@ class _RowIngestResult:
     farmer: models.FarmerProfile
     farm_reference: str | None
     farm: models.Farm
+    # True when amount_cover came from the default rate, not the CSV.
+    defaulted_ac: bool = False
 
 
 def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> _RowIngestResult:
@@ -505,7 +620,15 @@ def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> 
                 .first()
             )
             if boundary is None:
-                boundary = models.AdminBoundary(psgc_code=psgc_code, **payload["boundary"])
+                # Spelled as the reference file spells it (2026-10-22), not in
+                # the CSV's ALL CAPS: a 'CAGAYAN / PAMPLONA' barangay next to
+                # the seeded 'Cagayan / Pamplona' ones split that municipality
+                # in two for exposure. Lookups here compare upper() anyway.
+                fields = dict(payload["boundary"])
+                names = _load_psgc_names().get(psgc_code)
+                if names is not None:
+                    fields["province"], fields["municipality"], fields["barangay"] = names
+                boundary = models.AdminBoundary(psgc_code=psgc_code, **fields)
                 db.add(boundary)
                 db.flush()
 
@@ -565,12 +688,16 @@ def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> 
             boundary_id=boundary.boundary_id,
             csv_farm_reference=farm_payload["csv_farm_reference"],
             georef_id=farm_payload["georef_id"],
+            track_file_name=farm_payload["track_file_name"],
             area_size=farm_payload["area_size"] or 0,
             location_geom=None,
         )
         db.add(farm)
         db.flush()
-    elif farm_payload["area_size"] and not farm.area_size:
+    else:
+        # The GPX links (2026-10-22) for a farm imported before they were read.
+        _backfill_blank_fields(farm, farm_payload, ("georef_id", "track_file_name"))
+    if farm_payload["area_size"] and not farm.area_size:
         # Same repair as the farmer above, for the one Farm field that has the same
         # problem. Not routed through _backfill_blank_fields() because "blank" here
         # is 0, not None/'' -- area_size is NOT NULL and the create path above
@@ -582,9 +709,10 @@ def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> 
             farm.area_size, farm.csv_farm_reference,
         )
 
-    def _result(outcome: str) -> _RowIngestResult:
+    def _result(outcome: str, defaulted_ac: bool = False) -> _RowIngestResult:
         return _RowIngestResult(
             outcome=outcome,
+            defaulted_ac=defaulted_ac,
             boundary_key=boundary_key,
             boundary=boundary,
             farmers_id=farmer_payload["farmers_id"],
@@ -608,6 +736,14 @@ def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> 
     if insurance is not None:
         return _result("skipped")
 
+    # CSV value always wins. Only a blank/zero AmountofCover falls back to the
+    # Admin Panel's RSBSA rate x farm area (2026-10-22) -- it used to become
+    # ₱0, which silently made every payout for that policy ₱0.
+    amount_cover = payload["insurance"]["amount_cover"]
+    defaulted_ac = not amount_cover
+    if defaulted_ac:
+        amount_cover = (caches.coverage_rate_per_ha * Decimal(str(farm.area_size or 0))).quantize(Decimal("0.01"))
+
     insurance = models.InsuranceRecord(
         farmer_id=farmer.farmer_id,
         farm_id=farm.farm_id,
@@ -616,7 +752,7 @@ def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> 
         product_name=payload["insurance"]["product_name"],
         effectivity_date=payload["insurance"]["effectivity_date"],
         expiry_date=payload["insurance"]["expiry_date"],
-        amount_cover=payload["insurance"]["amount_cover"] or 0,
+        amount_cover=amount_cover,
     )
     db.add(insurance)
     db.flush()
@@ -656,10 +792,38 @@ def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> 
             final_indemnity_payment=estimated_damage,
         )
     )
-    return _result("inserted")
+    return _result("inserted", defaulted_ac)
 
 
-def _run_csv_ingestion(job_id: str, filename: str, dataframe: pd.DataFrame) -> None:
+# How many individual rejected rows/features a remark spells out before
+# summarising the rest as "... and N more".
+_REMARKS_FAILURE_EXAMPLES = 5
+
+
+def _describe_failures(failures: list[dict[str, Any]], label) -> str:
+    shown = "; ".join(label(f) for f in failures[:_REMARKS_FAILURE_EXAMPLES])
+    extra = len(failures) - _REMARKS_FAILURE_EXAMPLES
+    return shown + (f"; and {extra:,} more" if extra > 0 else "")
+
+
+def _csv_failure_label(failure: dict[str, Any]) -> str:
+    policy = f" (policy {failure['policy_no']})" if failure.get("policy_no") else ""
+    return f"row {failure['row']}{policy}: {failure['error']}"
+
+
+def _log_csv_outcome(user_id: int | None, status_code: int, remarks: str) -> None:
+    """The INGEST Activity Log entry for a finished background CSV job. The
+    POST /csv entry itself is written when the request returns, before any
+    row is processed -- so the real accepted/rejected counts need their own
+    entry. Own session: the job's session may be mid-rollback here."""
+    db = SessionLocal()
+    try:
+        record_activity(db, user_id, "INGEST", "/api/upload/csv", status_code, remarks)
+    finally:
+        db.close()
+
+
+def _run_csv_ingestion(job_id: str, filename: str, dataframe: pd.DataFrame, user_id: int | None = None) -> None:
     """
     The actual row-by-row ingestion work, moved off the request thread
     (2026-08-16) so the frontend can poll GET /csv/status/{job_id} for a
@@ -683,6 +847,8 @@ def _run_csv_ingestion(job_id: str, filename: str, dataframe: pd.DataFrame) -> N
         inserted_rows = 0
         skipped_rows = 0
         failed_rows = 0
+        defaulted_ac_rows = 0
+        repaired_enye_rows = 0
         failures: list[dict[str, Any]] = []
 
         # Parsing a row (prepare_row_payload) never touches the DB, so failures here
@@ -692,7 +858,9 @@ def _run_csv_ingestion(job_id: str, filename: str, dataframe: pd.DataFrame) -> N
         for row_number, (_, row) in enumerate(dataframe.iterrows(), start=1):
             processed_rows += 1
             try:
-                prepared_rows.append((row_number, prepare_row_payload(row)))
+                payload = prepare_row_payload(row)
+                prepared_rows.append((row_number, payload))
+                repaired_enye_rows += payload["repaired_enye"]
             except Exception as exc:
                 failed_rows += 1
                 failures.append({"row": row_number, "policy_no": None, "error": str(exc)})
@@ -717,6 +885,7 @@ def _run_csv_ingestion(job_id: str, filename: str, dataframe: pd.DataFrame) -> N
                     result = _ingest_row(payload, db, caches)
                     if result.outcome == "inserted":
                         inserted_rows += 1
+                        defaulted_ac_rows += result.defaulted_ac
                     else:
                         skipped_rows += 1
                     savepoint.commit()
@@ -758,6 +927,11 @@ def _run_csv_ingestion(job_id: str, filename: str, dataframe: pd.DataFrame) -> N
             db.rollback()
             logger.exception("CSV ingestion for %s failed and was rolled back", filename)
             upload_jobs.mark_error(job_id, f"CSV ingestion failed: {exc}")
+            _log_csv_outcome(
+                user_id, 500,
+                f'CSV ingestion of "{filename}" ({plural(total_rows, "row")}) failed and was rolled back; '
+                f"nothing was imported. Error: {exc}",
+            )
             return
 
         # A no-op unless REDIS_URL is configured -- see app/core/farms_cache.py.
@@ -780,13 +954,36 @@ def _run_csv_ingestion(job_id: str, filename: str, dataframe: pd.DataFrame) -> N
         if failed_rows:
             message = f"CSV data ingested with {failed_rows} row(s) skipped due to errors."
 
+        remarks = (
+            f'CSV ingestion of "{filename}" finished in {elapsed:.0f}s: {plural(processed_rows, "row")} processed -- '
+            f"{inserted_rows:,} accepted (new policies imported), "
+            f"{skipped_rows:,} skipped (already on file), {failed_rows:,} rejected."
+        )
+        if defaulted_ac_rows:
+            remarks += (
+                f" {plural(defaulted_ac_rows, 'policy', 'policies')} had no Amount of Cover and used the default "
+                f"₱{caches.coverage_rate_per_ha:,.2f}/ha x farm area."
+            )
+        if repaired_enye_rows:
+            remarks += (
+                f" {plural(repaired_enye_rows, 'row')} had an unreadable character (�) restored as Ñ/ñ -- "
+                "the file was likely re-saved in a different encoding."
+            )
+        if failures:
+            remarks += " Rejected: " + _describe_failures(failures, _csv_failure_label) + "."
+        _log_csv_outcome(user_id, 200, remarks)
+
         upload_jobs.mark_done(job_id, {
             "status": "success",
             "message": message,
             "rows_processed": processed_rows,
             "rows_inserted": inserted_rows,
             "rows_skipped": skipped_rows,
+            # Every skip is a duplicate: the (policy, farm) pair was already on
+            # file, or repeated earlier in this same file.
+            "rows_duplicate": skipped_rows,
             "rows_failed": failed_rows,
+            "rows_defaulted_ac": defaulted_ac_rows,
             "failures": failures[:50],
         })
     except Exception as exc:
@@ -796,13 +993,18 @@ def _run_csv_ingestion(job_id: str, filename: str, dataframe: pd.DataFrame) -> N
         # forever from the frontend's point of view.
         logger.exception("CSV ingestion for %s crashed unexpectedly", filename)
         upload_jobs.mark_error(job_id, str(exc))
+        _log_csv_outcome(user_id, 500, f'CSV ingestion of "{filename}" crashed; nothing was imported. Error: {exc}')
     finally:
         db.close()
+
+
+_CSV_CONTENT_TYPES = {"application/vnd.ms-excel", "text/plain", "application/octet-stream"}
 
 
 @router.post("/csv", status_code=status.HTTP_200_OK)
 def upload_csv(
     file: UploadFile = File(...),
+    current_user: models.SystemUser = Depends(get_current_user),
 ):
     """
     Validates and parses the file synchronously (fast), then hands the slow
@@ -811,10 +1013,15 @@ def upload_csv(
     poll GET /csv/status/{job_id} for real progress instead of the request
     blocking until a large export finishes.
     """
+    note_activity(f'CSV upload "{file.filename}".')
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Please upload a CSV file.")
 
-    if not file.content_type or "csv" not in file.content_type:
+    # Browsers on Windows with Excel installed report a .csv as
+    # application/vnd.ms-excel; others send text/plain or octet-stream.
+    if file.content_type and not (
+        "csv" in file.content_type or file.content_type in _CSV_CONTENT_TYPES
+    ):
         raise HTTPException(status_code=400, detail="The uploaded file must be a CSV.")
 
     if file.file.seekable():
@@ -860,15 +1067,20 @@ def upload_csv(
             "rows_failed": 0,
             "failures": [],
         })
+        note_activity(f'Uploaded CSV "{file.filename}": no data rows found, nothing imported.')
         return {"status": "processing", "job_id": job_id, "total_rows": 0}
 
     total_rows = len(dataframe)
     job_id = upload_jobs.create_job(total=total_rows)
     threading.Thread(
         target=_run_csv_ingestion,
-        args=(job_id, file.filename, dataframe),
+        args=(job_id, file.filename, dataframe, current_user.user_id),
         daemon=True,
     ).start()
+    note_activity(
+        f'Uploaded CSV "{file.filename}" ({plural(total_rows, "row")}, {len(raw_bytes) / 1024:,.0f} KB); '
+        "ingestion started -- see the INGEST entry for accepted/rejected counts."
+    )
 
     return {"status": "processing", "job_id": job_id, "total_rows": total_rows}
 
@@ -894,6 +1106,8 @@ def upload_gpx(
     farm_id: int | None = Form(default=None),
     db: Session = Depends(get_db),
 ):
+    mode = f"manually assigned to farm #{farm_id}" if farm_id is not None else "auto-matched by filename"
+    note_activity(f'GPX upload "{file.filename}" ({mode}).')
     if not file.filename or not file.filename.lower().endswith(".gpx"):
         raise HTTPException(status_code=400, detail="Please upload a GPX file.")
 
@@ -910,7 +1124,7 @@ def upload_gpx(
                 detail="Farm not found for the given farmer_id and farm_id.",
             )
     elif farmer_id is None and farm_id is None:
-        match = GpxFarmerMatcherService.match(file.filename, db)
+        match = GpxFarmerMatcherService.match_file(file.filename, db)
         if match.farm is None:
             if match.candidates:
                 raise HTTPException(
@@ -924,7 +1138,8 @@ def upload_gpx(
                 status_code=404,
                 detail=(
                     f'No matching farmer/farm found for "{file.filename}". '
-                    "Select the correct farm row manually."
+                    "Its farm may not be imported yet -- upload the CSV that lists this file first, "
+                    "or select the correct farm row manually."
                 ),
             )
         farm = match.farm
@@ -951,9 +1166,18 @@ def upload_gpx(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Unable to parse GPX file: {exc}") from exc
 
+    had_boundary = farm.location_geom is not None
     farm.location_geom = location_geom
     db.commit()
     db.refresh(farm)
+
+    farmer_name = f"{farm.farmer.first_name} {farm.farmer.last_name}".strip() if farm.farmer else "unknown farmer"
+    place = f", Brgy. {farm.boundary.barangay}, {farm.boundary.municipality}" if farm.boundary else ""
+    note_activity(
+        f'Uploaded GPX "{file.filename}": boundary of farm #{farm.farm_id} '
+        f"(FARMID {farm.csv_farm_reference or 'n/a'}, {farmer_name}{place}) "
+        f"{'replaced' if had_boundary else 'saved for the first time'}; matched {matched_by}."
+    )
 
     # A no-op unless REDIS_URL is configured -- see app/core/farms_cache.py.
     # location_geom is part of the cached farms list response.
@@ -982,6 +1206,7 @@ def upload_gpkg(
     created (per Fabio, 2026-10-08: unmatched features are reported so the
     matching CSV can be imported first and the file re-uploaded).
     """
+    note_activity(f'GeoPackage upload "{file.filename}".')
     if not file.filename or not file.filename.lower().endswith(".gpkg"):
         raise HTTPException(status_code=400, detail="Please upload a GeoPackage (.gpkg) file.")
 
@@ -1058,6 +1283,17 @@ def upload_gpkg(
         "GPKG ingestion finished: %s -- %d feature(s), %d updated, %d failed, %d duplicate(s) skipped",
         file.filename, len(features), updated, len(failures), len(duplicates),
     )
+
+    remarks = (
+        f'Uploaded GeoPackage "{file.filename}": {plural(len(features), "feature")} -- '
+        f"{updated:,} accepted (farm boundaries updated), {len(failures):,} rejected, "
+        f"{len(duplicates):,} duplicate(s) skipped."
+    )
+    if failures:
+        remarks += " Rejected: " + _describe_failures(
+            failures, lambda f: f'"{f["file_name"]}" (FARMID {f["farm_reference"] or "n/a"}): {f["error"]}'
+        ) + "."
+    note_activity(remarks)
 
     message = f"Updated {updated} farm boundary(ies) from GeoPackage."
     if failures:

@@ -4,6 +4,663 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-22] - Archive & Clear Confirmed With the User's Password
+
+The Archive & Clear dialog asked the user to type `CLEAR`. It now asks for the signed-in user's own password, checked on the server, so an unattended signed-in session can't clear the live records.
+
+* **`backend/app/api/archives.py`**:
+  * `ArchiveRequest` takes `password` instead of `confirm`.
+  * `archive_and_clear()` checks it with `users._verify_password()` against `user.password_hash` before anything runs. A wrong or empty password returns 400 "Incorrect password." and logs an Activity Log entry.
+  * `GET /archives/eligibility` no longer returns `confirm_word`.
+* **`backend/app/services/archive_service.py`**: `CONFIRM_WORD` removed.
+* **`frontend/src/lib/api.ts`**: `archiveAndClear(password)` sends `{ password }`. `ArchiveEligibility` loses `confirm_word`.
+* **`frontend/src/app/components/ArchiveClearCard.tsx`**: the input is now a password field ("Enter your password to confirm"). Enter submits, and the field clears after a failed attempt.
+* **`backend/tests/test_archive_service.py`**: `test_wrong_password_is_rejected_before_anything_runs` (empty, `CLEAR`, and a near-miss) and `test_correct_password_runs_the_archive`.
+* **`.claude/API_CONTRACT.md`**: body and response updated.
+
+### 7-day wait removed
+With the password as the safeguard, Archive & Clear no longer waits 7 days after the last bulletin of every assessed typhoon. It is allowed as soon as there is live data and at least one typhoon has been assessed, locked or SAR-checked against it. That requirement is kept, so a fresh, never-assessed upload still can't be archived.
+
+* **`backend/app/services/archive_service.py`**:
+  * `CLEAR_AFTER_DAYS` removed.
+  * `_live_typhoons()` no longer returns `clear_after`.
+  * `eligibility()` loses its `now` parameter, the "too early" branch, and the `eligible_at` / `clear_after_days` fields.
+  * New archive batches' `typhoons` JSON no longer carries `clear_after`. Existing batches keep theirs, and nothing reads it.
+* **`frontend/src/lib/api.ts`**: `ArchiveTyphoon.clear_after`, `ArchiveEligibility.eligible_at` and `clear_after_days` removed.
+* **`frontend/src/app/components/ArchiveClearCard.tsx`**: the "Allowed 7 days after…", "→ clearable from …" and "Eligible after: …" text is gone. Each typhoon line still shows its last bulletin.
+* **`backend/tests/test_archive_service.py`**: the three timing tests are replaced by `test_assessed_typhoon_is_clearable_right_after_its_last_bulletin` and `test_label_names_every_assessed_typhoon`.
+
+---
+
+## [2026-10-22] - Assessment & Reporting Filter Lists
+
+* **`frontend/src/app/components/AssessmentModule.tsx`**:
+  * The **Wind Velocity** filter always lists All plus Signal 2, 3, 4 and 5 (new module constant `WIND_SIGNAL_OPTIONS`, the payout-eligible TCWS levels). It used to list only the signals present in the loaded rows, often just "Signal 2". The `signals` memo is removed.
+  * The **Municipality** filter lists only the selected typhoon's affected municipalities (every typhoon's when none is selected). Before, it listed towns from every typhoon's rows, e.g. OPONG's Surigao del Norte towns while ROSAL was selected.
+  * A new `useEffect` resets `filterMuni` to "All" when the picked town is no longer in the list, so switching typhoon can't leave the table empty under a hidden filter.
+* No backend change.
+
+---
+
+## [2026-10-22] - Signal 1 Left Out of Eligibility Counts; Explanatory Messages
+
+Payout and assessment already skipped Signal-1-only municipalities (`max_signal_level >= 2`). Signal 1 still leaked into the stored eligibility flag and the typhoon summary's farmer count. Fixed here, with the eligibility rule itself unchanged.
+
+* **`backend/app/services/exposure_calculator.py`**:
+  * `MIN_ELIGIBLE_SIGNAL` (2) and `MIN_ELIGIBLE_HOURS` (6) now live here. They moved from `assessment_service.py`, which imports this module, so defining them there would be circular.
+  * `compute_for_typhoon()` sets `is_eligible_6hr` only when `max_signal_level >= 2` **and** `payout_hours >= 6`. Before, a town with 6h or more of Signal 1 only was flagged eligible. That also inflated the "payout-eligible" count in the compute-exposure Activity Log entry.
+  * Existing rows keep the old flag until that typhoon's exposure is recomputed (the **Recompute** button). No migration.
+* **`backend/app/services/assessment_service.py`**: imports the two constants. Behaviour unchanged.
+* **`backend/app/api/bulletins.py`**: `get_typhoon_summary()`:
+  * `people_hit` now counts only farmers in TCWS 2+ municipalities.
+  * New `signal_1_only_people_hit` counts farmers whose municipality only reached Signal 1.
+  * `areas_hit`, max signal, start/end and duration are unchanged.
+* **`frontend/src/lib/api.ts`**: `TyphoonSummary` gains `signal_1_only_people_hit`.
+* **`frontend/src/app/components/AssessmentModule.tsx`**: when a typhoon has exposed areas but no farmers in Signal 2+ areas, the empty state says so, plus how many farmers were only under Signal 1. **Why:** ROSAL showed Areas Affected but an empty assessment table. Its 7 Signal 2 towns have no farms; every farm in its path was Signal 1 only.
+* **`frontend/src/app/components/GISLeafletMap.tsx`**: with an "Affected by" typhoon selected, the legend notes that affected means Signal 2+ in *any* bulletin, while the shading shows only the selected bulletin. **Why:** a town that went Signal 2 and back to Signal 1 (Calayan, ROSAL) is shaded Signal 1 but its farms are affected.
+* **`backend/app/api/upload.py`**: the GPX "No matching farmer/farm found" message adds that the farm may not be imported yet. **Why:** 378 of 1,677 GPX files failed because their CSV rows were never imported. The CSV import that ran processed 1,329 rows; the Oct 21 Region II CSV has 1,456.
+* **`backend/tests/test_exposure_calculator.py`**:
+  * New `test_signal_1_only_area_is_not_eligible_even_past_6_hours`.
+  * `SerializeSummaryTests._summary()` takes `max_signal_level`.
+
+---
+
+## [2026-10-22] - "TCWS 2+ Exposure (h)" Column in the Exposure Tables
+
+The exposure column of the Main Dashboard's Exposure Summary and Assessment & Reporting's Areas Affected (both render `ExposureTable`) is renamed from "Exposure" to **"TCWS 2+ Exposure (h)"**. It now counts only Signal 2–5 hours, so Signal 1 hours are left out. Display-only change.
+
+* **`backend/app/services/exposure_calculator.py`**: `serialize_summary()` returns a new `tcws2_plus_exposure_hours` (sum of `signal_2_hours`..`signal_5_hours`, rounded to 2 dp). The value is computed when the response is built; nothing new is stored.
+* **`frontend/src/lib/api.ts`**: `AreaExposureSummary` gains `tcws2_plus_exposure_hours`.
+* **`frontend/src/app/components/ExposureTable.tsx`**: the header reads "TCWS 2+ Exposure (h)" (header and cells centered), the cell shows `tcws2_plus_exposure_hours`, and the footnote reads "TCWS 2+ Exposure = Signal 2 + … + Signal 5 hours (Signal 1 not counted)".
+* **`backend/tests/test_exposure_calculator.py`**: new `SerializeSummaryTests`.
+
+### Not changed
+* `tbl_area_exposure_summary.total_exposure_hours` stays the Signal 1–5 sum (its CHECK constraint enforces it), as do the archive, the recompute script and the API field of the same name.
+* `payout_hours`, the payout and assessment logic, Start/End and the (ongoing)/(gap) tags are unchanged; they still reflect all signals.
+
+---
+
+## [2026-10-22] - Region III "List of Farms with GPX File" as the Official CSV Layout
+
+`docs/Region III List of Farms with GPX File_Corrected Format.csv` is now the official ingestion layout. Most of its columns were already mapped through the Region II aliases. Four gaps were closed. Decisions confirmed before implementation:
+1. **Stage labels resolve in code** through PCIC's legacy codes 0–7. No migration.
+2. **The last word of Farmer Name is the middle name** for CSV ingestion.
+3. **`StgeCode` is not read** (blank, numbering unknown).
+4. **Every row is ingested** regardless of Insurance Status.
+
+### 1. Crop stage
+* **`backend/app/services/crop_stage_resolver.py`**:
+  * New `_PCIC_STAGE_LABEL_CODES` and `pcic_label_to_code()` map PCIC's long stage names to their legacy "Stage No." code, e.g. `Mn. Tl. Stg. (EARLY VEGETATIVE)` → 1 and `Booting Stg. (REPRODUCTIVE)` → 4. An optional `N - ` prefix is accepted.
+  * `CropStageResolver.resolve()` tries this after the code and DB-label lookups. The code's own `tbl_crop_stage_mapping` row still decides `crop_stage_no` and `stage_group`.
+  * **Why:** none of the file's labels matched the table, so every row ingested with no stage. Booting, flowering and maturity policies would never have been assessed.
+  * HD/YR (8/9) are left out because their label hasn't appeared in any real file. They stay unmapped and logged.
+
+### 2. CSV row parsing
+* **`backend/app/api/upload.py`**:
+  * `prepare_row_payload()` accepts the `Amount Cover` header. Before, a filled value was silently replaced by the default rate.
+  * The combined Farmer Name is split with `full_middle_name=True`.
+  * New `_repair_enye()` is applied in `_normalize_value()` to every string cell. It turns a `�` (U+FFFD, left by re-saving the cp1252 file through a UTF-8 tool) back into **Ñ** at the start of a word or in uppercase context, otherwise **ñ**. **Why:** `SANTO NI�O` missed PSGC, and names were stored corrupted.
+  * `prepare_row_payload()` returns a `repaired_enye` flag. `_run_csv_ingestion()` counts the flagged rows and adds the count to the INGEST Activity Log remark.
+* **`backend/app/services/gpx_farmer_matcher.py`**:
+  * `parse_farmer_name()` gains keyword-only `full_middle_name` (default `False`, so GPX and GPKG behaviour is unchanged). When it is set, a trailing word that isn't an initial or a JR./SR./II–V extension becomes the middle name: `DIMALANTA, EDUARDO MENDOZA` → (`DIMALANTA`, `EDUARDO`, `MENDOZA`).
+  * Known limitation: two-word middle names such as `DELA CRUZ` split on the last word.
+
+### 3. Tests
+* `tests/test_csv_upload.py`: `RegionIIIOfficialLayoutTests` (real rows with the exact 31-column header, read as cp1252) and `RepairEnyeTests`.
+* `tests/test_crop_stage_resolver.py`: `PcicStageLabelTests`; the seed gains codes 0, 2 and 5.
+* `tests/test_gpx_farmer_matcher.py`: `ParseFullMiddleNameTests`.
+
+### Not changed
+* Mobile No., IR ID, Policy Date Issued, Commodity, planting dates, Insurance Status, Tenurial Status, Farm Name and the image/track-date columns are not stored, because storing them would need schema changes.
+* Farmers already on file are not renamed by a re-upload. Backfill fills blank fields only.
+
+---
+
+## [2026-10-22] - Per-Signal Exposure Hours, Assessment Progress, TCB Coverage, PCIC Import, Backup Verification
+
+Asked for as one batch of enhancements. Decisions confirmed before implementation:
+1. **Payout hours = hours accumulated under the Max Signal** (PCIC's `SN3_12`), not Total Exposure. Payouts change versus the old first-to-last-bulletin span.
+2. **Live-DB restore stays manual.** In-app "Verify" restores a backup into a separate verification database only.
+3. **"Portion of X" with no town list assigns nothing.** It is recorded as unresolved, never widened to the whole province.
+4. **The Google Drive copy is encrypted** (AES-256-GCM, `BACKUP_ENCRYPTION_KEY`).
+
+### 1. Exposure hours (shared backend service)
+* **`backend/app/services/exposure_calculator.py`**: rewritten.
+  * New pure `build_area_exposures()` builds per-municipality signal timelines from issuance times. The rules are in `METHODOLOGY_NOTE` and `.claude/MASTER_DEVELOPMENT_CONTEXT.md`.
+  * `compute_for_typhoon()` stores Signal 1–5 hours, `total_exposure_hours` (their sum), `payout_hours`, `island_group` and the `has_open_interval` / `has_long_gap` flags. It writes `tbl_exposure_intervals` for traceability, upserts on (typhoon, province, municipality), and loads signals in one query.
+  * Stale summaries are deleted, unless an assessment references them, in which case they are zeroed.
+  * New `serialize_summary()` is the single response shape for both exposure tables.
+* **`backend/app/services/assessment_service.py`**: eligibility and matrix lookup use `payout_hours`.
+* **`backend/app/api/bulletins.py`**:
+  * New `GET /bulletins/typhoon/{id}/exposure` returns rows plus methodology, unresolved clauses and bulletins without an issue time.
+  * `compute-exposure` and `typhoon/{id}/summary` use `serialize_summary`.
+  * Manual PDF upload recomputes exposure.
+* **Migrations**:
+  * `migrations/2026-10-22_exposure_signal_hours.sql` adds the new columns, CHECK constraints (non-negative; total = sum, `NOT VALID` for old rows) and unique constraints, plus `tbl_exposure_intervals` and `tbl_tcb_unresolved_clauses`. It stops, rather than deleting anything, if duplicates exist.
+  * `migrations/2026-10-22_archive_exposure_signal_hours.sql` is the archive DB companion; `archive_service.py` copies the new columns.
+* **`backend/scripts/recompute_exposure.py`**: recomputes every typhoon under the new rules. It is a dry run by default; `--reseed` rebuilds signal rows from the stored TCWS text and skips exported typhoons.
+
+### 2. PAGASA TCB coverage (`backend/app/services/bulletin_parser.py`)
+* `_resolve_clause`:
+  * Partial coverage without a list goes to `unresolved`, tagged `PARTIAL_COVERAGE_NOTE`.
+  * New parenthetical exclusions, e.g. `Cagayan (excluding Santa Ana)`.
+* `match_tcws_cell(..., sources=)` and the new `resolve_tcws_signals_detailed()` keep the clause each LGU came from, plus the unresolved clauses with a reason. `_seed_tcb_signals` stores `tbl_tcb_signals.source_clause` and `tbl_tcb_unresolved_clauses`.
+* `upsert_bulletin`:
+  * Stores `raw_text`, `tcws_hash` and `issued_at_parsed`.
+  * The same bulletin number with a different TCWS hash counts as a **corrected bulletin**: its signals are replaced and exposure is recomputed. Legacy rows with a NULL hash are left alone.
+* New `recompute_exposure()` runs after each new bulletin.
+* New `_run_final_bulletin_assessment()` tracks the final-bulletin auto-run as an assessment job.
+
+### 3. Assessment progress
+* New **`backend/app/core/assessment_jobs.py`**: an in-memory job registry.
+  * Stages run in order: Data Preparation → Exposure Calculation → Spatial Analysis → Indemnity Calculation → Completion. Only one is processing at a time; a failure stops the run and later stages stay pending.
+  * Percent comes from real done/total counts and reaches 100 only after the commit.
+  * One run per typhoon at a time.
+* `AssessmentService.calculate_for_bulletin(..., progress=)` reports each stage. The spatial (farm-matching) loop is split from the per-policy payout loop; the queries are unchanged.
+* **`backend/app/api/assessments.py`**:
+  * `POST /calculate` now starts a background job and returns `job_id`.
+  * New `GET /assessments/jobs/{id}` and `GET /assessments/jobs/active?typhoon_id=`.
+  * The outcome is logged as a new `ASSESS` Activity Log action.
+* **`backend/app/api/typhoons.py`**: `progress` includes `active_job`.
+* Frontend:
+  * New `AssessmentProgressBar.tsx`.
+  * `AssessmentModule.tsx` polls the job with one sequential loop and resumes a running job after a refresh.
+  * `MonitoringModule.tsx` `TyphoonProgressStrip` shows Pending / Processing / Completed / Failed strictly in order, so a later step never shows done before an earlier one. It polls only while a job runs.
+
+### 4. Exposure tables (frontend)
+* New `ExposureTable.tsx` with columns Max Signal, Signal 1–5 (hrs), Exposure (hrs), the methodology note and unresolved-clause warnings.
+* The Dashboard Exposure Summary modal and Assessment & Reporting's Areas Affected modal both read `getTyphoonExposure()`. The client-side max-signal merge was removed.
+* The dashboard modal gains a Recompute button.
+
+### 5. Formatting and renames
+* New `frontend/src/lib/format.ts` (`formatPeso`, `sumPesos`). TOTAL AC (SUM INSURED) shows e.g. ₱1,500,000.00 instead of ₱1500K. Also applied to the table footer, CSV preview footer, per-row AC and `ArchiveViewer`.
+* `Header.tsx`: "Spatial Analysis & Data Import" → **"Spatial Analysis"**. `MonitoringModule.tsx`: "PAGASA TCB Bulletins" → **"PAGASA TCB Lists"**. The `ui-prototype/` (James's) is unchanged.
+* New `DataImportPanel.tsx` on the Main Dashboard, directly below System Status. Upload CSV / Upload GPX moved there from `SpatialAnalysisModule.tsx`; the `App.tsx` handlers are unchanged, plus a `lastImport` summary.
+
+### 6. PCIC import (`backend/app/api/upload.py`, `gpx_farmer_matcher.py`, `gpx_parser.py`)
+* New CSV aliases for the real Region II export: `Province/Municipality/Barangay Address`, `Date Effectivity`, `Date Expiry`, `trackFileName`. Before this the file was rejected whole, and with the aliases alone the dates would have stayed NULL.
+* PSGC lookup:
+  * Accent-insensitive fallback (`SANTO NINO` → `SANTO NIÑO`).
+  * Bare component-city names (`ILAGAN` → `CITY OF ILAGAN`).
+  * Remaining genuine misspellings are reported per row, not guessed.
+* `.csv` is accepted when the browser reports `application/vnd.ms-excel`, `text/plain` or `octet-stream`. The result includes `rows_duplicate`.
+* New `tbl_farms.track_file_name` (`migrations/2026-10-22_farm_track_file_name.sql`). It is stored on import and backfilled on existing farms, along with `georef_id`.
+* `GpxFarmerMatcherService`:
+  * New `match_file()` matches on `track_file_name` first, then Georef ID, then the old filename parsing.
+  * The tail regex tolerates spaces and `MM-DD-YYYY` dates.
+  * Any uploader prefix is stripped (GE_, R02_, FAM02_ and so on, not just TAB_).
+  * `_pick_farm` no longer assigns a boundary to the farmer's only farm when the file's FarmID disagrees.
+* `GpxParserService` rejects out-of-range coordinates and tracks with fewer than 3 distinct points.
+
+### 7. Backups (`backend/app/services/backup_service.py`, new `app/core/backup_crypto.py`, `api/archives.py`)
+* Each dump runs inside an exported REPEATABLE READ snapshot, and per-table row counts are read from the same snapshot.
+* Each dump records its sha256 and must pass `pg_restore --list`.
+* The Drive copy is encrypted when a key is set, and Drive's md5 is compared with the local one.
+* Retention: `BACKUP_RETENTION_COUNT` local manual/scheduled files are kept.
+* New `verify_backup()` and `POST /api/backups/{id}/verify` (`source` local or gdrive, `confirm` required). They restore into `BACKUP_VERIFY_DATABASE_URL`, refuse the live DB, and compare row counts.
+* `migrations/2026-10-22_backup_verification.sql`; new `scripts/decrypt_backup.py`.
+* `DatabaseBackupModule.tsx` gains a Verified column and Verify / Verify Drive copy buttons with confirmation.
+* `BACKUP_VERIFY_DATABASE_URL` must be its own database: the live DB and the archive DB are both refused, because Verify's `pg_restore --clean` drops every table in the target.
+* `requirements.txt` pins `cryptography==50.0.1`, which was already installed transitively.
+
+### 8. Fixes found during verification
+* **`exposure_calculator.build_area_exposures`**: a signal still hoisted in the latest bulletin is now counted up to that bulletin's issue time and flagged `has_open_interval`. Before this, the whole open stretch was dropped. The `recompute_exposure.py` dry run showed ROSAL (no final bulletin yet) falling from 2,796h to 576h, and an ongoing town's Max-Signal payout hours came out 0. Nothing after the latest bulletin is counted; the next recompute extends it. `METHODOLOGY_NOTE`, `MASTER_DEVELOPMENT_CONTEXT.md` and the `ExposureTable.tsx` "(ongoing)" tooltip are updated to match.
+* **`DashboardLayout.tsx`**: the sidebar label "Spatial Analysis & Import" → "Spatial Analysis". The page header was renamed earlier, the sidebar was missed.
+* **`upload._resolve_psgc_code`**: Sta./Sto. ↔ Santa/Santo is now tried on barangays as well as municipalities, through the new shared `_saint_abbrev_variants()`. It recovers the Region II export's 11 Gattaran "SANTA ANA" rows (PSGC: "Sta. Ana"). The remaining 9 unmatched rows are real misspellings (Imurong/Imurung, Gen. Balao/Gen. Eulogio Balao, Cabisera 3/Cabeseria 3, Napaccu/Nappaccu Grande), and they are still reported per row, not guessed.
+* **Duplicate exposure rows in a different letter case.** `agrisure_db` held 17 pairs such as `Cagayan / Pamplona` + `CAGAYAN / PAMPLONA` (Pamplona, Piat, Quezon, Bayombong; typhoons 2, 3, 4, 5, 14 and 15). Recomputes updated one row and never touched the other, which kept old-rule hours. So these towns appeared twice, and every recompute reported 1–4 phantom areas. No assessment referenced either copy.
+  * **Cause:** the CSV import created missing barangays in the CSV's ALL CAPS, the old calculator stored a separate summary for that spelling, and `uq_exposure_typhoon_area` is case-sensitive.
+  * **`exposure_calculator.compute_for_typhoon`**: stored rows are now grouped case-insensitively by the new `_pick_one_per_area()`. It keeps the row an assessment references (else the oldest) and sends the rest to `_retire_stale_summaries`. The kept row is renamed to the boundary's spelling. New shared `_referenced_summary_ids()`.
+  * **`upload._ingest_row`**: a newly created boundary takes the PSGC reference file's spelling (new `_load_psgc_names()`), falling back to the CSV's ALL CAPS when the code is not in the file.
+  * **`migrations/2026-10-22_exposure_case_insensitive.sql`**: run after `recompute_exposure.py --apply`. It refuses to run while duplicates remain; it gives each municipality's boundaries the spelling of its oldest barangay; and it replaces `uq_exposure_typhoon_area` with the case-insensitive unique index `uq_exposure_typhoon_area_ci`. `init_schema.sql` is updated to match.
+
+### Tests
+* `test_exposure_calculator.py` was rewritten for the new rules, including the spec's 12 + 18 + 24 = 54h case, and an open signal counted up to the latest bulletin and later extended without double counting.
+* `test_exposure_calculator.py`: two tests for case-variant duplicate summaries.
+* `test_upload_csv_ingestion.py`: new `PsgcBarangayVariantTests`. A new boundary now takes the reference spelling (the old ALL-CAPS assertion was replaced) and keeps ALL CAPS without one. `_load_psgc_names` is patched alongside `_load_psgc_lookup`.
+* New `test_assessment_jobs.py` and `test_backup_crypto.py`.
+* `test_assessment_service.py`, `test_bulletin_parser.py`, `test_gpx_farmer_matcher.py` and `test_csv_upload.py` were extended or updated for the behaviour changes above (incl. a Region II row mapping test).
+
+---
+
+## [2026-10-22] - Archived Typhoons Readable in Assessment & Reporting
+
+Cristian asked for this as a follow-up to Archive & Clear. After a clear, the typhoon still appears in Assessment & Reporting's list (typhoons and bulletins stay live), but its rows had moved to the archive, so clicking it only said "No assessments computed yet". Now it shows those rows read-only, straight from the archive.
+
+### 1. File: `backend/app/services/archive_service.py`
+* **`archived_typhoons()`**: every archived typhoon, with the newest archive that holds it.
+* **`archived_typhoon_assessments(typhoon_id)`**: that typhoon's computed assessments from its newest archive, joined to policy, farm, farmer and boundary, plus the typhoon's max sustained winds from the archived bulletins.
+
+### 2. File: `backend/app/api/archives.py`
+* **`GET /api/archives/typhoons`** (any signed-in user): returns an empty list (not 503) when the archive isn't configured.
+* **`GET /api/archives/typhoon/{id}/pabs-rows`** (any signed-in user):
+  * Rows come back in the same shape as `GET /api/assessments/pabs-summary`.
+  * S and REMARKS are looked up live by `matrix_id` with the existing `_yield_loss_fraction` / `_pabs_remarks`; the PCIC matrices are never cleared.
+  * **404** if the typhoon was never archived.
+
+### 3. File: `frontend/src/app/components/AssessmentModule.tsx` / `frontend/src/lib/api.ts`
+* `getArchivedTyphoons()` and `getArchivedTyphoonRows()`.
+* Archived typhoons get a 🔒 **Archived** tag in the list.
+* Selecting one with no live rows loads the archived rows into the same table and totals, under a read-only banner. Live rows take priority if the typhoon was assessed again after a clear.
+* For an archived typhoon:
+  * Compute Assessments and the SAR Field Verification export are hidden.
+  * Review & Export CSV (PABS) is disabled, because that export locks policies as used.
+  * View Areas Affected works as before.
+
+### 4. File: `backend/tests/test_archive_service.py`
+* New tests: rows come back in the live PABS shape, a never-archived typhoon gives 404, and an unconfigured archive lists no archived typhoons.
+
+---
+
+## [2026-10-22] - Admin Panel & Database Backup Made Real; Archive & Clear
+
+An audit found admin controls that looked real but weren't:
+* Save All Settings only showed a toast.
+* The RSBSA coverage rate was never read by anything.
+* The Signal Damage Factor table was mock data unrelated to the real two-matrix payout engine.
+* Session Timeout and Auto-Save duplicated Account Settings.
+* The whole Database Backup tab was a mock.
+
+Cristian decided:
+* The coverage rate becomes a persisted **default** Amount of Cover.
+* The PCIC matrices are shown **read-only**.
+* The duplicate session controls are removed.
+* Backup becomes real `pg_dump` backups to Google Drive, plus **Archive & Clear**:
+  * Once every assessed typhoon is 7 days past its last bulletin, an Admin or GIS Specialist can move all uploaded PABS records and polygons into a separate **read-only archive database**.
+  * PCIC re-exports the data from PABS for the next typhoon.
+  * Archives are viewable as a table and a map, and are never restored.
+
+### 1. File: `backend/migrations/2026-10-22_system_settings_backup_log.sql` (new) / `backend/init_schema.sql`
+* `tbl_system_settings (setting_key PK, setting_value JSONB, updated_at, updated_by)`, seeded with `coverage_rate_per_ha = 25000` and `auto_backup_enabled = true`.
+* `tbl_backup_log`: one row per app-run `pg_dump` (`manual` / `scheduled` / `archive`). Holds the file, size, Drive file id and errors.
+
+### 2. File: `backend/archive_schema.sql` (new)
+* Schema for the separate `agrisure_archive` database.
+* Batch table: `tbl_archive_batch`.
+* Copied and then deleted from live: `arc_farmers`, `arc_farms` (with polygons), `arc_insurance_records`, `arc_risk_assessment`, `arc_insurance_usage`, `arc_planted_verification`, `arc_sar_planted_check`, `arc_sar_observation`.
+* Typhoon context, copied but kept live: `arc_typhoons`, `arc_tropical_cyclone_bulletins`, `arc_tcb_signals`, `arc_area_exposure_summary`, plus the referenced `arc_admin_boundaries` polygons.
+* Read-only is enforced in the database:
+  * role `agrisure_archive_reader`: SELECT only
+  * role `agrisure_archive_writer`: SELECT + INSERT only
+  * a statement trigger on every table rejects UPDATE, DELETE and TRUNCATE
+
+### 3. File: `backend/app/core/database.py`
+* `archive_reader_engine()` / `archive_writer_engine()` are built lazily from `ARCHIVE_DATABASE_URL` / `ARCHIVE_WRITER_DATABASE_URL`.
+* `ArchiveNotConfiguredError` is raised when a URL is unset, so the backend still starts without the archive.
+* `archive_configured()` reports whether both URLs are set.
+
+### 4. File: `backend/app/core/system_settings.py` (new) / `backend/app/models/models.py`
+* `get_setting()`, `set_setting()` and `get_coverage_rate()` read/write the settings, with `DEFAULTS` as the fallback.
+* New ORM models: `SystemSetting`, `BackupLog`.
+
+### 5. File: `backend/app/services/backup_service.py` (new)
+* **`run_backup(db, kind, user_id)`**:
+  * Runs `pg_dump -Fc` into `BACKUP_DIR` (default `backend/backups/`, gitignored). The password goes via `PGPASSWORD`, never on the command line.
+  * Uploads the dump to Google Drive when configured.
+  * Logs the run to `tbl_backup_log`.
+  * A failed Drive upload is recorded but never fails the backup.
+* **`upload_to_gdrive()`**: personal-Gmail OAuth refresh token, scope `drive.file`. Uses `googleapiclient`, which already ships with earthengine-api, so there is no new dependency.
+* **`backup_file_path()`**: resolves a dump on disk and refuses any path outside `BACKUP_DIR`.
+
+### 6. File: `backend/app/services/archive_service.py` (new)
+* **`eligibility(db)`**:
+  * Looks at every typhoon the live data was assessed, locked or SAR-checked against.
+  * Clearable only when there is live data, at least one such typhoon, and now ≥ each typhoon's last bulletin + `CLEAR_AFTER_DAYS` (7).
+* **`archive_and_clear(db, user)`** runs in this order:
+  1. Re-checks eligibility.
+  2. Takes a safety `pg_dump`.
+  3. In one REPEATABLE READ snapshot: counts rows, copies every table into the archive in one archive transaction, and verifies the counts.
+  4. Deletes from live, children before parents.
+  5. Commits the archive, then live.
+
+  If anything fails before the commit, nothing is deleted. A rows-uploaded-mid-archive case is neither archived nor deleted. A module lock stops two concurrent runs.
+* Read-only viewers, all using the reader login:
+  * `list_archives()`
+  * `archive_records()` and `archive_records_all()`: policy × assessment rows
+  * `archive_farms_geojson()`: farm polygons with total payout, bbox-scoped and capped at 5,000
+  * `archive_exposure_geojson()`: exposure municipality outlines plus the typhoon track
+
+### 7. File: `backend/app/api/settings.py` (new)
+* `GET /api/settings`
+* `PUT /api/settings/coverage-rate` (admin, ₱1,000–100,000)
+* `PUT /api/settings/auto-backup` (admin)
+* `GET /api/settings/matrices` (admin, read-only RECSAP and indemnity rows)
+
+### 8. File: `backend/app/api/archives.py` (new)
+* Any signed-in user:
+  * `GET /api/archives/eligibility`
+  * `POST /api/archives` (body `{"confirm": "CLEAR"}`)
+* Admin only:
+  * `GET /api/archives`
+  * `GET /api/archives/{id}/records`, `/farms`, `/exposure`, `/export` (CSV)
+  * `GET`/`POST /api/backups`
+  * `GET /api/backups/{id}/download`
+
+### 9. File: `backend/app/api/upload.py`
+* `_ingest_row()`: a blank or zero `AmountofCover` now becomes `coverage_rate_per_ha × farm.area_size` (it used to be ₱0, which made every payout for that policy ₱0). CSV values always win.
+* `_IngestCaches.coverage_rate_per_ha` reads the rate once per upload.
+* `_RowIngestResult.defaulted_ac` flags each defaulted row; the count goes into the Activity Log remarks and the job result as `rows_defaulted_ac`.
+
+### 10. File: `backend/app/core/scheduler.py`
+* **`run_scheduled_backup()`**: a cron job at 23:00 Asia/Manila (`BACKUP_JOB_ID`).
+* It reads `auto_backup_enabled` each night, so toggling it needs no reschedule.
+* Results go to the Activity Log as `SYSTEM`.
+
+### 11. File: `backend/app/main.py`
+* Registers the settings and archives routers.
+* The archive CSV export and backup downloads are now audited GETs (`_LOGGED_GET_PATTERN`).
+
+### 12. File: `backend/scripts/gdrive_authorize.py` (new)
+* A one-time OAuth loopback consent that prints `GDRIVE_REFRESH_TOKEN`. It uses only the standard library and httpx.
+
+### 13. Frontend
+* `lib/api.ts`: typed clients for every endpoint above.
+* `CalibrationModule.tsx`:
+  * The coverage rate loads from and saves to the API; Save All Settings does a real PUT.
+  * The two PCIC matrices are rendered read-only.
+  * The Session & Security section and the mock `DAMAGE_FACTORS` table are removed.
+* `App.tsx`: the dead `coverageRatePerHa` state and its props are removed.
+* `DatabaseBackupModule.tsx`:
+  * Rewritten with real last-backup/size/count, a Drive status card and a backup history with dump downloads.
+  * Run Backup Now and the 23:00 auto-backup toggle are real.
+  * Adds Archive & Clear, and an archive list with View/CSV.
+  * "Restore from Backup" is removed on purpose; restore stays a manual `pg_restore`.
+* `ArchiveClearCard.tsx` (new):
+  * Shows eligibility, live counts and per-typhoon clearable dates, and the caution text.
+  * Requires typing CLEAR to confirm, then shows the result.
+  * Used on the admin Backup tab, and at the bottom of Account Settings for GIS Specialists only. The Specialist page reloads after a clear so no screen keeps showing cleared farms.
+* `ArchiveViewer.tsx` (new):
+  * Read-only Table mode: search and pages.
+  * Map mode: Esri imagery; farm polygons coloured by payout, loaded per viewport; exposure outlines by TCWS; the typhoon track.
+  * CSV download.
+* Deleted the unused `SettingsModule.tsx`, `SpatialModule.tsx` and `Login.tsx` (imported nowhere).
+
+### 14. Tests
+* `tests/test_archive_service.py` (new) covers:
+  * the 6 vs 7 day boundary
+  * the latest typhoon setting the wait
+  * no data or no assessed typhoon is not clearable
+  * a copy mismatch aborts with no DELETE and no commit
+  * delete order
+  * a concurrent run is refused
+  * a wrong confirmation word is rejected
+* `tests/test_settings_api.py` (new) covers rate validation and persistence, and the admin-only guard.
+* `tests/test_upload_csv_ingestion.py`:
+  * The fake DB gains `tbl_system_settings`.
+  * New tests: a blank AC defaults to rate × area; a zero AC uses an admin-changed rate; a CSV AC always wins.
+
+---
+
+## [2026-10-22] - Closing the App Logs Out (Sprint 3)
+
+Explicit request: closing the app should log the user out. Before this, the
+session lived in `localStorage`, so it survived closing the tab, the installed
+PWA window, and even a browser restart. It now lives in `sessionStorage`,
+which the browser keeps across a refresh but discards when the tab or app
+window closes. Frontend only; no backend or schema change.
+
+### 1. File: `frontend/src/lib/authStorage.ts`
+* `loadPersistedUser()`, `persistUser()`, `clearPersistedUser()`,
+  `loadPersistedToken()` and `persistToken()` use `sessionStorage` instead of
+  `localStorage`. The storage keys are unchanged.
+* A one-time module-load cleanup removes the old `localStorage` copies of both
+  keys, so a session saved by an earlier build doesn't stay on disk.
+* Trade-offs, documented in the module comment:
+  * A second tab doesn't share the session and asks for login.
+  * Closing the app writes no `LOGOUT` to the Activity Log. The browser gives
+    no reliable signal that tells closing apart from refreshing, so a close
+    can't be told to the backend. The token is stateless and is simply
+    discarded with the storage.
+
+### 2. File: `frontend/src/app/App.tsx`
+* Comments only: storage references updated to `sessionStorage`.
+
+---
+
+## [2026-10-22] - Activity Log Remarks: Every Action Recorded in Detail (Sprint 3)
+
+Requested explicitly: every Activity Log entry should say exactly what was done,
+like the REMARKS column of the PABS export. Before this, an entry stored only
+action, endpoint and status, so the panel could say "Uploaded a CSV file" but
+not which file, how many records were accepted or rejected, or why a wrong
+CSV/GPX was rejected. New `remarks TEXT` column. The existing log is
+**cleared** by the migration, as requested, so the table starts in the new
+format. Also new: the two CSV export GETs, the background CSV ingestion's real
+outcome (`INGEST`), and the scheduled PAGASA TCB ingestion (`SYSTEM`) are now
+logged.
+
+### 1. File: `backend/migrations/2026-10-22_activity_log_remarks.sql` (new) / `backend/init_schema.sql`
+* `ALTER TABLE tbl_activity_log ADD COLUMN remarks TEXT`, then
+  `TRUNCATE tbl_activity_log RESTART IDENTITY` (deletes every existing entry).
+* `init_schema.sql` creates the column directly.
+
+### 2. File: `backend/app/models/models.py`
+* `ActivityLog.remarks` (`Text`, nullable).
+
+### 3. File: `backend/app/core/activity_log.py`
+* A per-request remarks holder in a `ContextVar`: **`start_request_remarks()`** /
+  **`end_request_remarks()`** (middleware), **`note_activity(text)`** (routes;
+  a no-op outside a request, so tests that call route functions directly are
+  unaffected, and no route needs a `Request` parameter), and
+  **`note_activity_error(detail)`** (exception handlers).
+* **`compose_request_remarks()`**: route remarks plus `Rejected: <error>`
+  (4xx) or `Failed: <error>` (5xx).
+* **`describe_new_bulletins()`**: one phrase per new TCB (typhoon, bulletin #,
+  category, max signal, winds, final). Shared by `/bulletins/parse`,
+  `/bulletins/upload` and the scheduler. It never raises: a lookup problem
+  falls back to the bulletin's title, so describing an ingestion can't fail
+  the route that saved it. Caught by `test_email_alert_service.py`'s
+  upload-route tests, whose mock session made the join raise.
+* **`plural()`** formatting helper.
+* **`record_activity()`** gains `remarks=None`, truncated at 2,000 characters.
+
+### 4. File: `backend/app/main.py`
+* `activity_log_middleware` opens the remarks holder, also logs
+  `_LOGGED_GET_PATHS` (the payout and SAR field-verify CSV exports), writes the
+  composed remarks, and logs an unhandled exception as a 500 before re-raising.
+  The write itself moves to the new `_log_request_activity()`.
+* New exception handlers for `HTTPException` and `RequestValidationError`.
+  They pass the error message to the log, then defer to FastAPI's default
+  handlers, so responses are unchanged.
+
+### 5. File: `backend/app/api/upload.py`
+* `upload_csv()`: new `current_user` dependency, so the uploader is passed to
+  the ingestion thread. Remarks name the file, row count and size, or why it was
+  rejected (wrong type, undecodable, missing PABS columns).
+* `_run_csv_ingestion()`: new `user_id` argument; when the job finishes it
+  writes an **`INGEST`** entry through the new **`_log_csv_outcome()`**, with
+  counts for accepted, skipped (already on file) and rejected rows, plus the
+  first 5 rejected rows and their reasons (**`_describe_failures()`**,
+  **`_csv_failure_label()`**). A rollback or crash is logged as a 500.
+* `upload_gpx()`: remarks name the farm, FARMID, farmer and barangay, the match
+  mode, and whether an existing boundary was replaced.
+* `upload_gpkg()`: counts for accepted, rejected and duplicate features, plus
+  the first rejected features and their reasons.
+
+### 6. File: `backend/app/api/bulletins.py`
+* `/parse`: number of PDFs listed and the new TCBs ingested.
+* `/upload`: the bulletin ingested, or that it was already on file.
+* `/{tcb_id}/compute-exposure`: municipalities exposed and the number with 6+
+  hours of exposure.
+* `/settings`: polling interval before → after.
+
+### 7. File: `backend/app/core/scheduler.py`
+* New **`_log_scheduled_run()`**: a **`SYSTEM`** entry when the automatic poll
+  ingests new TCBs, or when the scrape or the status sync *starts* failing. A
+  quiet poll is not logged, and an ongoing failure is not logged again on every
+  15-minute run. Wrapped in its own try/except so it can never break the job.
+
+### 8. File: `backend/app/api/users.py`
+* New **`_full_name()`** and **`_account_changes()`**: before → after phrases
+  for name, email, role, activation and session timeout. A password change is
+  named only, never logged.
+* Login records the reason for a failure (wrong password, or no account with
+  that email) and a blocked inactive account. Remarks added to register,
+  create, `/me` and `/{user_id}`, including the activation email being sent.
+
+### 9. File: `backend/app/api/assessments.py`
+* `/calculate`: policies assessed, the number with a payout, and total
+  indemnity.
+* `GET /export`: file name, rows and total.
+* `/export-pabs`: file name, rows, total, and policies newly locked (now reads
+  `finalize_exported_usage()`'s return value).
+
+### 10. File: `backend/app/api/sar.py`
+* New **`_activity_typhoon_label()`** and **`_activity_farm_label()`**.
+* Remarks for `/layer`, `/check` (planted, field-verify by reason, GEE vs
+  cache), verification set (verdict before → after, notes) and clear, and the
+  field-verify CSV export.
+
+### 11. File: `backend/app/api/activity_log.py`
+* The response includes `remarks`. `_ENDPOINT_SUMMARIES` gains `/upload/gpkg`,
+  `/sar/check`, both exports, `/export-pabs`, `INGEST` and `SYSTEM`.
+
+### 12. File: `frontend/src/lib/api.ts` / `frontend/src/app/components/ActivityLogModule.tsx`
+* `ActivityLogEntry.remarks`. New **Remarks** column (wrapping text, "—" when
+  empty), action badges for `GET` / `INGEST` / `SYSTEM`, "System" as the user
+  for scheduler entries, and the panel widened to `max-w-7xl`.
+
+### 13. File: `backend/tests/test_activity_log_remarks.py` (new)
+* Helper tests (combining remarks and errors, validation-error flattening,
+  `plural`, truncation). Middleware tests through `TestClient`: a sync route's
+  remarks reach the log along with the rejection reason; an unauthenticated
+  upload is logged as rejected; an unlogged GET writes nothing.
+
+### 14. User / Action filters and sorting (same day, explicit request)
+Filter the log to one user or one kind of action, and sort it. Filtering runs
+in the database, not the browser, so a narrowed view reaches past the newest
+rows.
+* `backend/app/api/activity_log.py`: `GET /api/activity-log/` gains
+  **`action_type`**, one summary label, translated to SQL by the new
+  **`_action_type_filter()`**. Endpoint labels use the same regex as
+  `_ENDPOINT_SUMMARIES`, through Postgres `~`. LOGIN/LOGOUT labels come from
+  **`_LOGIN_LABEL_FILTERS`** (action + status code). An unknown label returns
+  400. New **`ACTION_TYPES`** list. Entries now include `user_id`. New
+  **`GET /api/activity-log/filters`** (**`list_activity_log_filters()`**)
+  returns every account with at least one entry (admins included) plus
+  `ACTION_TYPES`.
+* `frontend/src/lib/api.ts`: `getActivityLog()` takes
+  `{ userId, actionType, limit }`; new `getActivityLogFilters()` and
+  `ActivityLogFilters`; `ActivityLogEntry.user_id`.
+* `frontend/src/app/components/ActivityLogModule.tsx`: User and Action
+  dropdowns, Clear filters, and an entry count. Clicking a user's name or a
+  summary in a row applies that filter. Timestamp, User, Summary and Status
+  headers are sortable (asc → desc → off), using the same `SortableTh` pattern
+  as User Management. Fetches 500 rows per view. A stale response for an older
+  filter is discarded.
+* `backend/tests/test_activity_log_filters.py` (new): every label is offered and
+  unique; the compiled SQL targets the right method and pattern or status;
+  unknown label → 400; no pattern shadows another's label.
+
+---
+
+## [2026-10-22] - User Management: GIS Specialists Only; Status Filter, Search, Sort (Sprint 3)
+
+Requested by Cristian. User Management is now for managing GIS Specialists
+only. System Administrator accounts are created by the superuser outside the
+app (`seed_system_users.py` / SQL), so admins can no longer see, create,
+promote to, or edit an admin account, and public registration can no longer
+request one. The rule is enforced in the API as well as the UI. The table also
+gets an All / Active / Inactive filter (default Active), name search, and
+sortable headers. These go beyond the UI prototype and were added on explicit
+request. No schema change.
+
+### 1. File: `backend/app/api/users.py`
+* `ALLOWED_ROLES` is replaced by **`MANAGED_ROLE = "GIS Specialist"`**;
+  **`_require_role()`** now rejects any other role with a 400.
+* **`RegisterRequest.role`** / **`CreateUserRequest.role`**: default to
+  `MANAGED_ROLE`, and are still validated.
+* **`list_users()`** (`GET /api/users/`): returns GIS Specialist accounts only.
+* **`update_user()`** (`PATCH /api/users/{user_id}`): a System Administrator
+  target returns 404, the same as a missing user. Promoting to admin is
+  rejected through `_require_role`.
+* `register_user()` / `create_user()`: unchanged code, but they now only
+  accept GIS Specialist via `_require_role`.
+
+### 2. File: `frontend/src/app/components/UserManagementModule.tsx`
+* Removed `USER_ROLES`, the Role dropdowns in the Add/Edit modals, and the Role
+  column. The edit payload no longer sends `role`. Add User notes that the
+  account is created as a GIS Specialist.
+* New **`SortKey` / `SortState`** types, the **`SORT_COMPARE`** map (name is
+  case-insensitive; for status, ascending puts active first), and the
+  **`SortableTh`** clickable header component.
+* New **`STATUS_FILTERS`** / **`StatusFilter`**: `All | Active | Inactive`.
+* **`UserManagementModule`**: new `search`, `sort` and `statusFilter`
+  (default `"Active"`) state; `toggleSort()` (click cycles ascending →
+  descending → off); `statusCount()` for the per-option counts; and a memoized
+  `visibleUsers` (status filter + name search, then sort). The search box and
+  segmented filter sit above the table. Name and Status are sortable.
+
+### 3. File: `frontend/src/app/components/LoginScreen.tsx`
+* **`RegistrationPanel`**: the two-option Access Role selector is replaced by
+  a fixed "GIS Specialist" badge. The `RegRole` type and the `Shield` import
+  are removed.
+
+### 4. File: `backend/tests/test_users_api.py` (new)
+* `ManagedRoleTests`: the list filters to GIS Specialist; editing an admin
+  returns 404; promoting, creating, or registering an admin returns 400; and
+  create defaults to GIS Specialist.
+
+---
+
+## [2026-10-22] - One Email per New TCB; Account Activated/Deactivated Email (Sprint 3)
+
+A new TCB arrived and the GIS Specialist got no alert. When an email did come,
+it listed every TCB the storm had. The cause: `scrape_and_save_all()` returned
+every PDF PAGASA still had posted, including bulletins already saved in earlier
+polls. The alert therefore re-listed all of them, and could re-send on every
+15-minute poll while the typhoon was active. Separately, the backend had no
+logging handler, so the INFO-level skip/send lines never reached the console.
+Per Fabio: one email per genuinely new TCB. A TCB is alerted only if its typhoon
+is active when it arrives, otherwise it is skipped (not retried later), and
+there is no schema change. Also new: the affected user (any role) is emailed
+when an admin activates or deactivates their account.
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* New **`upsert_bulletin(parsed_data, db) -> (bulletin, created)`**: the old
+  `save_bulletin_to_db` body, now also returning whether a row was inserted
+  (`True`) or an existing bulletin matched (`False`).
+* **`save_bulletin_to_db()`**: thin wrapper returning just the bulletin, so
+  existing callers (simulation scripts, tests) are unchanged.
+* **`scrape_and_save_all()`**: only returns newly inserted bulletins. Also
+  fixes Monitoring's "Parsed N new bulletin(s)" count, which counted re-seen
+  ones. The final-bulletin assessment step is unchanged.
+
+### 2. File: `backend/app/services/email_alert_service.py`
+* **`send_new_bulletin_alerts()`**: one email per new bulletin. The subject is
+  `AgriSureGIS: New PAGASA Tropical Cyclone Bulletin #<n> for <TYPHOON>`, all
+  sent over one SMTP login. The `is_active` gate and BCC-style recipients are
+  unchanged.
+* New **`send_account_status_email(email, name, activated)`**: tells that one
+  user their account was activated/deactivated. Same no-op-if-unconfigured and
+  never-raises rules.
+* New helpers **`_compose()`** / **`_send()`**, shared by both.
+
+### 3. File: `backend/app/api/bulletins.py`
+* **`upload_bulletin_pdf()`**: uses `upsert_bulletin` and only alerts when the
+  upload created a new bulletin. Re-uploading a saved PDF no longer emails.
+
+### 4. File: `backend/app/api/users.py`
+* **`update_user()`** (`PATCH /api/users/{user_id}`): when `is_active` actually
+  changes, queues `send_account_status_email` as a FastAPI background task, so
+  the admin's save doesn't wait on Brevo. Other edits send nothing.
+
+### 5. File: `backend/app/main.py`
+* Adds a console handler at INFO for the `agrisuregis.*` and `app.*` loggers
+  only (not the root logger, so httpx/apscheduler stay quiet). Lines like "No
+  newly-parsed bulletins belong to a currently-active typhoon" and "Sent N
+  bulletin alert email(s)" now show in the uvicorn console.
+
+### 6. Tests
+* `tests/test_bulletin_parser.py`: scrape tests patch `upsert_bulletin`. New
+  tests: `upsert_bulletin` reports created/not-created, and
+  `scrape_and_save_all` drops already-saved bulletins.
+* `tests/test_email_alert_service.py`: the digest test is replaced by
+  `test_one_email_per_new_bulletin`. The upload wiring test now covers
+  "re-upload sends no alert". New `AccountStatusEmailTests` and
+  `UpdateUserRouteWiringTests`.
+
+---
+
 ## [2026-10-22] - PSGC Lookup: Four Barangay Spellings Aligned to the Legacy System, Plus Two Source Papers
 
 Per Fabio's working list ("updated the PSGC brgy and areas so that it would
