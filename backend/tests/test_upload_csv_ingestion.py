@@ -21,6 +21,7 @@ from app.models import models
 # into these tests), so it's patched per-test instead. Keyed uppercase to match
 # what _boundary_key() (upload.py's case-normalizing helper) actually produces.
 _FAKE_PSGC_LOOKUP = {("BUKIDNON", "MALAYBALAY", "CASISANG"): "1001312012"}
+_FAKE_PSGC_NAMES = {"1001312012": ("Bukidnon", "Malaybalay", "Casisang")}
 
 _PK_FIELDS = {
     models.AdminBoundary: "boundary_id",
@@ -250,9 +251,10 @@ def _csv(*rows: str) -> str:
 
 class UploadCsvIngestionTests(unittest.TestCase):
     def setUp(self):
-        patcher = patch("app.api.upload._load_psgc_lookup", return_value=_FAKE_PSGC_LOOKUP)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for target, value in (("_load_psgc_lookup", _FAKE_PSGC_LOOKUP), ("_load_psgc_names", _FAKE_PSGC_NAMES)):
+            patcher = patch(f"app.api.upload.{target}", return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def test_blank_rsbsa_no_does_not_collapse_distinct_farmers(self):
         csv_text = _csv(
@@ -494,10 +496,11 @@ class UploadCsvIngestionTests(unittest.TestCase):
         farmer = mock_db.tables[models.FarmerProfile].rows[0]
         self.assertEqual(farmer.last_name, "SEÑERES")
 
-    def test_mixed_case_source_values_are_normalized_to_upper_on_ingest(self):
+    def test_mixed_case_source_values_are_normalized_on_ingest(self):
         # Real PABS exports mix ALL CAPS and Title Case for the same fields, even
-        # within one export -- upload_csv() should normalize farmer names and
-        # boundary fields to ALL CAPS on ingest regardless of source casing.
+        # within one export -- farmer names are normalized to ALL CAPS, and a
+        # newly created boundary takes the PSGC reference file's spelling
+        # (2026-10-22), matching the seeded boundaries.
         csv_text = _HEADER + "\n" + (
             "bukidnon,Malaybalay,CasiSang,POL-1,RSBSA,,Abao,jonel,,"
             "1.0,10000,1,111,,5001,Booting,500,\n"
@@ -511,9 +514,22 @@ class UploadCsvIngestionTests(unittest.TestCase):
         self.assertEqual(farmer.last_name, "ABAO")
         self.assertEqual(farmer.first_name, "JONEL")
         boundary = mock_db.tables[models.AdminBoundary].rows[0]
-        self.assertEqual(boundary.province, "BUKIDNON")
+        self.assertEqual(
+            (boundary.province, boundary.municipality, boundary.barangay), ("Bukidnon", "Malaybalay", "Casisang"),
+        )
+
+    def test_new_boundary_without_reference_spelling_keeps_upper_case(self):
+        csv_text = _HEADER + "\n" + (
+            "bukidnon,Malaybalay,CasiSang,POL-1,RSBSA,,Abao,jonel,,"
+            "1.0,10000,1,111,,5001,Booting,500,\n"
+        )
+        mock_db = _build_mock_db()
+
+        with patch("app.api.upload._load_psgc_names", return_value={}):
+            _run_ingestion(csv_text, mock_db)
+
+        boundary = mock_db.tables[models.AdminBoundary].rows[0]
         self.assertEqual(boundary.municipality, "MALAYBALAY")
-        self.assertEqual(boundary.barangay, "CASISANG")
 
     def test_purely_numeric_policy_no_ingests_successfully_end_to_end(self):
         # Regression test for a real failure hit against a live DB: a purely
@@ -583,9 +599,10 @@ class CropStageTranslationTests(unittest.TestCase):
     Booting) fell outside {1,2,3} and was dropped."""
 
     def setUp(self):
-        patcher = patch("app.api.upload._load_psgc_lookup", return_value=_FAKE_PSGC_LOOKUP)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for target, value in (("_load_psgc_lookup", _FAKE_PSGC_LOOKUP), ("_load_psgc_names", _FAKE_PSGC_NAMES)):
+            patcher = patch(f"app.api.upload.{target}", return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def _seed_for(self, **row_kwargs):
         csv_text = _csv(_row("POL-1", "Cruz", "Ana", farmers_id="111", farmid="5001", **row_kwargs))
@@ -689,9 +706,10 @@ class ExistingRowBackfillTests(unittest.TestCase):
     )
 
     def setUp(self):
-        patcher = patch("app.api.upload._load_psgc_lookup", return_value=_FAKE_PSGC_LOOKUP)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for target, value in (("_load_psgc_lookup", _FAKE_PSGC_LOOKUP), ("_load_psgc_names", _FAKE_PSGC_NAMES)):
+            patcher = patch(f"app.api.upload.{target}", return_value=value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
     def _new_layout_csv(self, *, farmers_id="29136", farmid="365827", area="1.5"):
         return self._NEW_HEADER + "\n" + (
@@ -784,6 +802,28 @@ class ExistingRowBackfillTests(unittest.TestCase):
         _run_ingestion(self._new_layout_csv(area="1.5"), mock_db)
 
         self.assertEqual(existing_farm.area_size, Decimal("2.25"))
+
+
+class PsgcBarangayVariantTests(unittest.TestCase):
+    LOOKUP = {
+        ("CAGAYAN", "GATTARAN", "STA. ANA"): "0201513047",
+        ("ISABELA", "CITY OF CAUAYAN", "SANTO NIÑO"): "0203108999",
+    }
+
+    def test_spelled_out_santa_barangay_matches_abbreviated_psgc_name(self):
+        self.assertEqual(
+            upload_module._resolve_psgc_code(("CAGAYAN", "GATTARAN", "SANTA ANA"), self.LOOKUP),
+            "0201513047",
+        )
+
+    def test_abbreviated_barangay_matches_spelled_out_psgc_name(self):
+        self.assertEqual(
+            upload_module._resolve_psgc_code(("ISABELA", "CAUAYAN CITY", "STO. NIÑO"), self.LOOKUP),
+            "0203108999",
+        )
+
+    def test_abbreviation_never_crosses_municipalities(self):
+        self.assertIsNone(upload_module._resolve_psgc_code(("CAGAYAN", "BAGGAO", "SANTA ANA"), self.LOOKUP))
 
 
 if __name__ == "__main__":

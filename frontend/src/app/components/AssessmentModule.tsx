@@ -6,10 +6,14 @@ import {
 } from "lucide-react";
 import {
   getAssessmentsPabsSummary, downloadAssessmentsPabsCsv, getBulletins, getTyphoonSummary, calculateAssessments,
-  getBulletinSignals, getFieldVerifyList, downloadFieldVerifyCsv, getArchivedTyphoons, getArchivedTyphoonRows,
-  PabsAssessmentRow, Bulletin, TyphoonSummary, TyphoonSummaryArea, TcbSignal, FieldVerifyList, FieldVerifyRow,
+  getTyphoonExposure, getFieldVerifyList, downloadFieldVerifyCsv, getArchivedTyphoons, getArchivedTyphoonRows,
+  PabsAssessmentRow, Bulletin, TyphoonSummary, TyphoonExposure, FieldVerifyList, FieldVerifyRow,
+  AssessmentJob, getAssessmentJob, getActiveAssessmentJob,
   ArchivedTyphoon, ArchivedTyphoonRows,
 } from "@/lib/api";
+import { ExposureTable } from "./ExposureTable";
+import { AssessmentProgressBar } from "./AssessmentProgressBar";
+import { formatPeso, sumPesos } from "@/lib/format";
 
 function formatDateTime(iso: string | null): string {
   if (!iso) return "—";
@@ -17,6 +21,9 @@ function formatDateTime(iso: string | null): string {
   if (Number.isNaN(d.getTime())) return iso;
   return d.toLocaleString(undefined, { year: "numeric", month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" });
 }
+
+// How often a running assessment calculation's progress is polled.
+const ASSESSMENT_POLL_MS = 500;
 
 // TYPHOON_NAME isn't sortable (2026-10-13, per Cristian -- unnecessary).
 type SortField = "FARMER_NAME" | "province" | "municipality" | "barangay" | "AREA" | "PERIOD_OF_EXPOSURE" | "wind_signal" | "crop_stage" | "AC";
@@ -61,7 +68,7 @@ function formatPabsCell(field: keyof PabsAssessmentRow, value: unknown): string 
 // ─── CSV Preview / Download Modal ────────────────────────────────────────────
 function CSVPreviewModal({ rows, onClose }: { rows: PabsAssessmentRow[]; onClose: () => void }) {
   const totalArea = rows.reduce((s, r) => s + (r.AREA ?? 0), 0);
-  const totalAC = rows.reduce((s, r) => s + (r.AC ?? 0), 0);
+  const totalAC = sumPesos(rows.map(r => r.AC));
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
@@ -104,7 +111,7 @@ function CSVPreviewModal({ rows, onClose }: { rows: PabsAssessmentRow[]; onClose
           <div className="flex items-center gap-6 text-[11px]">
             <span className="text-muted-foreground"><strong className="text-foreground">{rows.length}</strong> records</span>
             <span className="text-muted-foreground">Total Area: <strong className="text-[#166534]">{totalArea.toFixed(2)} ha</strong></span>
-            <span className="text-muted-foreground">Total AC: <strong className="text-[#ca8a04]">₱{totalAC.toLocaleString()}</strong></span>
+            <span className="text-muted-foreground">Total AC: <strong className="text-[#ca8a04]">{formatPeso(totalAC)}</strong></span>
           </div>
           <div className="flex items-center gap-2">
             <button onClick={onClose} className="px-3 py-1.5 rounded-lg border border-border text-xs hover:bg-muted transition-colors">Cancel</button>
@@ -231,80 +238,34 @@ function FieldVerifyModal({ list, onClose }: { list: FieldVerifyList; onClose: (
 }
 
 // ─── Areas Affected Modal ────────────────────────────────────────────────────
-// Every area named in the typhoon's TCB signals, merged across all its
-// bulletins -- unlike `typhoonSummary.areas_hit` (tbl_area_exposure_summary),
-// which only has rows after "Compute Assessments" has run, this shows a
-// matched area (bulletin_parser.py already validates each signal against
-// AdminBoundary at scrape time, nationwide as of 2026-08-20) as soon as it's
-// in a bulletin, so it stays the authoritative "all areas listed in the TCB"
-// view even when exposure hasn't been computed for some of them yet.
-interface MergedArea {
-  area_name: string;
-  province: string | null;
-  island_group: number;
-  max_signal_level: number;
-  exposure: TyphoonSummaryArea | null;
-}
-
-// PAGASA's fixed TCWS column order (backend/app/services/bulletin_parser.py).
-// As of the nationwide PSGC expansion (2026-08-20), every island group is
-// matched against AdminBoundary and feeds exposure/indemnity calculations --
-// previously this was Mindanao (2) only.
-const ISLAND_GROUP_LABELS: Record<number, string> = { 0: "Luzon", 1: "Visayas", 2: "Mindanao" };
-
+// Every municipality under a wind signal during the typhoon, with its Max
+// Signal, hours under each of Signal 1-5 and Total Exposure -- the same
+// backend rows the Main Dashboard's Exposure Summary shows (2026-10-22; the
+// per-TCB signal merge that used to run here is now done once, server-side,
+// by ExposureCalculatorService whenever a bulletin is saved).
 function AreasAffectedModal({
-  typhoonName, tcbIds, typhoonSummary, onClose,
+  typhoonId, typhoonName, onClose,
 }: {
+  typhoonId: number;
   typhoonName: string;
-  tcbIds: number[];
-  typhoonSummary: TyphoonSummary | null;
   onClose: () => void;
 }) {
-  const [areas, setAreas] = useState<MergedArea[]>([]);
+  const [exposure, setExposure] = useState<TyphoonExposure | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setIsLoading(true);
     setError(null);
-    Promise.all(tcbIds.map(id => getBulletinSignals(id)))
-      .then(signalLists => {
-        const merged = new Map<string, MergedArea>();
-        for (const signals of signalLists) {
-          for (const s of signals as TcbSignal[]) {
-            // Keyed on province+municipality, not municipality alone -- a
-            // same-named municipality can exist in more than one province
-            // nationwide (e.g. multiple "Santa Cruz"), so province is needed
-            // to avoid merging two distinct areas into one row.
-            const key = `${(s.province ?? "").trim().toLowerCase()}:${s.area_name.trim().toLowerCase()}`;
-            const existing = merged.get(key);
-            if (existing) existing.max_signal_level = Math.max(existing.max_signal_level, s.signal_level);
-            else merged.set(key, { area_name: s.area_name, province: s.province, island_group: s.island_group, max_signal_level: s.signal_level, exposure: null });
-          }
-        }
-        // Match on the same province+municipality key so exposure numbers
-        // never get attributed to the wrong same-named area in a different
-        // province -- see backend/app/services/exposure_calculator.py.
-        for (const area of typhoonSummary?.areas_hit ?? []) {
-          const key = `${area.province.trim().toLowerCase()}:${area.municipality.trim().toLowerCase()}`;
-          const m = merged.get(key);
-          if (m) m.exposure = area;
-        }
-        setAreas(Array.from(merged.values()).sort((a, b) =>
-          a.island_group - b.island_group ||
-          b.max_signal_level - a.max_signal_level ||
-          a.area_name.localeCompare(b.area_name)
-        ));
-      })
-      .catch(err => setError(err instanceof Error ? err.message : "Failed to load TCB signal areas."))
+    getTyphoonExposure(typhoonId)
+      .then(setExposure)
+      .catch(err => setError(err instanceof Error ? err.message : "Failed to load areas affected."))
       .finally(() => setIsLoading(false));
-  }, [tcbIds, typhoonSummary]);
-
-  const matchedCount = areas.filter(a => a.exposure !== null).length;
+  }, [typhoonId]);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
-      <div className="bg-card border border-border rounded-2xl shadow-2xl w-[95vw] max-w-4xl max-h-[85vh] flex flex-col">
+      <div className="bg-card border border-border rounded-2xl shadow-2xl w-[95vw] max-w-6xl max-h-[85vh] flex flex-col">
         <div className="flex items-center justify-between px-5 py-3 border-b border-border shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 rounded-lg bg-[#166534]/10 flex items-center justify-center">
@@ -313,55 +274,21 @@ function AreasAffectedModal({
             <div>
               <p className="text-sm font-bold">Areas Affected — Typhoon {typhoonName}</p>
               <p className="text-[10px] text-muted-foreground">
-                All areas listed across {tcbIds.length} TCB bulletin(s), merged by highest signal level
+                Hours each municipality spent under each wind signal{exposure ? `, across ${exposure.bulletin_count} TCB bulletin(s)` : ""}
               </p>
             </div>
           </div>
           <button onClick={onClose} className="w-7 h-7 rounded flex items-center justify-center hover:bg-muted text-muted-foreground hover:text-foreground transition-colors">✕</button>
         </div>
 
-        {!isLoading && !error && areas.length > 0 && (
-          <div className="flex items-center gap-2 px-5 py-2 bg-blue-50 dark:bg-blue-950/30 border-b border-blue-100 shrink-0">
-            <AlertCircle size={11} className="text-blue-600 shrink-0" />
-            <p className="text-[10px] text-blue-700 dark:text-blue-300">
-              {matchedCount} of {areas.length} area(s) have computed exposure data (Compute Assessments requires this). An area only appears here if the bulletin named a specific municipality that matched a known administrative boundary.
-            </p>
-          </div>
-        )}
-
-        <div className="overflow-auto flex-1 px-1">
+        <div className="overflow-auto flex-1 px-4 py-3">
           {isLoading ? (
-            <p className="px-4 py-6 text-[11px] text-muted-foreground text-center">Loading TCB signal areas…</p>
+            <p className="px-4 py-6 text-[11px] text-muted-foreground text-center">Loading areas affected…</p>
           ) : error ? (
             <p className="px-4 py-6 text-[11px] text-red-600 text-center">{error}</p>
-          ) : areas.length === 0 ? (
-            <p className="px-4 py-6 text-[11px] text-muted-foreground text-center">No areas listed in this typhoon's TCB signals.</p>
-          ) : (
-            <table className="w-full text-[10px]">
-              <thead className="sticky top-0 z-10">
-                <tr className="bg-[#1e3a5f] text-white">
-                  <th className="px-2.5 py-2 text-left font-semibold">Island Group</th>
-                  <th className="px-2.5 py-2 text-left font-semibold">Area (as named in TCB)</th>
-                  <th className="px-2.5 py-2 text-left font-semibold">Signal Number</th>
-                  <th className="px-2.5 py-2 text-left font-semibold">Exposure (h)</th>
-                  <th className="px-2.5 py-2 text-left font-semibold">Start Time</th>
-                  <th className="px-2.5 py-2 text-left font-semibold">End Time</th>
-                </tr>
-              </thead>
-              <tbody>
-                {areas.map((a, i) => (
-                  <tr key={`${a.province}:${a.area_name}`} className={`border-t border-border ${i % 2 === 0 ? "" : "bg-muted/10"}`}>
-                    <td className="px-2.5 py-1.5 text-muted-foreground">{ISLAND_GROUP_LABELS[a.island_group] ?? "—"}</td>
-                    <td className="px-2.5 py-1.5 font-semibold text-[#166534]">{a.area_name}</td>
-                    <td className="px-2.5 py-1.5">Signal No. {a.max_signal_level}</td>
-                    <td className="px-2.5 py-1.5">{a.exposure?.total_exposure_hours ?? "—"}</td>
-                    <td className="px-2.5 py-1.5">{formatDateTime(a.exposure?.start_time ?? null)}</td>
-                    <td className="px-2.5 py-1.5">{formatDateTime(a.exposure?.end_time ?? null)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+          ) : exposure ? (
+            <ExposureTable exposure={exposure} showIslandGroup headerColor="#1e3a5f" />
+          ) : null}
         </div>
 
         <div className="flex items-center justify-end px-5 py-3 border-t border-border bg-muted/20 shrink-0">
@@ -398,7 +325,60 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
   const [typhoonSummaryError, setTyphoonSummaryError] = useState<string | null>(null);
   const [showAreasModal, setShowAreasModal] = useState(false);
 
-  const [isComputingAssessments, setIsComputingAssessments] = useState(false);
+  // The selected typhoon's assessment calculation run (2026-10-22): real
+  // backend progress, polled while it runs. null = none started/resumed.
+  const [assessmentJob, setAssessmentJob] = useState<AssessmentJob | null>(null);
+  const isComputingAssessments = assessmentJob?.status === "processing";
+
+  // A calculation still running for this typhoon (e.g. after a page refresh,
+  // or the automatic final-bulletin run) is picked back up.
+  useEffect(() => {
+    setAssessmentJob(null);
+    if (selectedTyphoonId === null) return;
+    let cancelled = false;
+    getActiveAssessmentJob(selectedTyphoonId)
+      .then(res => { if (!cancelled && res.job?.status === "processing") setAssessmentJob(res.job); })
+      .catch(() => { /* no job info -- the Compute button still works */ });
+    return () => { cancelled = true; };
+  }, [selectedTyphoonId]);
+
+  // One poll loop per job id: each request waits for the previous one, so
+  // updates can never arrive out of order or from two loops at once.
+  const pollingJobId = assessmentJob?.status === "processing" ? assessmentJob.job_id : null;
+  useEffect(() => {
+    if (pollingJobId === null) return;
+    let cancelled = false;
+    (async () => {
+      while (!cancelled) {
+        await new Promise(resolve => setTimeout(resolve, ASSESSMENT_POLL_MS));
+        if (cancelled) return;
+        let job: AssessmentJob;
+        try {
+          job = await getAssessmentJob(pollingJobId);
+        } catch (error) {
+          if (cancelled) return;
+          toast.error(error instanceof Error ? error.message : "Lost track of the assessment calculation.");
+          setAssessmentJob(null);
+          return;
+        }
+        if (cancelled) return;
+        setAssessmentJob(job);
+        if (job.status === "done") {
+          toast.success(`Computed ${job.result?.assessments_computed ?? 0} assessment(s) for this typhoon.`);
+          loadSummary();
+          return;
+        }
+        if (job.status === "error") {
+          toast.error(job.error ?? "Assessment calculation failed.");
+          return;
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+    // loadSummary is a plain function redefined each render; the loop only
+    // needs it once, at completion.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pollingJobId]);
 
   // SAR field verification list for the selected typhoon (2026-10-13). null
   // while loading, on error, or with no typhoon selected.
@@ -455,14 +435,14 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
     );
     if (!latest) return;
 
-    setIsComputingAssessments(true);
-    calculateAssessments(selectedTyphoonId, latest.tcb_id)
+    const typhoonId = selectedTyphoonId;
+    calculateAssessments(typhoonId, latest.tcb_id)
       .then(res => {
-        toast.success(`Computed ${res.assessments_computed} assessment(s) for this typhoon.`);
-        loadSummary();
+        if (res.already_running) toast.info("An assessment calculation for this typhoon is already running.");
+        return getAssessmentJob(res.job_id);
       })
-      .catch(error => toast.error(error instanceof Error ? error.message : "Failed to compute assessments."))
-      .finally(() => setIsComputingAssessments(false));
+      .then(job => setAssessmentJob(job))
+      .catch(error => toast.error(error instanceof Error ? error.message : "Failed to compute assessments."));
   };
 
   const loadSummary = () => {
@@ -556,7 +536,7 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
   };
 
   const totalArea = filtered.reduce((s, r) => s + (r.AREA ?? 0), 0);
-  const totalAC = filtered.reduce((s, r) => s + (r.AC ?? 0), 0);
+  const totalAC = sumPesos(filtered.map(r => r.AC));
 
   const SortIcon = ({ field }: { field: SortField }) =>
     sortField === field
@@ -720,6 +700,12 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
         </div>
       )}
 
+      {!showArchived && assessmentJob && (
+        <div className="mx-3 mt-2 px-3 py-2 rounded-xl shrink-0 border border-border bg-card">
+          <AssessmentProgressBar job={assessmentJob} />
+        </div>
+      )}
+
       {showArchived && selectedArchive && (
         <div className="mx-3 mt-2 flex items-center gap-2 px-3 py-2 rounded-xl shrink-0 border border-amber-300 bg-amber-50 dark:bg-amber-950/30 text-[10px] text-amber-800 dark:text-amber-300">
           <Lock size={11} className="shrink-0" />
@@ -743,9 +729,8 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
 
       {showAreasModal && selectedTyphoonId !== null && (
         <AreasAffectedModal
+          typhoonId={selectedTyphoonId}
           typhoonName={typhoonSummary?.typhoon_name ?? typhoons.find(t => t.typhoon_id === selectedTyphoonId)?.typhoon_name ?? ""}
-          tcbIds={bulletins.filter(b => b.typhoon_id === selectedTyphoonId).map(b => b.tcb_id)}
-          typhoonSummary={typhoonSummary}
           onClose={() => setShowAreasModal(false)}
         />
       )}
@@ -775,7 +760,7 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
             {[
               { label: "Total Records", value: filtered.length, unit: "", color: "#1e3a5f" },
               { label: "Total Area", value: totalArea.toFixed(1), unit: "ha", color: "#166534" },
-              { label: "Total AC (Sum Insured)", value: `₱${(totalAC / 1000).toFixed(0)}K`, unit: "", color: "#ca8a04" },
+              { label: "Total AC (Sum Insured)", value: formatPeso(totalAC), unit: "", color: "#ca8a04" },
             ].map((s, i) => (
               <div key={i} className="bg-card border border-border rounded-xl px-3 py-2">
                 <p className="text-[9px] text-muted-foreground uppercase tracking-wide">{s.label}</p>
@@ -820,7 +805,7 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
                       {/* wind_signal is the TCWS signal number; WIND_VELOCITY is km/h (CSV only). */}
                       <td className="px-2 py-1.5 text-center whitespace-nowrap">{r.wind_signal != null ? `Signal ${r.wind_signal}` : "—"}</td>
                       <td className="px-2 py-1.5 text-center whitespace-nowrap">{formatCell(r.crop_stage)}</td>
-                      <td className="px-2 py-1.5 text-center font-bold text-[#166534] dark:text-emerald-400">{r.AC != null ? `₱${r.AC.toLocaleString()}` : "—"}</td>
+                      <td className="px-2 py-1.5 text-center font-bold text-[#166534] dark:text-emerald-400">{formatPeso(r.AC)}</td>
                       <td className="px-2 py-1.5 text-center font-mono text-muted-foreground">{formatCell(r.FARMERID)}</td>
                       {/* PCIC's own FARMID, same value as the CSV (2026-10-12). */}
                       <td className="px-2 py-1.5 text-center font-mono text-[#166534] dark:text-emerald-400">{formatCell(r.FARMID)}</td>
@@ -832,7 +817,7 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
                     <td colSpan={5} className="px-2 py-2 text-center">TOTAL ({filtered.length} records)</td>
                     <td className="px-2 py-2 text-center">{totalArea.toFixed(2)}</td>
                     <td colSpan={3} />
-                    <td className="px-2 py-2 text-center text-[#166534]">₱{totalAC.toLocaleString()}</td>
+                    <td className="px-2 py-2 text-center text-[#166534]">{formatPeso(totalAC)}</td>
                     <td colSpan={2} />
                   </tr>
                 </tfoot>

@@ -1,9 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import { Database, RefreshCw, AlertTriangle, Download, Eye, CheckCircle2, XCircle, Cloud } from "lucide-react";
+import { Database, RefreshCw, AlertTriangle, Download, Eye, CheckCircle2, XCircle, Cloud, ShieldCheck, Lock } from "lucide-react";
 import { toast } from "sonner";
 import {
   ArchiveBatch, BackupEntry, BackupOverview,
   downloadArchiveCsv, downloadBackup, getArchives, getBackups, getSystemSettings, runBackupNow, updateAutoBackup,
+  verifyBackup,
 } from "@/lib/api";
 import { ArchiveClearCard } from "./ArchiveClearCard";
 import { ArchiveViewer } from "./ArchiveViewer";
@@ -11,8 +12,11 @@ import { ArchiveViewer } from "./ArchiveViewer";
 // Database Backup & Archive (2026-10-22) -- every control is real now (it was
 // a UI-only mock). Backups are pg_dump files on the server + Google Drive;
 // Archive & Clear moves the live PABS records into the read-only archive DB.
-// "Restore from Backup" was removed on purpose: archives are viewed, never
-// restored, and a full restore is Fabio's pg_restore, run by hand.
+// Verify (2026-10-22) test-restores a backup -- from the server or from Google
+// Drive -- into the separate verification database and compares row counts.
+// Overwriting the LIVE database is still never offered in-app: archives are
+// viewed, never restored, and a live restore is the DB admin's pg_restore,
+// run by hand (.claude/ENV_GUIDE.md).
 
 interface ConfirmDialogProps {
   message: string;
@@ -56,6 +60,8 @@ export function DatabaseBackupModule() {
   const [backupRunning, setBackupRunning] = useState(false);
   const [confirm, setConfirm] = useState<{ msg: string; fn: () => void } | null>(null);
   const [viewing, setViewing] = useState<ArchiveBatch | null>(null);
+  // backup_id being verified, so only that row shows a spinner
+  const [verifying, setVerifying] = useState<number | null>(null);
 
   const loadBackups = useCallback(() => {
     getBackups()
@@ -97,6 +103,27 @@ export function DatabaseBackupModule() {
       .catch(error => { setAutoBackup(!enabled); toast.error(errorText(error, "Failed to save the setting.")); });
   };
 
+  const handleVerify = (backup: BackupEntry, source: "local" | "gdrive") => {
+    setVerifying(backup.backup_id);
+    verifyBackup(backup.backup_id, source)
+      .then(res => {
+        const b = res.data;
+        if (b.verify_status === "verified") {
+          toast.success(`${b.file_name} restored into the verification database: ${(b.verify_detail?.rows_checked ?? 0).toLocaleString()} rows in ${b.verify_detail?.tables_checked ?? 0} tables match.`);
+        } else {
+          toast.error(`${b.file_name} did not verify: ${b.verify_detail?.mismatches.length ?? 0} mismatch(es).`);
+        }
+      })
+      .catch(error => toast.error(errorText(error, "Verification failed.")))
+      .finally(() => { setVerifying(null); loadBackups(); });
+  };
+
+  const askVerify = (backup: BackupEntry, source: "local" | "gdrive") => setConfirm({
+    msg: `Restore ${backup.file_name} ${source === "gdrive" ? "from Google Drive " : ""}into the verification database to check it? ` +
+      "This replaces whatever the verification database currently holds. The live database is not touched.",
+    fn: () => { setConfirm(null); handleVerify(backup, source); },
+  });
+
   const handleDownload = (backup: BackupEntry) => {
     downloadBackup(backup).catch(error => toast.error(errorText(error, "Download failed.")));
   };
@@ -127,7 +154,7 @@ export function DatabaseBackupModule() {
                   { label: "Last Backup",    value: last ? formatDate(last.created_at) : "Never", ok: !!last },
                   { label: "Backup Size",    value: formatBytes(last?.size_bytes ?? null),       ok: true },
                   { label: "Stored Backups", value: overview ? `${overview.stored_count} versions` : "—", ok: true },
-                  { label: "Google Drive",   value: overview == null ? "—" : overview.gdrive_configured ? "Connected" : "Not configured", ok: !!overview?.gdrive_configured },
+                  { label: "Google Drive",   value: overview == null ? "—" : overview.gdrive_configured ? (overview.encryption_configured ? "Connected · encrypted" : "Connected") : "Not configured", ok: !!overview?.gdrive_configured },
                 ].map(s => (
                   <div key={s.label} className="bg-muted/40 rounded-lg p-3 border border-border">
                     <p className="text-[10px] text-muted-foreground">{s.label}</p>
@@ -171,6 +198,7 @@ export function DatabaseBackupModule() {
                         <th className="py-1.5 pr-3 font-medium">File</th>
                         <th className="py-1.5 pr-3 font-medium">Size</th>
                         <th className="py-1.5 pr-3 font-medium">Drive</th>
+                        <th className="py-1.5 pr-3 font-medium">Verified</th>
                         <th className="py-1.5 font-medium text-right">Action</th>
                       </tr>
                     </thead>
@@ -187,10 +215,48 @@ export function DatabaseBackupModule() {
                           <td className="py-1.5 pr-3">{formatBytes(b.size_bytes)}</td>
                           <td className="py-1.5 pr-3">
                             {b.gdrive_uploaded
-                              ? <CheckCircle2 size={12} className="text-emerald-600" />
+                              ? <span className="inline-flex items-center gap-1" title={b.gdrive_error ?? (b.encrypted ? "Encrypted copy on Google Drive" : "On Google Drive")}>
+                                  <CheckCircle2 size={12} className={b.gdrive_error ? "text-amber-500" : "text-emerald-600"} />
+                                  {b.encrypted && <Lock size={10} className="text-muted-foreground" />}
+                                </span>
                               : b.status === "success" && <span title={b.gdrive_error ?? ""}><Cloud size={12} className="text-amber-500" /></span>}
                           </td>
-                          <td className="py-1.5 text-right">
+                          <td className="py-1.5 pr-3 whitespace-nowrap">
+                            {b.verify_status === "verified" && (
+                              <span className="text-emerald-600" title={`${b.verify_detail?.rows_checked?.toLocaleString() ?? 0} rows / ${b.verify_detail?.tables_checked ?? 0} tables match (${b.verify_detail?.source === "gdrive" ? "Drive copy" : "server copy"})`}>
+                                Verified{b.verified_at ? ` · ${formatDate(b.verified_at)}` : ""}
+                              </span>
+                            )}
+                            {b.verify_status === "failed" && (
+                              <span className="text-red-600" title={(b.verify_detail?.mismatches ?? []).map(m => m.table ? `${m.table}: expected ${m.expected}, restored ${m.restored ?? "missing"}` : m.error).join("\n")}>
+                                Failed ({b.verify_detail?.mismatches.length ?? 0})
+                              </span>
+                            )}
+                            {b.status === "success" && (b.verify_status === "pending" || b.verify_status === null) && (
+                              <span className="text-muted-foreground">Not yet</span>
+                            )}
+                          </td>
+                          <td className="py-1.5 text-right whitespace-nowrap space-x-1">
+                            {b.status === "success" && overview.verify_db_configured && (b.file_available || b.gdrive_uploaded) && (
+                              <button
+                                onClick={() => askVerify(b, b.file_available ? "local" : "gdrive")}
+                                disabled={verifying !== null}
+                                title="Test-restore into the verification database and compare row counts"
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-border hover:bg-muted disabled:opacity-50"
+                              >
+                                {verifying === b.backup_id ? <RefreshCw size={11} className="animate-spin" /> : <ShieldCheck size={11} />} Verify
+                              </button>
+                            )}
+                            {b.status === "success" && overview.verify_db_configured && b.gdrive_uploaded && b.file_available && (
+                              <button
+                                onClick={() => askVerify(b, "gdrive")}
+                                disabled={verifying !== null}
+                                title="Download the Google Drive copy and test-restore it"
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-border hover:bg-muted disabled:opacity-50"
+                              >
+                                <Cloud size={11} /> Verify Drive copy
+                              </button>
+                            )}
                             {b.file_available && (
                               <button onClick={() => handleDownload(b)} className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-border hover:bg-muted">
                                 <Download size={11} /> Dump
@@ -204,7 +270,9 @@ export function DatabaseBackupModule() {
                 </div>
               )}
               <p className="text-[10px] text-muted-foreground mt-3">
-                Restoring a backup is done by the database administrator with pg_restore, outside the app.
+                Verify restores a backup into the separate verification database and checks every table's row count
+                {overview && !overview.verify_db_configured && " (not configured: set BACKUP_VERIFY_DATABASE_URL)"}.
+                Replacing the live database is done by the database administrator with pg_restore, outside the app.
               </p>
             </div>
 

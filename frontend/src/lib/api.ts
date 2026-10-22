@@ -70,21 +70,35 @@ export interface Assessment {
   assessment_date: string;
 }
 
-export interface CalculateAssessmentsResult {
-  status: string;
+// Assessment calculation runs as a background job (2026-10-22) -- POST
+// /api/assessments/calculate returns a job_id; poll getAssessmentJob for real
+// stage-by-stage progress. Stages run strictly in order, one at a time.
+export type AssessmentStageStatus = "pending" | "processing" | "completed" | "failed";
+
+export interface AssessmentJob {
+  job_id: string;
   typhoon_id: number;
   bulletin_id: number;
-  assessments_computed: number;
-  assessments: Array<{
-    assessment_id: number;
-    insurance_records_id: number;
-    crop_stage: string | null;
-    period_of_exposure: number | null;
-    wind_velocity: number | null;
-    indemnity_factor: number | null;
-    estimated_damage: number;
-    final_indemnity_payment: number;
-  }>;
+  source: "manual" | "final-bulletin";
+  status: "processing" | "done" | "error";
+  // 0-100 from real done/total counts; 100 only after the final commit
+  percent: number;
+  current_stage: string | null;
+  current_stage_label: string | null;
+  stage_processed: number;
+  stage_total: number;
+  stages: { key: string; label: string; status: AssessmentStageStatus }[];
+  started_at: string;
+  finished_at: string | null;
+  result: { assessments_computed: number; with_payout?: number; total_indemnity?: number } | null;
+  error: string | null;
+}
+
+export interface StartAssessmentResult {
+  status: string;
+  job_id: string;
+  // true = a run for this typhoon was already in progress; this is that run
+  already_running: boolean;
 }
 
 export interface UploadGpxResult {
@@ -125,6 +139,9 @@ export interface UploadCsvResult {
   rows_inserted: number;
   rows_skipped: number;
   rows_failed: number;
+  // Of rows_skipped: policy+farm already on file, or repeated in the same
+  // file (2026-10-22). Optional for results from an older backend.
+  rows_duplicate?: number;
   failures: UploadCsvRowFailure[];
 }
 
@@ -149,16 +166,50 @@ export interface TcbSignal {
   province: string | null;
 }
 
+// One municipality's exposure for a typhoon -- backend serialize_summary()
+// (app/services/exposure_calculator.py), shared by every exposure table.
+// signal_N_hours: hours under TCWS N; total_exposure_hours = their sum;
+// payout_hours: hours under max_signal_level (what the payout uses).
 export interface AreaExposureSummary {
   summary_id: number;
-  boundary_id: number;
+  boundary_id: number | null;
   province: string;
   municipality: string;
+  island_group: number | null;
   max_signal_level: number;
+  signal_1_hours: number;
+  signal_2_hours: number;
+  signal_3_hours: number;
+  signal_4_hours: number;
+  signal_5_hours: number;
+  total_exposure_hours: number;
+  payout_hours: number | null;
   start_time: string;
   end_time: string;
-  total_exposure_hours: number;
   is_eligible_6hr: boolean;
+  // The latest bulletin still lists the area; that stretch isn't counted yet
+  has_open_interval: boolean;
+  // Counted across a >12h gap between consecutive bulletins
+  has_long_gap: boolean;
+}
+
+export interface UnresolvedTcwsClause {
+  bulletin_count: number | null;
+  signal_level: number;
+  island_group: number;
+  clause: string;
+  reason: "no_boundary_match" | "partial_coverage_no_list";
+}
+
+export interface TyphoonExposure {
+  status: string;
+  typhoon_id: number;
+  typhoon_name: string;
+  areas: AreaExposureSummary[];
+  methodology: string;
+  bulletin_count: number;
+  bulletins_without_issue_time: number[];
+  unresolved_clauses: UnresolvedTcwsClause[];
 }
 
 export interface ComputeExposureResult {
@@ -168,14 +219,7 @@ export interface ComputeExposureResult {
   summaries: AreaExposureSummary[];
 }
 
-export interface TyphoonSummaryArea {
-  province: string;
-  municipality: string;
-  max_signal_level: number;
-  start_time: string;
-  end_time: string;
-  total_exposure_hours: number;
-}
+export type TyphoonSummaryArea = AreaExposureSummary;
 
 export interface TyphoonSummary {
   status: string;
@@ -272,6 +316,13 @@ export function computeExposure(tcbId: number): Promise<ComputeExposureResult> {
   return request<ComputeExposureResult>(`/api/bulletins/${tcbId}/compute-exposure`, { method: 'POST' });
 }
 
+// Read-only per-municipality exposure (Max Signal, Signal 1-5 hours, Total)
+// -- the one source both the Dashboard Exposure Summary and Assessment &
+// Reporting's Areas Affected table read, so they always show the same values.
+export function getTyphoonExposure(typhoonId: number): Promise<TyphoonExposure> {
+  return request<TyphoonExposure>(`/api/bulletins/typhoon/${typhoonId}/exposure`);
+}
+
 // Reads the already-computed per-typhoon exposure summary (tbl_area_exposure_summary
 // is populated once the typhoon's bulletins are done, not per-TCB) -- does not trigger
 // a recompute.
@@ -352,6 +403,8 @@ export interface TyphoonProgress {
   assessed_farms: number;
   exported_policies: number;
   exported_at: string | null;
+  // Running assessment calculation, else the latest finished one (2026-10-22)
+  active_job: AssessmentJob | null;
 }
 
 export function getTyphoonProgress(typhoonId: number): Promise<TyphoonProgress> {
@@ -594,12 +647,22 @@ export function getAssessments(typhoonId?: number, policyNo?: string): Promise<{
   return request<{ status: string; data: Assessment[] }>(`/api/assessments/${query ? `?${query}` : ''}`);
 }
 
-export function calculateAssessments(typhoonId: number, bulletinId: number): Promise<CalculateAssessmentsResult> {
-  return request<CalculateAssessmentsResult>('/api/assessments/calculate', {
+export function calculateAssessments(typhoonId: number, bulletinId: number): Promise<StartAssessmentResult> {
+  return request<StartAssessmentResult>('/api/assessments/calculate', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ typhoon_id: typhoonId, bulletin_id: bulletinId }),
   });
+}
+
+export function getAssessmentJob(jobId: string): Promise<AssessmentJob> {
+  return request<AssessmentJob>(`/api/assessments/jobs/${jobId}`);
+}
+
+// The typhoon's running assessment job, else its latest finished one -- lets a
+// refreshed page resume showing a calculation that is still running.
+export function getActiveAssessmentJob(typhoonId: number): Promise<{ job: AssessmentJob | null }> {
+  return request<{ job: AssessmentJob | null }>(`/api/assessments/jobs/active?typhoon_id=${typhoonId}`);
 }
 
 // The backend names each export after its typhoon and the moment it was pulled
@@ -1140,6 +1203,20 @@ export interface BackupEntry {
   gdrive_error: string | null;
   created_at: string;
   file_available: boolean;
+  // Integrity + verification (2026-10-22)
+  sha256: string | null;
+  encrypted: boolean;
+  tables_counted: number;
+  verify_status: 'pending' | 'verified' | 'failed' | null;
+  verify_detail: {
+    source: 'local' | 'gdrive';
+    verify_database: string;
+    tables_checked?: number;
+    rows_checked?: number;
+    mismatches: Array<{ table?: string; expected?: number; restored?: number | null; check?: string; error?: string }>;
+    pg_restore_messages?: string;
+  } | null;
+  verified_at: string | null;
 }
 
 export interface BackupOverview {
@@ -1148,6 +1225,8 @@ export interface BackupOverview {
   stored_count: number;
   gdrive_configured: boolean;
   archive_configured: boolean;
+  verify_db_configured: boolean;
+  encryption_configured: boolean;
 }
 
 export function getArchiveEligibility(): Promise<{ status: string; data: ArchiveEligibility }> {
@@ -1216,6 +1295,16 @@ export function getBackups(): Promise<{ status: string; data: BackupOverview }> 
 
 export function runBackupNow(): Promise<{ status: string; data: BackupEntry }> {
   return request<{ status: string; data: BackupEntry }>('/api/backups', { method: 'POST' });
+}
+
+// Test-restores a backup into the separate verification database and checks
+// every table's row count -- never the live database (2026-10-22).
+export function verifyBackup(backupId: number, source: 'local' | 'gdrive'): Promise<{ status: string; data: BackupEntry }> {
+  return request<{ status: string; data: BackupEntry }>(`/api/backups/${backupId}/verify`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ source, confirm: true }),
+  });
 }
 
 // Same authenticated blob-download path as the CSV exports, just a .dump file.

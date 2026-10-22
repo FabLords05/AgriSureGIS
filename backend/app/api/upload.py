@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import threading
 import time
+import unicodedata
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import date
@@ -68,6 +69,13 @@ def _boundary_key(province: str, municipality: str, barangay: str) -> tuple[str,
     return (province.strip().upper(), municipality.strip().upper(), barangay.strip().upper())
 
 
+def _fold_upper(name: str) -> str:
+    """Accent-insensitive comparison key: PCIC's Region II export writes
+    'SANTO NINO' where the PSGC reference has 'SANTO NIÑO' (2026-10-22)."""
+    name = unicodedata.normalize("NFKD", name)
+    return "".join(ch for ch in name if not unicodedata.combining(ch)).upper().strip()
+
+
 @functools.lru_cache(maxsize=1)
 def _load_psgc_lookup() -> dict[tuple[str, str, str], str]:
     """Same reference file backend/seed_database.py already uses. Loaded once per
@@ -75,6 +83,17 @@ def _load_psgc_lookup() -> dict[tuple[str, str, str], str]:
     lookup_df = pd.read_csv(_PSGC_LOOKUP_PATH)
     return {
         _boundary_key(row["province"], row["municipality"], row["barangay"]): str(row["psgc_code"])
+        for _, row in lookup_df.iterrows()
+    }
+
+
+@functools.lru_cache(maxsize=1)
+def _load_psgc_names() -> dict[str, tuple[str, str, str]]:
+    """psgc_code -> the reference file's own (province, municipality, barangay)
+    spelling, which is what tbl_admin_boundaries is seeded with."""
+    lookup_df = pd.read_csv(_PSGC_LOOKUP_PATH)
+    return {
+        str(row["psgc_code"]): (row["province"], row["municipality"], row["barangay"])
         for _, row in lookup_df.iterrows()
     }
 
@@ -102,12 +121,40 @@ def _municipality_alias_variants(municipality: str) -> list[str]:
         variants.append(f"CITY OF {municipality[: -len(' CITY')]}")
     elif municipality.startswith("CITY OF "):
         variants.append(f"{municipality[len('CITY OF '):]} CITY")
-    for abbrev, full in (("STA. ", "SANTA "), ("STO. ", "SANTO ")):
-        if municipality.startswith(abbrev):
-            variants.append(full + municipality[len(abbrev):])
-        elif municipality.startswith(full):
-            variants.append(abbrev + municipality[len(full):])
+    else:
+        # PCIC's Region II export writes a component city bare ('ILAGAN');
+        # PSGC has 'CITY OF ILAGAN'. Still scoped to the row's own province.
+        variants.append(f"CITY OF {municipality}")
+    variants.extend(_saint_abbrev_variants(municipality))
     return variants
+
+
+def _saint_abbrev_variants(name: str) -> list[str]:
+    """'Sta. Ana' <-> 'Santa Ana', 'Sto. Niño' <-> 'Santo Niño'. Used for
+    barangays too (2026-10-22): the Region II export writes Gattaran's
+    'SANTA ANA' where PSGC has 'Sta. Ana'."""
+    for abbrev, full in (("STA. ", "SANTA "), ("STO. ", "SANTO ")):
+        if name.startswith(abbrev):
+            return [full + name[len(abbrev):]]
+        if name.startswith(full):
+            return [abbrev + name[len(full):]]
+    return []
+
+
+@functools.lru_cache(maxsize=1)
+def _load_folded_psgc_lookup() -> dict[tuple[str, str, str], str]:
+    """_load_psgc_lookup() keyed on accent-folded names. A folded key that two
+    different PSGC codes share is left out rather than guessed."""
+    folded: dict[tuple[str, str, str], str] = {}
+    ambiguous: set[tuple[str, str, str]] = set()
+    for key, code in _load_psgc_lookup().items():
+        fkey = tuple(_fold_upper(part) for part in key)
+        if fkey in folded and folded[fkey] != code:
+            ambiguous.add(fkey)
+        folded[fkey] = code
+    for fkey in ambiguous:
+        del folded[fkey]
+    return folded
 
 
 def _resolve_psgc_code(boundary_key: tuple[str, str, str], lookup: dict[tuple[str, str, str], str]) -> str | None:
@@ -127,6 +174,8 @@ def _resolve_psgc_code(boundary_key: tuple[str, str, str], lookup: dict[tuple[st
     stripped_barangay = _strip_trailing_parenthetical(barangay)
     if stripped_barangay != barangay:
         barangay_candidates.append(stripped_barangay)
+    for b in list(barangay_candidates):
+        barangay_candidates.extend(_saint_abbrev_variants(b))
 
     for muni in municipality_candidates:
         muni_candidates = [muni]
@@ -138,6 +187,18 @@ def _resolve_psgc_code(boundary_key: tuple[str, str, str], lookup: dict[tuple[st
                 psgc_code = lookup.get((province, m, b))
                 if psgc_code is not None:
                     return psgc_code
+
+    # Accent-insensitive retry over the same candidates (Santo Nino/Niño).
+    # Only when `lookup` is the reference file itself -- unit tests pass
+    # their own small lookup.
+    if lookup is _load_psgc_lookup():
+        folded = _load_folded_psgc_lookup()
+        for muni in municipality_candidates:
+            for m in {muni, _strip_trailing_parenthetical(muni)}:
+                for b in barangay_candidates:
+                    psgc_code = folded.get((_fold_upper(province), _fold_upper(m), _fold_upper(b)))
+                    if psgc_code is not None:
+                        return psgc_code
     return None
 
 
@@ -276,9 +337,11 @@ def _normalize_header(key: str) -> str:
 # either layout passes. Everything else (names, dates, stage, amounts) stays
 # optional, exactly as prepare_row_payload() treats it.
 _REQUIRED_CSV_COLUMNS: tuple[tuple[str, ...], ...] = (
-    ("Province",),
-    ("Municipality",),
-    ("Barangay",),
+    # "... Address" is PCIC's "List of Farms with GPX File" export (Region II,
+    # 2026-10-22); without these aliases that file was rejected outright.
+    ("Province", "Province Address"),
+    ("Municipality", "Municipality Address"),
+    ("Barangay", "Barangay Address"),
     ("Policy No.", "CIC NO"),
     ("FARMID", "Farm ID"),
 )
@@ -314,9 +377,9 @@ def prepare_row_payload(row: Any) -> dict[str, Any]:
     # matches the case used to look it up, instead of two parallel normalizations that
     # can (and did) diverge.
     province, municipality, barangay = _boundary_key(
-        _normalize_value(get("Province")) or "",
-        _normalize_value(get("Municipality")) or "",
-        _normalize_value(get("Barangay")) or "",
+        _normalize_value(get("Province", "Province Address")) or "",
+        _normalize_value(get("Municipality", "Municipality Address")) or "",
+        _normalize_value(get("Barangay", "Barangay Address")) or "",
     )
     boundary = {
         "province": province,
@@ -352,6 +415,10 @@ def prepare_row_payload(row: Any) -> dict[str, Any]:
         "csv_farm_reference": _stringify_id(_normalize_value(get("FARMID", "Farm ID"))),
         "georef_id": _stringify_id(_normalize_value(get("Georef ID"))),
         "area_size": _parse_decimal(get("AreaInsured", "AREA")),
+        # The exact GPX file PCIC walked for this farm -- the most reliable
+        # CSV<->GPX link (matches 1,434 of 1,456 Region II rows); see
+        # GpxFarmerMatcherService.match().
+        "track_file_name": _normalize_value(get("trackFileName", "Track File Name")),
     }
 
     insurance = {
@@ -359,8 +426,10 @@ def prepare_row_payload(row: Any) -> dict[str, Any]:
         "policy_no": _stringify_id(_normalize_value(get("Policy No.", "CIC NO"))) or "",
         "program_type": _normalize_value(get("Program Type")),
         "product_name": _normalize_value(get("Product Name", "VARIETY NAME")),
-        "effectivity_date": _parse_date(get("Effectivity Date")),
-        "expiry_date": _parse_date(get("Expiry Date")),
+        # "Date Effectivity"/"Date Expiry": Region II export. Without them both
+        # dates were NULL and AssessmentService never found the policy in effect.
+        "effectivity_date": _parse_date(get("Effectivity Date", "Date Effectivity")),
+        "expiry_date": _parse_date(get("Expiry Date", "Date Expiry")),
         "amount_cover": _parse_decimal(get("AmountofCover", "AMOUNT OF COVER")),
     }
 
@@ -513,7 +582,15 @@ def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> 
                 .first()
             )
             if boundary is None:
-                boundary = models.AdminBoundary(psgc_code=psgc_code, **payload["boundary"])
+                # Spelled as the reference file spells it (2026-10-22), not in
+                # the CSV's ALL CAPS: a 'CAGAYAN / PAMPLONA' barangay next to
+                # the seeded 'Cagayan / Pamplona' ones split that municipality
+                # in two for exposure. Lookups here compare upper() anyway.
+                fields = dict(payload["boundary"])
+                names = _load_psgc_names().get(psgc_code)
+                if names is not None:
+                    fields["province"], fields["municipality"], fields["barangay"] = names
+                boundary = models.AdminBoundary(psgc_code=psgc_code, **fields)
                 db.add(boundary)
                 db.flush()
 
@@ -573,12 +650,16 @@ def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> 
             boundary_id=boundary.boundary_id,
             csv_farm_reference=farm_payload["csv_farm_reference"],
             georef_id=farm_payload["georef_id"],
+            track_file_name=farm_payload["track_file_name"],
             area_size=farm_payload["area_size"] or 0,
             location_geom=None,
         )
         db.add(farm)
         db.flush()
-    elif farm_payload["area_size"] and not farm.area_size:
+    else:
+        # The GPX links (2026-10-22) for a farm imported before they were read.
+        _backfill_blank_fields(farm, farm_payload, ("georef_id", "track_file_name"))
+    if farm_payload["area_size"] and not farm.area_size:
         # Same repair as the farmer above, for the one Farm field that has the same
         # problem. Not routed through _backfill_blank_fields() because "blank" here
         # is 0, not None/'' -- area_size is NOT NULL and the create path above
@@ -852,6 +933,9 @@ def _run_csv_ingestion(job_id: str, filename: str, dataframe: pd.DataFrame, user
             "rows_processed": processed_rows,
             "rows_inserted": inserted_rows,
             "rows_skipped": skipped_rows,
+            # Every skip is a duplicate: the (policy, farm) pair was already on
+            # file, or repeated earlier in this same file.
+            "rows_duplicate": skipped_rows,
             "rows_failed": failed_rows,
             "rows_defaulted_ac": defaulted_ac_rows,
             "failures": failures[:50],
@@ -866,6 +950,9 @@ def _run_csv_ingestion(job_id: str, filename: str, dataframe: pd.DataFrame, user
         _log_csv_outcome(user_id, 500, f'CSV ingestion of "{filename}" crashed; nothing was imported. Error: {exc}')
     finally:
         db.close()
+
+
+_CSV_CONTENT_TYPES = {"application/vnd.ms-excel", "text/plain", "application/octet-stream"}
 
 
 @router.post("/csv", status_code=status.HTTP_200_OK)
@@ -884,7 +971,11 @@ def upload_csv(
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Please upload a CSV file.")
 
-    if not file.content_type or "csv" not in file.content_type:
+    # Browsers on Windows with Excel installed report a .csv as
+    # application/vnd.ms-excel; others send text/plain or octet-stream.
+    if file.content_type and not (
+        "csv" in file.content_type or file.content_type in _CSV_CONTENT_TYPES
+    ):
         raise HTTPException(status_code=400, detail="The uploaded file must be a CSV.")
 
     if file.file.seekable():
@@ -987,7 +1078,7 @@ def upload_gpx(
                 detail="Farm not found for the given farmer_id and farm_id.",
             )
     elif farmer_id is None and farm_id is None:
-        match = GpxFarmerMatcherService.match(file.filename, db)
+        match = GpxFarmerMatcherService.match_file(file.filename, db)
         if match.farm is None:
             if match.candidates:
                 raise HTTPException(

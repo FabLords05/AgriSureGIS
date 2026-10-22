@@ -4,8 +4,11 @@ import unittest
 import httpx
 from datetime import datetime, timezone
 from unittest.mock import patch, AsyncMock, MagicMock
-from app.services.bulletin_parser import PHT, BulletinParserService, PagasaScrapeError, match_tcws_cell
-from app.models.models import Typhoon, TropicalCycloneBulletin, TcbSignal, AdminBoundary
+from app.services.bulletin_parser import (
+    PARTIAL_COVERAGE_NOTE, PHT, BulletinParserService, PagasaScrapeError, match_tcws_cell,
+    resolve_tcws_signals_detailed,
+)
+from app.models.models import Typhoon, TropicalCycloneBulletin, TcbSignal, TcbUnresolvedClause, AdminBoundary
 
 # Real-PDF regression fixture. `docs/TCB#11_kiyapo.pdf` was deleted from the repo on
 # 2026-10-12 during the docs cleanup, so the end-to-end test below is skipped rather
@@ -458,6 +461,9 @@ class BulletinParserSaveToDbTests(unittest.TestCase):
 
         signal_query = MagicMock()
         signal_query.filter.return_value.first.return_value = existing_signal
+        mock_db.signal_query = signal_query
+
+        unresolved_query = MagicMock()
 
         def query_side_effect(*entities):
             model = entities[0]
@@ -469,6 +475,8 @@ class BulletinParserSaveToDbTests(unittest.TestCase):
                 return admin_query
             if model is TcbSignal:
                 return signal_query
+            if model is TcbUnresolvedClause:
+                return unresolved_query
             raise AssertionError(f"Unexpected model queried in test: {model}")
 
         mock_db.query.side_effect = query_side_effect
@@ -875,6 +883,61 @@ class BulletinParserSaveToDbTests(unittest.TestCase):
         self.assertIs(bulletin, existing_bulletin)
         mock_db.add.assert_not_called()
 
+    def test_new_bulletin_stores_tcws_hash_and_issue_time_flag(self):
+        mock_db = self._build_mock_db(boundaries=[])
+
+        bulletin, _ = BulletinParserService.upsert_bulletin(self._luzon_parsed_data(), mock_db)
+
+        self.assertEqual(len(bulletin.tcws_hash), 64)
+        self.assertFalse(bulletin.issued_at_parsed)  # _luzon_parsed_data has issued_at=None
+
+    @patch("app.services.bulletin_parser.ExposureCalculatorService.compute_for_typhoon")
+    def test_corrected_bulletin_replaces_signals_and_recomputes_exposure(self, mock_compute):
+        # 2026-10-22: same bulletin number, different TCWS table -> corrected.
+        existing_bulletin = TropicalCycloneBulletin(title="Bulletin No. 11 for KIYAPO", bulletin_count=11)
+        existing_bulletin.tcb_id = 12
+        existing_bulletin.typhoon_id = 4
+        existing_bulletin.max_signal_level = 1
+        existing_bulletin.tcws_areas = {"1": {"0": "Batanes"}}
+        existing_bulletin.tcws_hash = "0" * 64
+        existing_typhoon = Typhoon(name="KIYAPO", year=2026, is_active=True)
+        existing_typhoon.typhoon_id = 4
+        mock_db = self._build_mock_db(
+            boundaries=[("Batanes", "Basco")], existing_typhoon=existing_typhoon, existing_bulletin=existing_bulletin,
+        )
+        created_objects = []
+        mock_db.add.side_effect = created_objects.append
+
+        bulletin, created = BulletinParserService.upsert_bulletin(self._luzon_parsed_data(), mock_db)
+
+        self.assertFalse(created)
+        self.assertEqual(bulletin.max_signal_level, 2)
+        self.assertNotEqual(bulletin.tcws_hash, "0" * 64)
+        mock_db.signal_query.filter.return_value.delete.assert_called_once()
+        self.assertEqual(
+            [(o.signal_level, o.area_name) for o in created_objects if isinstance(o, TcbSignal)], [(2, "Basco")],
+        )
+        mock_compute.assert_called_once_with(4, mock_db)
+
+    @patch("app.services.bulletin_parser.ExposureCalculatorService.compute_for_typhoon")
+    def test_unchanged_bulletin_is_not_treated_as_corrected(self, mock_compute):
+        from app.services.bulletin_parser import _raw_tcws_columns, _tcws_hash
+        parsed = self._luzon_parsed_data()
+        existing_bulletin = TropicalCycloneBulletin(title="Bulletin No. 11 for KIYAPO", bulletin_count=11)
+        existing_bulletin.tcb_id = 12
+        existing_bulletin.max_signal_level = 2
+        existing_bulletin.tcws_hash = _tcws_hash(*_raw_tcws_columns(parsed["signals"]))
+        existing_typhoon = Typhoon(name="KIYAPO", year=2026, is_active=True)
+        existing_typhoon.typhoon_id = 4
+        mock_db = self._build_mock_db(
+            boundaries=[], existing_typhoon=existing_typhoon, existing_bulletin=existing_bulletin,
+        )
+
+        BulletinParserService.upsert_bulletin(parsed, mock_db)
+
+        mock_db.signal_query.filter.return_value.delete.assert_not_called()
+        mock_compute.assert_not_called()
+
     def test_save_bulletin_to_db_stores_track_columns_on_new_bulletin(self):
         mock_db = self._build_mock_db(boundaries=[])
         forecast = [{"label": "12-Hour Forecast 2:00 AM", "lat": 9.7, "lon": 134.4, "location": None}]
@@ -1057,6 +1120,45 @@ class MatchTcwsCellTests(unittest.TestCase):
                         {"Batanes": {"Basco", "Itbayat"}}, unresolved=unresolved)
         self.assertEqual(unresolved, ["Atlantis", "Nowhere (Batanes)"])
 
+    def test_portion_without_town_list_assigns_nothing(self):
+        # 2026-10-22: "the northern portion of Isabela" without a list used to
+        # put the signal on all of Isabela. Which towns PAGASA means is
+        # unknown, so none are assigned and the clause is reported instead.
+        boundaries = {"Isabela": {"Ilagan", "Tumauini", "Echague"}, "Cagayan": {"Aparri"}}
+        unresolved = []
+        result = match_tcws_cell("the northern portion of Isabela, Cagayan", boundaries, unresolved=unresolved)
+        self.assertEqual(result, [("Cagayan", "Aparri")])
+        self.assertEqual(unresolved, ["the northern portion of Isabela" + PARTIAL_COVERAGE_NOTE])
+
+    def test_whole_province_declaration_expands_to_every_municipality(self):
+        boundaries = {"Isabela": {"Ilagan", "Tumauini"}, "Cagayan": {"Aparri"}}
+        self.assertEqual(sorted(match_tcws_cell("Isabela", boundaries)), [("Isabela", "Ilagan"), ("Isabela", "Tumauini")])
+
+    def test_excluding_list_removes_named_towns(self):
+        boundaries = {"Cagayan": {"Aparri", "Santa Ana", "Gonzaga", "Tuao"}}
+        unresolved = []
+        result = match_tcws_cell("Cagayan (excluding Santa Ana and Gonzaga)", boundaries, unresolved=unresolved)
+        self.assertEqual(sorted(result), [("Cagayan", "Aparri"), ("Cagayan", "Tuao")])
+        self.assertEqual(unresolved, [])
+
+    def test_sources_record_the_clause_each_pair_came_from(self):
+        boundaries = {"Batanes": {"Basco"}, "Cagayan": {"Santa Ana", "Gonzaga"}}
+        sources = {}
+        match_tcws_cell("Batanes, the northern portion of Cagayan (Santa Ana)", boundaries, sources=sources)
+        self.assertEqual(sources[("Batanes", "Basco")], "Batanes")
+        self.assertEqual(sources[("Cagayan", "Santa Ana")], "the northern portion of Cagayan (Santa Ana)")
+
+    def test_detailed_resolution_reports_unresolved_with_reason(self):
+        boundaries = {"Isabela": {"Ilagan"}, "Batanes": {"Basco"}}
+        rows, unresolved = resolve_tcws_signals_detailed(
+            {2: {0: "Batanes, Atlantis"}, 1: {0: "the southern portion of Isabela"}}, boundaries,
+        )
+        self.assertEqual(rows, [(2, 0, "Batanes", "Basco", "Batanes")])
+        self.assertEqual(unresolved, [
+            (2, 0, "Atlantis", "no_boundary_match"),
+            (1, 0, "the southern portion of Isabela", "partial_coverage_no_list"),
+        ])
+
 
 class ScrapeAndSaveAllTests(unittest.IsolatedAsyncioTestCase):
     """
@@ -1146,7 +1248,9 @@ class ScrapeAndSaveAllTests(unittest.IsolatedAsyncioTestCase):
 
             result = await BulletinParserService.scrape_and_save_all(mock_db)
 
-        mock_calc.assert_called_once_with(9, 200, mock_db)
+        mock_calc.assert_called_once()
+        self.assertEqual(mock_calc.call_args.args, (9, 200, mock_db))
+        self.assertIsNotNone(mock_calc.call_args.kwargs["progress"])  # tracked as an assessment job
         self.assertTrue(result[0]["is_final"])
 
     async def test_non_final_bulletin_does_not_trigger_assessment_calculation(self):

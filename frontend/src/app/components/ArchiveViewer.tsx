@@ -5,6 +5,7 @@ import type { Layer, PathOptions } from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { ChevronLeft, ChevronRight, Download, Lock, Map as MapIcon, Search, Table2, X } from "lucide-react";
 import { toast } from "sonner";
+import { formatPeso } from "@/lib/format";
 import {
   ArchiveBatch, ArchiveExposureCollection, ArchiveFarmsCollection, ArchiveRecordsPage,
   downloadArchiveCsv, getArchiveExposure, getArchiveFarms, getArchiveRecords,
@@ -27,7 +28,7 @@ function payoutColor(total: number): string {
   return "#166534";
 }
 
-const peso = (v: number | null) => (v == null ? "—" : `₱${v.toLocaleString(undefined, { maximumFractionDigits: 2 })}`);
+const peso = (v: number | null) => formatPeso(v);
 
 function RecordsTable({ archive }: { archive: ArchiveBatch }) {
   const [query, setQuery] = useState("");

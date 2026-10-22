@@ -23,6 +23,10 @@ Copy `.env.example` to `.env` in the `backend/` directory. **Do not commit `.env
 | `GDRIVE_CLIENT_ID` / `GDRIVE_CLIENT_SECRET` | Optional -- a Google OAuth "Desktop app" client, used to upload backups to Google Drive. Unset means backups stay local only. | Google Cloud Console → Credentials, with the Drive API enabled. Set the consent screen to "In production", or the refresh token expires in 7 days. |
 | `GDRIVE_REFRESH_TOKEN` | Optional -- a personal Gmail's Drive refresh token (scope `drive.file`). Secret. | Run `python scripts/gdrive_authorize.py` once from `backend/`. |
 | `GDRIVE_FOLDER_ID` | Optional -- the Drive folder that backups go into. | The id at the end of the folder's URL (`drive.google.com/drive/folders/<id>`). |
+| `PG_RESTORE_PATH` | Optional -- the `pg_restore` binary, used to check every new dump (`pg_restore --list`) and by Verify. Default `pg_restore` on PATH; same major version as the server. | e.g. `C:\Program Files\PostgreSQL\16\bin\pg_restore.exe`. |
+| `BACKUP_RETENTION_COUNT` | Optional -- how many manual/scheduled `.dump` files stay in `BACKUP_DIR` (newest first, default 30). Older files are deleted; their log rows and Drive copies are kept. Archive dumps are never pruned. | Size it to the disk. |
+| `BACKUP_ENCRYPTION_KEY` | Optional but recommended with Drive -- encrypts the Google Drive copy of each backup (AES-256-GCM, `backend/app/core/backup_crypto.py`). The local dump stays plain. **Lose it and every encrypted Drive copy is unreadable** -- keep a copy somewhere other than this machine. | `python -c "import base64, os; print(base64.b64encode(os.urandom(32)).decode())"` |
+| `BACKUP_VERIFY_DATABASE_URL` | Optional -- a **separate, disposable** database that Database Backup → Verify restores a backup into and checks (row counts per table against the dump's own snapshot). Its contents are replaced on every verify. Pointing it at the live database or the archive database (`agrisure_archive`) is refused -- it must be its own, separate database. Unset = Verify is hidden. | Fabio creates it (see "Backup verification & manual restore" below), e.g. `postgresql://agrisure_admin:<password>@localhost:5432/agrisure_verify`. |
 | `VITE_API_BASE_URL` | Backend base URL for frontend API calls. **No `/api` suffix** — every path in `frontend/src/lib/api.ts` already includes its own leading `/api/...`, so appending `/api` here causes a `/api/api/...` 404. | Default is `http://localhost:8000`. |
 | `VITE_GEOSERVER_URL` | GeoServer base URL for WMS/WFS spatial layer requests (farm boundary overlay, region boundaries). | Default is `http://localhost:8080/geoserver`. See `.claude/GEOSERVER_SETUP.md`. If unset or unreachable, the map falls back to the bundled static boundary file and skips the farm overlay. |
 
@@ -44,6 +48,30 @@ After editing `backend/.env`, restart the backend (env is read at process start,
 then verify with `backend/simulation/simulate_new_bulletin_alert.py` (dry run by default;
 `--send` really delivers; or `simulate.bat alert` from the repo root). The Monitoring dashboard's System Status panel also shows an "Email Alerts:
 Configured / Not configured" row, fed by `GET /api/system/status`.
+
+## Backup verification & manual restore (2026-10-22)
+
+**One-time setup of the verification database** (Fabio, as the postgres superuser):
+
+```
+createdb -U postgres -O agrisure_admin agrisure_verify
+psql -U postgres -d agrisure_verify -c "CREATE EXTENSION IF NOT EXISTS postgis;"
+```
+
+Then set `BACKUP_VERIFY_DATABASE_URL` in `backend/.env` and restart the backend. Verify
+(Database Backup tab) restores the chosen backup -- from the server, or downloaded and
+decrypted from Google Drive -- into this database and compares every table's row count with
+the counts read from the dump's own snapshot. It never touches `agrisure_db`.
+
+**Restoring the live database** stays manual, by the DB admin, after a successful Verify of
+the same backup:
+
+1. Stop the backend (nothing may write during the restore).
+2. Take a fresh safety dump first: `pg_dump -Fc --no-owner -U agrisure_admin -d agrisure_db -f before_restore.dump`
+3. For a Google Drive copy (`*.dump.enc`), decrypt it from `backend/`:
+   `python scripts/decrypt_backup.py <file>.dump.enc` (needs `BACKUP_ENCRYPTION_KEY`).
+4. Restore: `pg_restore --clean --if-exists --no-owner -U agrisure_admin -d agrisure_db <file>.dump`
+5. Start the backend and check the Main Dashboard / Activity Log.
 
 ## Key Security Rules
 1. Never put database passwords directly in the codebase. Always use environment variables.

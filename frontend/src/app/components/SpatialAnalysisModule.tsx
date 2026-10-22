@@ -1,7 +1,7 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import {
   ChevronUp, ChevronDown,
-  Filter, User, ArrowUpDown, UploadCloud, CheckCircle2, Table2, ShieldCheck, Loader2, Wind,
+  Filter, User, ArrowUpDown, CheckCircle2, Table2, ShieldCheck, Wind,
   Satellite, Radar
 } from "lucide-react";
 import { GISLeafletMap, PLANTED_CHECK_COLORS, PLANTED_CHECK_LABELS } from "./GISLeafletMap";
@@ -82,18 +82,8 @@ interface SpatialAnalysisModuleProps {
   // filter here. null = off.
   affectedTyphoonId: number | null;
   onAffectedTyphoonIdChange: (value: number | null) => void;
-  // CSV/GPX upload progress + handlers now live in App.tsx, not here --
-  // this module is conditionally mounted (only while activeModule ===
-  // "spatial"), so an in-flight upload's progress/polling used to freeze
-  // (and its completion toast could be missed entirely) the moment the user
-  // switched to another module tab before it finished. Lifting this one
-  // level up, same reasoning/pattern as farmsData above, means the upload
-  // keeps polling and still notifies (toast + notification bell) no matter
-  // which module is on screen when it completes (2026-08-20, per Fabio).
-  csvUploadProgress: { processed: number; total: number } | null;
-  gpxUploadProgress: { current: number; total: number } | null;
-  onCsvFileSelected: (e: React.ChangeEvent<HTMLInputElement>) => void;
-  onGpxFilesSelected: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  // CSV/GPX upload moved to the Main Dashboard (2026-10-22) -- see
+  // DataImportPanel; handlers/progress still live in App.tsx.
 }
 
 export function SpatialAnalysisModule({
@@ -101,7 +91,6 @@ export function SpatialAnalysisModule({
   activeInsuranceOnly, onActiveInsuranceOnlyChange, filterMuni, onFilterMuniChange,
   filterFarmerId, onFilterFarmerIdChange, filterTyphoonId, onFilterTyphoonIdChange,
   affectedTyphoonId, onAffectedTyphoonIdChange,
-  csvUploadProgress, gpxUploadProgress, onCsvFileSelected, onGpxFilesSelected,
 }: SpatialAnalysisModuleProps) {
   const {
     farms,
@@ -239,11 +228,6 @@ export function SpatialAnalysisModule({
     setSarVisible(visible);
     if (visible && !sarLayer && !sarLoading) runSarAnalysis();
   };
-  // csvUploadProgress/gpxUploadProgress (and the failure-details modal they
-  // used to feed) now live in App.tsx -- see SpatialAnalysisModuleProps'
-  // doc comment above.
-  const csvInputRef = useRef<HTMLInputElement>(null);
-  const gpxInputRef = useRef<HTMLInputElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const sentinelRef = useRef<HTMLTableRowElement | null>(null);
   // Drives the Farm Records table virtualization -- see the ROW_HEIGHT/
@@ -666,51 +650,8 @@ export function SpatialAnalysisModule({
               </select>
             </div>
 
-            {/* Upload actions -- moved down from the map toolbar (2026-08-18),
-                same reasoning as the municipality search above. */}
-            <button
-              onClick={() => csvInputRef.current?.click()}
-              disabled={csvUploadProgress !== null}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#1e3a5f] text-white text-[11px] font-medium hover:bg-[#172f4d] disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
-            >
-              {csvUploadProgress ? (
-                <>
-                  <Loader2 size={11} className="animate-spin" />
-                  Uploading… {csvUploadProgress.total > 0 ? `${Math.round((csvUploadProgress.processed / csvUploadProgress.total) * 100)}%` : ""}
-                </>
-              ) : (
-                <><UploadCloud size={11} /> Upload CSV</>
-              )}
-            </button>
-            <input
-              ref={csvInputRef}
-              type="file"
-              accept=".csv"
-              hidden
-              onChange={onCsvFileSelected}
-            />
-            <button
-              onClick={() => gpxInputRef.current?.click()}
-              disabled={gpxUploadProgress !== null}
-              className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#1e3a5f] text-white text-[11px] font-medium hover:bg-[#172f4d] disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
-            >
-              {gpxUploadProgress ? (
-                <>
-                  <Loader2 size={11} className="animate-spin" />
-                  Uploading {gpxUploadProgress.current}/{gpxUploadProgress.total}…
-                </>
-              ) : (
-                <><UploadCloud size={11} /> Upload GPX</>
-              )}
-            </button>
-            <input
-              ref={gpxInputRef}
-              type="file"
-              accept=".gpx,.gpkg"
-              multiple
-              hidden
-              onChange={onGpxFilesSelected}
-            />
+            {/* Upload CSV / Upload GPX moved to the Main Dashboard's "Data
+                Import / PCIC Data Upload" section (2026-10-22). */}
 
             <div className="ml-auto text-[9px] text-muted-foreground">
               Click a row to zoom the map to that farm

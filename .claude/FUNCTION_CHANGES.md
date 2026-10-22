@@ -4,6 +4,112 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-22] - Per-Signal Exposure Hours, Assessment Progress, TCB Coverage, PCIC Import, Backup Verification
+
+Asked for as one batch of enhancements. Decisions confirmed before implementation:
+1. **Payout hours = hours accumulated under the Max Signal** (PCIC's `SN3_12`), not Total Exposure. Payouts change versus the old first-to-last-bulletin span.
+2. **Live-DB restore stays manual.** In-app "Verify" restores a backup into a separate verification database only.
+3. **"Portion of X" with no town list assigns nothing.** It is recorded as unresolved, never widened to the whole province.
+4. **The Google Drive copy is encrypted** (AES-256-GCM, `BACKUP_ENCRYPTION_KEY`).
+
+### 1. Exposure hours (shared backend service)
+* **`backend/app/services/exposure_calculator.py`**: rewritten.
+  * New pure `build_area_exposures()` builds per-municipality signal timelines from issuance times. The rules are in `METHODOLOGY_NOTE` and `.claude/MASTER_DEVELOPMENT_CONTEXT.md`.
+  * `compute_for_typhoon()` stores Signal 1–5 hours, `total_exposure_hours` (their sum), `payout_hours`, `island_group` and the `has_open_interval` / `has_long_gap` flags. It writes `tbl_exposure_intervals` for traceability, upserts on (typhoon, province, municipality), and loads signals in one query.
+  * Stale summaries are deleted, unless an assessment references them, in which case they are zeroed.
+  * New `serialize_summary()` is the single response shape for both exposure tables.
+* **`backend/app/services/assessment_service.py`**: eligibility and matrix lookup use `payout_hours`.
+* **`backend/app/api/bulletins.py`**:
+  * New `GET /bulletins/typhoon/{id}/exposure` returns rows plus methodology, unresolved clauses and bulletins without an issue time.
+  * `compute-exposure` and `typhoon/{id}/summary` use `serialize_summary`.
+  * Manual PDF upload recomputes exposure.
+* **Migrations**:
+  * `migrations/2026-10-22_exposure_signal_hours.sql` adds the new columns, CHECK constraints (non-negative; total = sum, `NOT VALID` for old rows) and unique constraints, plus `tbl_exposure_intervals` and `tbl_tcb_unresolved_clauses`. It stops, rather than deleting anything, if duplicates exist.
+  * `migrations/2026-10-22_archive_exposure_signal_hours.sql` is the archive DB companion; `archive_service.py` copies the new columns.
+* **`backend/scripts/recompute_exposure.py`**: recomputes every typhoon under the new rules. It is a dry run by default; `--reseed` rebuilds signal rows from the stored TCWS text and skips exported typhoons.
+
+### 2. PAGASA TCB coverage (`backend/app/services/bulletin_parser.py`)
+* `_resolve_clause`:
+  * Partial coverage without a list goes to `unresolved`, tagged `PARTIAL_COVERAGE_NOTE`.
+  * New parenthetical exclusions, e.g. `Cagayan (excluding Santa Ana)`.
+* `match_tcws_cell(..., sources=)` and the new `resolve_tcws_signals_detailed()` keep the clause each LGU came from, plus the unresolved clauses with a reason. `_seed_tcb_signals` stores `tbl_tcb_signals.source_clause` and `tbl_tcb_unresolved_clauses`.
+* `upsert_bulletin`:
+  * Stores `raw_text`, `tcws_hash` and `issued_at_parsed`.
+  * The same bulletin number with a different TCWS hash counts as a **corrected bulletin**: its signals are replaced and exposure is recomputed. Legacy rows with a NULL hash are left alone.
+* New `recompute_exposure()` runs after each new bulletin.
+* New `_run_final_bulletin_assessment()` tracks the final-bulletin auto-run as an assessment job.
+
+### 3. Assessment progress
+* New **`backend/app/core/assessment_jobs.py`**: an in-memory job registry.
+  * Stages run in order: Data Preparation → Exposure Calculation → Spatial Analysis → Indemnity Calculation → Completion. Only one is processing at a time; a failure stops the run and later stages stay pending.
+  * Percent comes from real done/total counts and reaches 100 only after the commit.
+  * One run per typhoon at a time.
+* `AssessmentService.calculate_for_bulletin(..., progress=)` reports each stage. The spatial (farm-matching) loop is split from the per-policy payout loop; the queries are unchanged.
+* **`backend/app/api/assessments.py`**:
+  * `POST /calculate` now starts a background job and returns `job_id`.
+  * New `GET /assessments/jobs/{id}` and `GET /assessments/jobs/active?typhoon_id=`.
+  * The outcome is logged as a new `ASSESS` Activity Log action.
+* **`backend/app/api/typhoons.py`**: `progress` includes `active_job`.
+* Frontend:
+  * New `AssessmentProgressBar.tsx`.
+  * `AssessmentModule.tsx` polls the job with one sequential loop and resumes a running job after a refresh.
+  * `MonitoringModule.tsx` `TyphoonProgressStrip` shows Pending / Processing / Completed / Failed strictly in order, so a later step never shows done before an earlier one. It polls only while a job runs.
+
+### 4. Exposure tables (frontend)
+* New `ExposureTable.tsx` with columns Max Signal, Signal 1–5 (hrs), Exposure (hrs), the methodology note and unresolved-clause warnings.
+* The Dashboard Exposure Summary modal and Assessment & Reporting's Areas Affected modal both read `getTyphoonExposure()`. The client-side max-signal merge was removed.
+* The dashboard modal gains a Recompute button.
+
+### 5. Formatting and renames
+* New `frontend/src/lib/format.ts` (`formatPeso`, `sumPesos`). TOTAL AC (SUM INSURED) shows e.g. ₱1,500,000.00 instead of ₱1500K. Also applied to the table footer, CSV preview footer, per-row AC and `ArchiveViewer`.
+* `Header.tsx`: "Spatial Analysis & Data Import" → **"Spatial Analysis"**. `MonitoringModule.tsx`: "PAGASA TCB Bulletins" → **"PAGASA TCB Lists"**. The `ui-prototype/` (James's) is unchanged.
+* New `DataImportPanel.tsx` on the Main Dashboard, directly below System Status. Upload CSV / Upload GPX moved there from `SpatialAnalysisModule.tsx`; the `App.tsx` handlers are unchanged, plus a `lastImport` summary.
+
+### 6. PCIC import (`backend/app/api/upload.py`, `gpx_farmer_matcher.py`, `gpx_parser.py`)
+* New CSV aliases for the real Region II export: `Province/Municipality/Barangay Address`, `Date Effectivity`, `Date Expiry`, `trackFileName`. Before this the file was rejected whole, and with the aliases alone the dates would have stayed NULL.
+* PSGC lookup:
+  * Accent-insensitive fallback (`SANTO NINO` → `SANTO NIÑO`).
+  * Bare component-city names (`ILAGAN` → `CITY OF ILAGAN`).
+  * Remaining genuine misspellings are reported per row, not guessed.
+* `.csv` is accepted when the browser reports `application/vnd.ms-excel`, `text/plain` or `octet-stream`. The result includes `rows_duplicate`.
+* New `tbl_farms.track_file_name` (`migrations/2026-10-22_farm_track_file_name.sql`). It is stored on import and backfilled on existing farms, along with `georef_id`.
+* `GpxFarmerMatcherService`:
+  * New `match_file()` matches on `track_file_name` first, then Georef ID, then the old filename parsing.
+  * The tail regex tolerates spaces and `MM-DD-YYYY` dates.
+  * Any uploader prefix is stripped (GE_, R02_, FAM02_ and so on, not just TAB_).
+  * `_pick_farm` no longer assigns a boundary to the farmer's only farm when the file's FarmID disagrees.
+* `GpxParserService` rejects out-of-range coordinates and tracks with fewer than 3 distinct points.
+
+### 7. Backups (`backend/app/services/backup_service.py`, new `app/core/backup_crypto.py`, `api/archives.py`)
+* Each dump runs inside an exported REPEATABLE READ snapshot, and per-table row counts are read from the same snapshot.
+* Each dump records its sha256 and must pass `pg_restore --list`.
+* The Drive copy is encrypted when a key is set, and Drive's md5 is compared with the local one.
+* Retention: `BACKUP_RETENTION_COUNT` local manual/scheduled files are kept.
+* New `verify_backup()` and `POST /api/backups/{id}/verify` (`source` local or gdrive, `confirm` required). They restore into `BACKUP_VERIFY_DATABASE_URL`, refuse the live DB, and compare row counts.
+* `migrations/2026-10-22_backup_verification.sql`; new `scripts/decrypt_backup.py`.
+* `DatabaseBackupModule.tsx` gains a Verified column and Verify / Verify Drive copy buttons with confirmation.
+* `BACKUP_VERIFY_DATABASE_URL` must be its own database: the live DB and the archive DB are both refused, because Verify's `pg_restore --clean` drops every table in the target.
+* `requirements.txt` pins `cryptography==50.0.1`, which was already installed transitively.
+
+### 8. Fixes found during verification
+* **`exposure_calculator.build_area_exposures`**: a signal still hoisted in the latest bulletin is now counted up to that bulletin's issue time and flagged `has_open_interval`. Before this, the whole open stretch was dropped. The `recompute_exposure.py` dry run showed ROSAL (no final bulletin yet) falling from 2,796h to 576h, and an ongoing town's Max-Signal payout hours came out 0. Nothing after the latest bulletin is counted; the next recompute extends it. `METHODOLOGY_NOTE`, `MASTER_DEVELOPMENT_CONTEXT.md` and the `ExposureTable.tsx` "(ongoing)" tooltip are updated to match.
+* **`DashboardLayout.tsx`**: the sidebar label "Spatial Analysis & Import" → "Spatial Analysis". The page header was renamed earlier, the sidebar was missed.
+* **`upload._resolve_psgc_code`**: Sta./Sto. ↔ Santa/Santo is now tried on barangays as well as municipalities, through the new shared `_saint_abbrev_variants()`. It recovers the Region II export's 11 Gattaran "SANTA ANA" rows (PSGC: "Sta. Ana"). The remaining 9 unmatched rows are real misspellings (Imurong/Imurung, Gen. Balao/Gen. Eulogio Balao, Cabisera 3/Cabeseria 3, Napaccu/Nappaccu Grande), and they are still reported per row, not guessed.
+* **Duplicate exposure rows in a different letter case.** `agrisure_db` held 17 pairs such as `Cagayan / Pamplona` + `CAGAYAN / PAMPLONA` (Pamplona, Piat, Quezon, Bayombong; typhoons 2, 3, 4, 5, 14 and 15). Recomputes updated one row and never touched the other, which kept old-rule hours. So these towns appeared twice, and every recompute reported 1–4 phantom areas. No assessment referenced either copy.
+  * **Cause:** the CSV import created missing barangays in the CSV's ALL CAPS, the old calculator stored a separate summary for that spelling, and `uq_exposure_typhoon_area` is case-sensitive.
+  * **`exposure_calculator.compute_for_typhoon`**: stored rows are now grouped case-insensitively by the new `_pick_one_per_area()`. It keeps the row an assessment references (else the oldest) and sends the rest to `_retire_stale_summaries`. The kept row is renamed to the boundary's spelling. New shared `_referenced_summary_ids()`.
+  * **`upload._ingest_row`**: a newly created boundary takes the PSGC reference file's spelling (new `_load_psgc_names()`), falling back to the CSV's ALL CAPS when the code is not in the file.
+  * **`migrations/2026-10-22_exposure_case_insensitive.sql`**: run after `recompute_exposure.py --apply`. It refuses to run while duplicates remain; it gives each municipality's boundaries the spelling of its oldest barangay; and it replaces `uq_exposure_typhoon_area` with the case-insensitive unique index `uq_exposure_typhoon_area_ci`. `init_schema.sql` is updated to match.
+
+### Tests
+* `test_exposure_calculator.py` was rewritten for the new rules, including the spec's 12 + 18 + 24 = 54h case, and an open signal counted up to the latest bulletin and later extended without double counting.
+* `test_exposure_calculator.py`: two tests for case-variant duplicate summaries.
+* `test_upload_csv_ingestion.py`: new `PsgcBarangayVariantTests`. A new boundary now takes the reference spelling (the old ALL-CAPS assertion was replaced) and keeps ALL CAPS without one. `_load_psgc_names` is patched alongside `_load_psgc_lookup`.
+* New `test_assessment_jobs.py` and `test_backup_crypto.py`.
+* `test_assessment_service.py`, `test_bulletin_parser.py`, `test_gpx_farmer_matcher.py` and `test_csv_upload.py` were extended or updated for the behaviour changes above (incl. a Region II row mapping test).
+
+---
+
 ## [2026-10-22] - Archived Typhoons Readable in Assessment & Reporting
 
 Cristian asked for this as a follow-up to Archive & Clear. After a clear, the typhoon still appears in Assessment & Reporting's list (typhoons and bulletins stay live), but its rows had moved to the archive, so clicking it only said "No assessments computed yet". Now it shows those rows read-only, straight from the archive.

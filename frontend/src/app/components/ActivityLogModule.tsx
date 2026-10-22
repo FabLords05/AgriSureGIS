@@ -20,6 +20,7 @@ const ACTION_STYLES: Record<string, string> = {
   DELETE: "bg-red-100 text-red-700",
   GET:    "bg-sky-100 text-sky-700",
   INGEST: "bg-teal-100 text-teal-700",
+  ASSESS: "bg-lime-100 text-lime-700",
   SYSTEM: "bg-violet-100 text-violet-700",
 };
 

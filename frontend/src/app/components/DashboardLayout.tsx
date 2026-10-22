@@ -37,7 +37,7 @@ interface DashboardLayoutProps {
 
 const modules = [
   { id: 'home', label: 'Monitoring & Extraction', icon: Home },
-  { id: 'spatial', label: 'Spatial Analysis & Import', icon: Map },
+  { id: 'spatial', label: 'Spatial Analysis', icon: Map },
   { id: 'assessment', label: 'Assessment & Reporting', icon: FileText },
   { id: 'settings', label: 'Calibration & Settings', icon: Settings }
 ];

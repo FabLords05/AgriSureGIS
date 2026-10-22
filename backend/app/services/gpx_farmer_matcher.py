@@ -6,7 +6,16 @@ from sqlalchemy.orm import Session
 
 from app.models.models import Farm, FarmerProfile
 
-_TAIL_RE = re.compile(r"_(?P<id1>\d+)_(?P<id2>\d+)_(?P<date>\d{4}-\d{2}-\d{2})\.gpx$", re.IGNORECASE)
+# "..._{FarmersID}_{FarmID}_{date}.gpx". Real PCIC files also put spaces
+# around the separators ("_14571 _474510_", "_1783621 2024-08-21",
+# "_2025-10-07 .gpx") and some write the date MM-DD-YYYY (2026-10-22).
+_TAIL_RE = re.compile(
+    r"_\s*(?P<id1>\d+)\s*_\s*(?P<id2>\d+)[_\s]+(?P<date>\d{4}-\d{2}-\d{2}|\d{2}-\d{2}-\d{4})\s*\.gpx$",
+    re.IGNORECASE,
+)
+# The uploader/device prefix before the farmer's name: TAB_, GE_, R02_, RO2_,
+# FAM02_, AGRILEVER02_ ... -- only stripped when a "LAST, FIRST" name follows.
+_PREFIX_RE = re.compile(r"^[A-Za-z0-9]+_(?=[^_]*,)")
 
 
 @dataclass
@@ -77,11 +86,13 @@ class GpxFarmerMatcherService:
         id1 = id2 = walk_date = None
         if tail:
             id1, id2, walk_date = tail.group("id1"), tail.group("id2"), tail.group("date")
+            if re.match(r"\d{2}-\d{2}-\d{4}$", walk_date):  # MM-DD-YYYY -> ISO
+                walk_date = f"{walk_date[6:]}-{walk_date[:2]}-{walk_date[3:5]}"
             name_part = filename[: tail.start()]
         else:
             name_part = re.sub(r"\.gpx$", "", filename, flags=re.IGNORECASE)
 
-        name_part = re.sub(r"^TAB_", "", name_part, flags=re.IGNORECASE)
+        name_part = _PREFIX_RE.sub("", name_part)
         last_name, first_name, middle_initial = cls.parse_farmer_name(name_part)
 
         return ParsedGpxFilename(
@@ -96,6 +107,33 @@ class GpxFarmerMatcherService:
     @classmethod
     def match(cls, filename: str, db: Session) -> GpxMatchResult:
         return cls.match_parsed(cls.parse_filename(filename), db)
+
+    @classmethod
+    def match_file(cls, filename: str, db: Session) -> GpxMatchResult:
+        """
+        What an uploaded GPX file is matched by (2026-10-22), most reliable first:
+
+        1. the farm whose CSV trackFileName is this exact file (PCIC's own
+           link; with or without the ".gpx" the CSV sometimes drops),
+        2. the farm whose Georef ID is the file name (PCIC names some files
+           only by Georef ID, e.g. "R02-15-26-012-000079.gpx"),
+        3. match(): FarmersID / FarmID / name parsed from the file name.
+        """
+        name = filename.strip()
+        stem = re.sub(r"\.gpx$", "", name, flags=re.IGNORECASE).strip()
+        farms = (
+            db.query(Farm)
+            .filter(func.lower(Farm.track_file_name).in_({name.lower(), stem.lower()}))
+            .all()
+        )
+        if len(farms) == 1:
+            return GpxMatchResult(farm=farms[0], farmer=farms[0].farmer, matched_by="track_file_name")
+
+        farms = db.query(Farm).filter(Farm.georef_id == stem).all()
+        if len(farms) == 1:
+            return GpxMatchResult(farm=farms[0], farmer=farms[0].farmer, matched_by="georef_id")
+
+        return cls.match(name, db)
 
     @classmethod
     def match_parsed(cls, parsed: ParsedGpxFilename, db: Session) -> GpxMatchResult:
@@ -148,7 +186,11 @@ class GpxFarmerMatcherService:
         if not farms:
             return None
         if parsed.id2:
+            # The file names a FarmID: only that farm will do. Falling back to
+            # the farmer's only farm when it disagreed (before 2026-10-22) put
+            # boundaries on the wrong farm for 2 real Region II files.
             for farm in farms:
                 if farm.csv_farm_reference == parsed.id2:
                     return farm
+            return None
         return farms[0] if len(farms) == 1 else None

@@ -251,8 +251,18 @@ CREATE TABLE arc_area_exposure_summary (
     start_time TIMESTAMPTZ,
     end_time TIMESTAMPTZ,
     is_eligible_6hr BOOLEAN,
-    total_exposure_hours NUMERIC(5,2),
-    computed_at TIMESTAMPTZ
+    total_exposure_hours NUMERIC(7,2),
+    computed_at TIMESTAMPTZ,
+    -- Per-signal hours (2026-10-22, see migrations/2026-10-22_archive_exposure_signal_hours.sql)
+    island_group INT,
+    signal_1_hours NUMERIC(7,2) DEFAULT 0,
+    signal_2_hours NUMERIC(7,2) DEFAULT 0,
+    signal_3_hours NUMERIC(7,2) DEFAULT 0,
+    signal_4_hours NUMERIC(7,2) DEFAULT 0,
+    signal_5_hours NUMERIC(7,2) DEFAULT 0,
+    payout_hours NUMERIC(7,2),
+    has_open_interval BOOLEAN,
+    has_long_gap BOOLEAN
 );
 
 -- Only the boundaries the archived farms and exposure summaries reference.

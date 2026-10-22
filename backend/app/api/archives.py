@@ -12,6 +12,7 @@ import csv
 import io
 import re
 from types import SimpleNamespace
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
@@ -26,7 +27,15 @@ from app.core.security import get_current_user, require_admin
 from app.models.models import BackupLog, RecsapMatrix, SystemUser
 from app.services import archive_service
 from app.services.archive_service import CONFIRM_WORD, ArchiveBusyError, ArchiveError
-from app.services.backup_service import BackupError, backup_file_path, gdrive_configured, run_backup
+from app.services.backup_service import (
+    BackupError,
+    backup_file_path,
+    encryption_configured,
+    gdrive_configured,
+    run_backup,
+    verify_backup,
+    verify_db_configured,
+)
 
 router = APIRouter(tags=["archives"], dependencies=[Depends(get_current_user)])
 
@@ -259,6 +268,12 @@ def _backup_dict(entry: BackupLog) -> dict:
         "gdrive_error": entry.gdrive_error,
         "created_at": entry.created_at,
         "file_available": backup_file_path(entry) is not None,
+        "sha256": entry.sha256,
+        "encrypted": bool(entry.encrypted),
+        "tables_counted": len(entry.row_counts) if entry.row_counts else 0,
+        "verify_status": entry.verify_status,
+        "verify_detail": entry.verify_detail,
+        "verified_at": entry.verified_at,
     }
 
 
@@ -277,6 +292,8 @@ def list_backups(db: Session = Depends(get_db), _admin: SystemUser = Depends(req
             "stored_count": stored,
             "gdrive_configured": gdrive_configured(),
             "archive_configured": archive_configured(),
+            "verify_db_configured": verify_db_configured(),
+            "encryption_configured": encryption_configured(),
         },
     }
 
@@ -290,6 +307,51 @@ def create_backup(db: Session = Depends(get_db), admin: SystemUser = Depends(req
         raise HTTPException(status_code=500, detail=str(exc))
     drive = "uploaded to Google Drive" if entry.gdrive_file_id else "not uploaded to Google Drive"
     note_activity(f"Ran a manual database backup: {entry.file_name} ({entry.size_bytes:,} bytes), {drive}.")
+    return {"status": "success", "data": _backup_dict(entry)}
+
+
+class VerifyBackupRequest(BaseModel):
+    source: Literal["local", "gdrive"] = "local"
+    # The verification database's current contents are replaced -- the UI
+    # asks first, and the request must say so explicitly.
+    confirm: bool = False
+
+
+@router.post("/backups/{backup_id}/verify")
+def verify_backup_endpoint(
+    backup_id: int,
+    payload: VerifyBackupRequest,
+    db: Session = Depends(get_db),
+    _admin: SystemUser = Depends(require_admin),
+):
+    """
+    Test-restores one backup (from the server, or downloaded from Google
+    Drive) into the separate verification database and compares every
+    table's row count with the counts recorded when it was taken. The live
+    database is never touched.
+    """
+    entry = db.query(BackupLog).filter(BackupLog.backup_id == backup_id).first()
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Backup not found.")
+    where = "Google Drive" if payload.source == "gdrive" else "the server"
+    note_activity(f"Attempted to verify database backup {entry.file_name} from {where}.")
+    if not payload.confirm:
+        raise HTTPException(
+            status_code=400,
+            detail="Verifying replaces the verification database's contents; confirm to continue.",
+        )
+    try:
+        entry = verify_backup(db, entry, payload.source)
+    except BackupError as exc:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(exc))
+    mismatches = len((entry.verify_detail or {}).get("mismatches", []))
+    note_activity(
+        f"Verified database backup {entry.file_name} from {where}: {entry.verify_status}"
+        + (f" ({plural(mismatches, 'mismatch', 'mismatches')})." if mismatches else
+           f" -- {(entry.verify_detail or {}).get('rows_checked', 0):,} rows across "
+           f"{(entry.verify_detail or {}).get('tables_checked', 0)} tables match.")
+    )
     return {"status": "success", "data": _backup_dict(entry)}
 
 

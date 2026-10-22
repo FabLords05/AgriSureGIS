@@ -12,7 +12,7 @@ from app.core.scheduler import reschedule_bulletin_job
 from app.core.security import get_current_user
 from app.services.bulletin_parser import BulletinParserService, PagasaScrapeError
 from app.services.email_alert_service import send_new_bulletin_alerts
-from app.services.exposure_calculator import ExposureCalculatorService
+from app.services.exposure_calculator import METHODOLOGY_NOTE, ExposureCalculatorService, serialize_summary
 from app.services.pagasa_status_scraper import PagasaStatusService
 from app.models.models import (
     AdminBoundary,
@@ -21,6 +21,7 @@ from app.models.models import (
     ParserSettings,
     TropicalCycloneBulletin,
     TcbSignal,
+    TcbUnresolvedClause,
     Typhoon,
 )
 
@@ -178,6 +179,9 @@ async def upload_bulletin_pdf(file: UploadFile = File(...), db: Session = Depend
         # Parse and save
         parsed_data = BulletinParserService.parse_bulletin_text(temp_path)
         bulletin, created = BulletinParserService.upsert_bulletin(parsed_data, db)
+        if created:
+            # Same as the scrape loop: exposure tables follow new bulletins.
+            BulletinParserService.recompute_exposure(bulletin.typhoon_id, db)
         described = describe_new_bulletins([{"tcb_id": bulletin.tcb_id, "title": bulletin.title}], db)
         note_activity(
             f'Manually uploaded TCB PDF "{file.filename}": '
@@ -254,20 +258,72 @@ def compute_exposure(tcb_id: int, db: Session = Depends(get_db)):
         "status": "success",
         "typhoon_id": bulletin.typhoon_id,
         "boundaries_computed": len(summaries),
-        "summaries": [
+        "summaries": [serialize_summary(s) for s in summaries],
+    }
+
+
+def _exposure_context(typhoon_id: int, db: Session) -> dict:
+    """What both exposure tables show around the rows: the interpretation
+    used, bulletins left out for an unreadable issue time, and TCWS clauses
+    that resolved to no municipality (incl. partial coverage with no town
+    list, which is never expanded to the whole province)."""
+    bulletins = (
+        db.query(TropicalCycloneBulletin.tcb_id, TropicalCycloneBulletin.bulletin_count,
+                 TropicalCycloneBulletin.issued_at_parsed)
+        .filter(TropicalCycloneBulletin.typhoon_id == typhoon_id)
+        .all()
+    )
+    count_by_tcb = {b.tcb_id: b.bulletin_count for b in bulletins}
+    unresolved = (
+        db.query(TcbUnresolvedClause)
+        .filter(TcbUnresolvedClause.tcb_id.in_(list(count_by_tcb) or [-1]))
+        .order_by(TcbUnresolvedClause.tcb_id, TcbUnresolvedClause.signal_level.desc())
+        .all()
+    )
+    return {
+        "methodology": METHODOLOGY_NOTE,
+        "bulletin_count": len(bulletins),
+        "bulletins_without_issue_time": sorted(b.bulletin_count for b in bulletins if b.issued_at_parsed is False),
+        "unresolved_clauses": [
             {
-                "summary_id": s.summary_id,
-                "boundary_id": s.boundary_id,
-                "province": s.province,
-                "municipality": s.municipality,
-                "max_signal_level": s.max_signal_level,
-                "start_time": s.start_time,
-                "end_time": s.end_time,
-                "total_exposure_hours": float(s.total_exposure_hours),
-                "is_eligible_6hr": s.is_eligible_6hr,
+                "bulletin_count": count_by_tcb.get(u.tcb_id),
+                "signal_level": u.signal_level,
+                "island_group": u.island_group,
+                "clause": u.clause,
+                "reason": u.reason,
             }
-            for s in summaries
+            for u in unresolved
         ],
+    }
+
+
+@router.get("/typhoon/{typhoon_id}/exposure")
+def get_typhoon_exposure(typhoon_id: int, db: Session = Depends(get_db)):
+    """
+    Read-only per-municipality exposure for one typhoon: Max Signal, hours
+    under each of Signal 1-5, and Total Exposure (their sum). The single
+    source both the Main Dashboard Exposure Summary and Assessment &
+    Reporting's Areas Affected table read, so they always agree. Rows are
+    (re)computed by ExposureCalculatorService whenever a bulletin is saved
+    or corrected, or by POST /{tcb_id}/compute-exposure.
+    """
+    typhoon = db.query(Typhoon).filter(Typhoon.typhoon_id == typhoon_id).first()
+    if typhoon is None:
+        raise HTTPException(status_code=404, detail="Typhoon not found.")
+
+    summaries = (
+        db.query(AreaExposureSummary)
+        .filter(AreaExposureSummary.typhoon_id == typhoon_id)
+        .order_by(AreaExposureSummary.max_signal_level.desc(), AreaExposureSummary.province,
+                  AreaExposureSummary.municipality)
+        .all()
+    )
+    return {
+        "status": "success",
+        "typhoon_id": typhoon_id,
+        "typhoon_name": typhoon.name,
+        "areas": [serialize_summary(s) for s in summaries],
+        **_exposure_context(typhoon_id, db),
     }
 
 
@@ -343,17 +399,7 @@ def get_typhoon_summary(typhoon_id: int, db: Session = Depends(get_db)):
         "status": "success",
         "typhoon_id": typhoon_id,
         "typhoon_name": typhoon.name,
-        "areas_hit": [
-            {
-                "province": s.province,
-                "municipality": s.municipality,
-                "max_signal_level": s.max_signal_level,
-                "start_time": s.start_time,
-                "end_time": s.end_time,
-                "total_exposure_hours": float(s.total_exposure_hours),
-            }
-            for s in summaries
-        ],
+        "areas_hit": [serialize_summary(s) for s in summaries],
         "max_signal_level": max(s.max_signal_level for s in summaries),
         "start_time": overall_start,
         "end_time": overall_end,

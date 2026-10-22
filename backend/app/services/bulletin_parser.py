@@ -1,5 +1,7 @@
 import re
 import asyncio
+import hashlib
+import json
 import logging
 import os
 import unicodedata
@@ -12,8 +14,10 @@ from sqlalchemy.orm import Session
 from geoalchemy2.elements import WKTElement
 from datetime import datetime, timedelta, timezone
 
-from app.models.models import Typhoon, TropicalCycloneBulletin, TcbSignal, AdminBoundary
+from app.core import assessment_jobs
+from app.models.models import Typhoon, TropicalCycloneBulletin, TcbSignal, TcbUnresolvedClause, AdminBoundary
 from app.services.assessment_service import AssessmentService
+from app.services.exposure_calculator import ExposureCalculatorService
 
 # Base URL for PAGASA tropical cyclone bulletins (mock or real index page)
 PAGASA_INDEX_URL = "https://pubfiles.pagasa.dost.gov.ph/tamss/weather/bulletin/"
@@ -415,10 +419,12 @@ class BulletinParserService:
                 # single bulletin. Reverts the earlier "run on every bulletin"
                 # behavior per Fabio's explicit decision; see FUNCTION_CHANGES.md.
                 if parsed_data.get("is_final"):
-                    try:
-                        AssessmentService.calculate_for_bulletin(bulletin.typhoon_id, bulletin.tcb_id, db)
-                    except ValueError:
-                        pass  # shouldn't happen (bulletin/typhoon just saved together), but don't crash the scrape loop over it
+                    cls._run_final_bulletin_assessment(bulletin, db)
+                elif created:
+                    # Keeps the exposure tables current as bulletins arrive
+                    # (2026-10-22) -- the final bulletin's assessment run above
+                    # recomputes exposure itself.
+                    cls.recompute_exposure(bulletin.typhoon_id, db)
 
                 # Already-saved bulletins PAGASA still lists are not "created"
                 # -- returning them made every poll re-alert every bulletin.
@@ -490,6 +496,41 @@ class BulletinParserService:
         bulletin, _ = cls.upsert_bulletin(parsed_data, db)
         return bulletin
 
+    @staticmethod
+    def _run_final_bulletin_assessment(bulletin: TropicalCycloneBulletin, db: Session) -> None:
+        """The automatic assessment run on a typhoon's final bulletin, tracked
+        as an assessment job (2026-10-22) so the Main Dashboard's progress
+        strip shows it like a manual run. Skipped if a run for this typhoon
+        is already in progress."""
+        job, created = assessment_jobs.start_job(bulletin.typhoon_id, bulletin.tcb_id, "final-bulletin")
+        if not created:
+            logger.info("Assessment already running for typhoon %s; final-bulletin run skipped", bulletin.typhoon_id)
+            return
+        progress = assessment_jobs.JobProgress(job.job_id)
+        try:
+            results = AssessmentService.calculate_for_bulletin(bulletin.typhoon_id, bulletin.tcb_id, db, progress=progress)
+        except ValueError as exc:
+            # shouldn't happen (bulletin/typhoon just saved together), but don't crash the scrape loop over it
+            progress.fail(str(exc))
+            return
+        except Exception as exc:
+            progress.fail(str(exc))
+            raise
+        progress.done({"assessments_computed": len(results)})
+
+    @staticmethod
+    def recompute_exposure(typhoon_id: int | None, db: Session) -> None:
+        """Rebuilds the typhoon's exposure summaries after its signals changed.
+        Never raises: a failure here must not lose the bulletin just saved --
+        the next bulletin, or POST /compute-exposure, recomputes it again."""
+        if typhoon_id is None:
+            return
+        try:
+            ExposureCalculatorService.compute_for_typhoon(typhoon_id, db)
+        except Exception:
+            db.rollback()
+            logger.exception("Exposure recompute failed for typhoon %s", typhoon_id)
+
     @classmethod
     def upsert_bulletin(cls, parsed_data: dict, db: Session) -> tuple[TropicalCycloneBulletin, bool]:
         """
@@ -510,6 +551,7 @@ class BulletinParserService:
 
         signals = parsed_data.get("signals") or {}
         max_signal_level, tcws_areas = _raw_tcws_columns(signals, parsed_data.get("no_signal_hoisted", False))
+        tcws_hash = _tcws_hash(max_signal_level, tcws_areas)
 
         created = bulletin is None
         if created:
@@ -524,6 +566,9 @@ class BulletinParserService:
                 max_sustained_winds=parsed_data["max_sustained_winds"],
                 gustiness=parsed_data["gustiness"],
                 issued_at=parsed_data.get("issued_at") or datetime.now(timezone.utc),
+                # False = "Issued at" couldn't be read; issued_at above is then
+                # the ingestion time, and exposure leaves this bulletin out.
+                issued_at_parsed=parsed_data.get("issued_at") is not None,
                 expires_at=datetime.now(timezone.utc),  # Expiry date placeholder — PAGASA bulletins don't reliably state their own expiry
                 center_geom=center_geom,
                 max_signal_level=max_signal_level,
@@ -532,6 +577,8 @@ class BulletinParserService:
                 wind_radius_km=parsed_data.get("wind_radius_km"),
                 storm_force_radius_km=parsed_data.get("storm_force_radius_km"),
                 forecast_track=parsed_data.get("forecast_track") or None,
+                raw_text=parsed_data.get("raw_text") or None,
+                tcws_hash=tcws_hash,
             )
             db.add(bulletin)
             db.commit()
@@ -552,6 +599,29 @@ class BulletinParserService:
             if already_seeded is None:
                 cls._seed_tcb_signals(bulletin, signals, db)
             db.commit()
+        elif bulletin.tcws_hash is not None and bulletin.tcws_hash != tcws_hash:
+            # A corrected/re-issued bulletin: same number, different TCWS
+            # table. Its signals are replaced and the typhoon's exposure
+            # recomputed (2026-10-22). Bulletins saved before tcws_hash
+            # existed (NULL) are never treated as corrected here -- re-seed
+            # those deliberately with scripts/recompute_exposure.py --reseed.
+            logger.warning(
+                "TCB %s (typhoon %s, Bulletin #%s): TCWS table changed since it was saved; replacing its signals",
+                bulletin.tcb_id, bulletin.typhoon_id, bulletin.bulletin_count,
+            )
+            db.query(TcbSignal).filter(TcbSignal.tcb_id == bulletin.tcb_id).delete(synchronize_session=False)
+            db.query(TcbUnresolvedClause).filter(TcbUnresolvedClause.tcb_id == bulletin.tcb_id).delete(
+                synchronize_session=False)
+            bulletin.max_signal_level = max_signal_level
+            bulletin.tcws_areas = tcws_areas
+            bulletin.tcws_hash = tcws_hash
+            bulletin.raw_text = parsed_data.get("raw_text") or bulletin.raw_text
+            if parsed_data.get("issued_at") is not None:
+                bulletin.issued_at = parsed_data["issued_at"]
+                bulletin.issued_at_parsed = True
+            cls._seed_tcb_signals(bulletin, signals, db)
+            db.commit()
+            cls.recompute_exposure(bulletin.typhoon_id, db)
 
         # Separate from the backfill above (not an elif): flags an
         # already-saved bulletin as final when a re-scrape/re-upload of its PDF
@@ -602,15 +672,27 @@ class BulletinParserService:
         for province, municipality in pairs:
             municipalities_by_province.setdefault(province, set()).add(municipality)
 
-        for level, group, province, municipality in resolve_tcws_signals(
+        rows, unresolved = resolve_tcws_signals_detailed(
             signals, municipalities_by_province, log_label=f"TCB {bulletin.tcb_id}",
-        ):
+        )
+        for level, group, province, municipality, clause in rows:
             db.add(TcbSignal(
                 tcb_id=bulletin.tcb_id,
                 signal_level=level,
                 island_group=group,
                 area_name=municipality,
                 province=province,
+                source_clause=clause or None,
+            ))
+        # Kept so the exposure tables can show what was NOT assigned --
+        # incl. partial provincial coverage with no town list (2026-10-22).
+        for level, group, clause, reason in unresolved:
+            db.add(TcbUnresolvedClause(
+                tcb_id=bulletin.tcb_id,
+                signal_level=level,
+                island_group=group,
+                clause=clause,
+                reason=reason,
             ))
 
 
@@ -621,7 +703,19 @@ def resolve_tcws_signals(
     [(signal_level, island_group, province, municipality), ...], one per LGU at
     the highest signal it appears under (see _seed_tcb_signals). Keys may be
     ints or the str keys stored in tcws_areas."""
-    rows: list[tuple[int, int, str, str]] = []
+    rows, _ = resolve_tcws_signals_detailed(signals, municipalities_by_province, log_label)
+    return [row[:4] for row in rows]
+
+
+def resolve_tcws_signals_detailed(
+    signals: dict, municipalities_by_province: dict[str, set[str]], log_label: str = "TCB",
+) -> tuple[list[tuple[int, int, str, str, str]], list[tuple[int, int, str, str]]]:
+    """resolve_tcws_signals plus traceability (2026-10-22): each row also
+    carries the PAGASA clause it was resolved from, and every clause that
+    resolved to nothing comes back as (signal_level, island_group, clause,
+    reason) -- reason "partial_coverage_no_list" or "no_boundary_match"."""
+    rows: list[tuple[int, int, str, str, str]] = []
+    unresolved_rows: list[tuple[int, int, str, str]] = []
     assigned: set[tuple[str, str]] = set()
     for level in sorted(signals, key=int, reverse=True):
         higher = frozenset(assigned)
@@ -629,18 +723,32 @@ def resolve_tcws_signals(
             if not cell_text:
                 continue
             unresolved: list[str] = []
+            sources: dict[tuple[str, str], str] = {}
             # Pairs keep their province, so same-named towns in different
             # provinces (e.g. multiple "Santa Cruz") are both kept.
-            for pair in match_tcws_cell(cell_text, municipalities_by_province, higher, unresolved):
+            for pair in match_tcws_cell(cell_text, municipalities_by_province, higher, unresolved, sources):
                 if pair not in assigned:
                     assigned.add(pair)
-                    rows.append((int(level), int(group), *pair))
+                    rows.append((int(level), int(group), *pair, sources.get(pair, "")))
             if unresolved:
                 logger.warning(
                     "%s Signal No. %s (island group %s): PAGASA text not resolved to a boundary: %s",
                     log_label, level, group, "; ".join(unresolved),
                 )
-    return rows
+                for text in unresolved:
+                    if text.endswith(PARTIAL_COVERAGE_NOTE):
+                        unresolved_rows.append(
+                            (int(level), int(group), text[:-len(PARTIAL_COVERAGE_NOTE)], "partial_coverage_no_list"))
+                    else:
+                        unresolved_rows.append((int(level), int(group), text, "no_boundary_match"))
+    return rows, unresolved_rows
+
+
+def _tcws_hash(max_signal_level: int | None, tcws_areas: dict | None) -> str:
+    """Fingerprint of a bulletin's parsed TCWS table: a later parse of the same
+    bulletin number with a different hash is a corrected bulletin."""
+    payload = json.dumps({"max": max_signal_level, "areas": tcws_areas}, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _raw_tcws_columns(signals: dict, no_signal_hoisted: bool = False) -> tuple[int | None, dict | None]:
@@ -734,6 +842,12 @@ _CLAUSE_RE = re.compile(
     r"(?P<name>[^()]*?)\s*(?:\((?P<listed>.*)\))?\s*$",
     re.IGNORECASE | re.DOTALL,
 )
+# Appended to an `unresolved` entry for partial provincial coverage stated
+# without a town list ("the northern portion of Isabela"). Such a clause is
+# never widened to the whole province -- that would put the signal on towns
+# PAGASA did not declare (2026-10-22 decision).
+PARTIAL_COVERAGE_NOTE = " [partial coverage, no municipalities listed]"
+_EXCLUDING_RE = re.compile(r"^\s*(?:excluding|except(?:\s+for)?)\s+(?P<names>.+)$", re.IGNORECASE | re.DOTALL)
 _COMMA_RE = re.compile(r"[,;]")
 _AND_RE = re.compile(r"\s+(?:and|&)\s+", re.IGNORECASE)
 _INCLUDING_RE = re.compile(r"\s+including\s+", re.IGNORECASE)
@@ -886,10 +1000,17 @@ def _resolve_clause(clause: str, index: _BoundaryIndex, higher: frozenset, unres
     if not m or not name:
         unresolved.append(clause)
         return []
-    listed = _listed_names(m.group("listed")) if m.group("listed") else []
+    excluded_match = _EXCLUDING_RE.match(m.group("listed")) if m.group("listed") else None
+    listed = [] if excluded_match else _listed_names(m.group("listed")) if m.group("listed") else []
+    excluded = _listed_names(excluded_match.group("names")) if excluded_match else []
 
     province = index.provinces.get(_fold(name)) or index.provinces.get(_fold(_ISLAND_SUFFIX_RE.sub("", name)))
     if province is not None:
+        if m.group("section") and not listed:
+            # "the northern portion of Isabela" with no town list: which towns
+            # PAGASA means is unknown, so none are assigned.
+            unresolved.append(clause + PARTIAL_COVERAGE_NOTE)
+            return []
         if listed:
             found = []
             for item in listed:
@@ -912,12 +1033,25 @@ def _resolve_clause(clause: str, index: _BoundaryIndex, higher: frozenset, unres
             pairs -= index.island_lgus(province)
         if m.group("rest"):
             pairs -= higher
+        for item in excluded:
+            # "Cagayan (excluding Babuyan Islands, Santa Ana)"
+            municipality = index.municipality(province, item)
+            if municipality:
+                pairs.discard((province, municipality))
+            elif index.area_group(item):
+                pairs -= index.area_group(item)
+            else:
+                unresolved.append(f"excluded {item} ({province})")
         return sorted(pairs)
 
     group = index.area_group(name)
     if group is not None:
         if not group:
             unresolved.append(clause)
+        elif m.group("section") and not listed and len({mun for _, mun in group}) > 1:
+            # "the southern portion of Siargao Island" with no town list
+            unresolved.append(clause + PARTIAL_COVERAGE_NOTE)
+            return []
         elif listed and len({mun for _, mun in group}) > 1:
             # "the southern portion of Siargao Island (Dapa, General Luna)"
             found = []
@@ -944,6 +1078,7 @@ def match_tcws_cell(
     municipalities_by_province: dict[str, set[str]],
     higher: frozenset = frozenset(),
     unresolved: list[str] | None = None,
+    sources: dict[tuple[str, str], str] | None = None,
 ) -> list[tuple[str, str]]:
     """
     Resolves one TCWS table cell to AdminBoundary (province, municipality)
@@ -961,9 +1096,14 @@ def match_tcws_cell(
       -> the LGUs in _ISLAND_GROUPS / _NAMED_AREAS.
     - "Bacolod City" -> an independent city stored with province ==
       municipality (see scripts/convert_psgc_publication.py).
+    - "Cagayan (excluding Santa Ana)" -> the province minus the named towns.
+    - "the northern portion of Isabela" with NO town list -> nothing; the
+      clause goes to `unresolved` marked with PARTIAL_COVERAGE_NOTE rather
+      than putting the signal on the whole province.
 
     Anything that resolves to no boundary is appended to `unresolved` (if
-    given) instead of disappearing silently.
+    given) instead of disappearing silently. `sources`, if given, maps each
+    returned pair to the clause it came from.
     """
     index = _BoundaryIndex(municipalities_by_province)
     unresolved = unresolved if unresolved is not None else []
@@ -974,4 +1114,6 @@ def match_tcws_cell(
             if pair not in seen:
                 seen.add(pair)
                 results.append(pair)
+                if sources is not None:
+                    sources[pair] = clause
     return results

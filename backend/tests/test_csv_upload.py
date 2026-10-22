@@ -9,6 +9,35 @@ from app.api.upload import _normalize_header, prepare_row_payload
 
 
 class CsvUploadPreparationTests(unittest.TestCase):
+    def test_region_ii_list_of_farms_export_maps_address_dates_and_track_file(self):
+        # PCIC's "Region II List of Farms with GPX File" layout (2026-10-22):
+        # "... Address" location columns, "Date Effectivity"/"Date Expiry" and
+        # trackFileName. Before these aliases the whole file was rejected.
+        df = pd.DataFrame([{
+            "Georef ID": "",
+            "Farmers ID": "189763",
+            "Farmer Name": "GUIYAB, MERCIE LIBAN",
+            "Barangay Address": "SANTA",
+            "Municipality Address": "TUMAUINI",
+            "Province Address": "ISABELA",
+            "Policy No.": "2267454",
+            "Area": "0.8514",
+            "Date Effectivity": "09/10/2026",
+            "Date Expiry": "01/08/2027",
+            "Amount of Cover": "21,285.00",
+            "FarmID": "1609622",
+            "trackFileName": "TAB_GUIYAB, MERCIE M._189763_1609622_2024-04-04.gpx",
+        }])
+
+        payload = prepare_row_payload(df.iloc[0])
+
+        self.assertEqual(payload["boundary"], {"province": "ISABELA", "municipality": "TUMAUINI", "barangay": "SANTA"})
+        self.assertEqual(payload["insurance"]["effectivity_date"], date(2026, 9, 10))
+        self.assertEqual(payload["insurance"]["expiry_date"], date(2027, 1, 8))
+        self.assertEqual(payload["insurance"]["amount_cover"], Decimal("21285.00"))
+        self.assertEqual(payload["farm"]["csv_farm_reference"], "1609622")
+        self.assertEqual(payload["farm"]["track_file_name"], "TAB_GUIYAB, MERCIE M._189763_1609622_2024-04-04.gpx")
+
     def test_prepare_row_payload_normalizes_missing_values_and_numeric_fields(self):
         df = pd.DataFrame([
             {
@@ -49,7 +78,10 @@ class CsvUploadPreparationTests(unittest.TestCase):
             payload["farmer"],
             {"farmers_id": None, "rsbsa_no": "RSBSA-001", "last_name": "DELA CRUZ", "first_name": "JUAN", "middle_name": "SANTOS"},
         )
-        self.assertEqual(payload["farm"], {"csv_farm_reference": "FARM-100", "georef_id": "GEO-100", "area_size": Decimal("1200.50")})
+        self.assertEqual(
+            payload["farm"],
+            {"csv_farm_reference": "FARM-100", "georef_id": "GEO-100", "area_size": Decimal("1200.50"), "track_file_name": None},
+        )
         self.assertEqual(
             payload["insurance"],
             {

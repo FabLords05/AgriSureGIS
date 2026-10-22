@@ -6,7 +6,9 @@ DROP TABLE IF EXISTS tbl_sar_planted_check CASCADE;
 DROP TABLE IF EXISTS tbl_sar_fetch_coverage CASCADE;
 DROP TABLE IF EXISTS tbl_sar_observation CASCADE;
 DROP TABLE IF EXISTS tbl_planted_verification CASCADE;
+DROP TABLE IF EXISTS tbl_exposure_intervals CASCADE;
 DROP TABLE IF EXISTS tbl_area_exposure_summary CASCADE;
+DROP TABLE IF EXISTS tbl_tcb_unresolved_clauses CASCADE;
 DROP TABLE IF EXISTS tbl_tcb_signals CASCADE;
 DROP TABLE IF EXISTS tbl_tropical_cyclone_bulletins CASCADE;
 DROP TABLE IF EXISTS tbl_insurance_usage CASCADE;
@@ -153,6 +155,9 @@ CREATE TABLE tbl_farms (
     boundary_id INT REFERENCES tbl_admin_boundaries(boundary_id) ON DELETE SET NULL,
     csv_farm_reference VARCHAR(50),
     georef_id VARCHAR(100),
+    -- PCIC's GPX file name for this farm (CSV "trackFileName") -- the GPX
+    -- matcher's first link; see migrations/2026-10-22_farm_track_file_name.sql
+    track_file_name VARCHAR(255),
     province VARCHAR(100),
     municipality VARCHAR(100),
     barangay VARCHAR(100),
@@ -264,7 +269,13 @@ CREATE TABLE tbl_tropical_cyclone_bulletins (
     -- Analysis typhoon track overlay -- see migrations/2026-10-12_tcb_track_radius.sql
     wind_radius_km INT,
     storm_force_radius_km INT,
-    forecast_track JSONB
+    forecast_track JSONB,
+    -- Traceability + corrected-bulletin detection -- see
+    -- migrations/2026-10-22_exposure_signal_hours.sql
+    raw_text TEXT,
+    tcws_hash CHAR(64),
+    issued_at_parsed BOOLEAN NOT NULL DEFAULT TRUE,
+    CONSTRAINT uq_tcb_typhoon_bulletin_count UNIQUE (typhoon_id, bulletin_count)
 );
 
 CREATE TABLE tbl_tcb_signals (
@@ -278,8 +289,24 @@ CREATE TABLE tbl_tcb_signals (
     -- lets exposure_calculator.py key boundary lookups on (province,
     -- municipality) instead of municipality alone, which collides once
     -- AdminBoundary covers the whole country (nationwide PSGC expansion).
-    province VARCHAR(100)
+    province VARCHAR(100),
+    -- The PAGASA clause this LGU was resolved from (2026-10-22)
+    source_clause TEXT
 );
+
+-- Clauses that resolved to no municipality, incl. partial provincial
+-- coverage with no town list (never expanded to the whole province) --
+-- see migrations/2026-10-22_exposure_signal_hours.sql
+CREATE TABLE tbl_tcb_unresolved_clauses (
+    unresolved_id SERIAL PRIMARY KEY,
+    tcb_id INT NOT NULL REFERENCES tbl_tropical_cyclone_bulletins(tcb_id) ON DELETE CASCADE,
+    signal_level INT NOT NULL,
+    island_group INT NOT NULL,
+    clause TEXT NOT NULL,
+    reason VARCHAR(40) NOT NULL
+        CHECK (reason IN ('no_boundary_match', 'partial_coverage_no_list'))
+);
+CREATE INDEX idx_tcb_unresolved_tcb ON tbl_tcb_unresolved_clauses(tcb_id);
 
 CREATE TABLE tbl_area_exposure_summary (
     summary_id SERIAL PRIMARY KEY,
@@ -291,9 +318,50 @@ CREATE TABLE tbl_area_exposure_summary (
     start_time TIMESTAMPTZ NOT NULL,
     end_time TIMESTAMPTZ NOT NULL,
     is_eligible_6hr BOOLEAN DEFAULT FALSE,
-    total_exposure_hours NUMERIC(5,2) NOT NULL,
-    computed_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+    -- = signal_1_hours + ... + signal_5_hours (2026-10-22; see
+    -- migrations/2026-10-22_exposure_signal_hours.sql)
+    total_exposure_hours NUMERIC(7,2) NOT NULL,
+    computed_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    island_group INT,
+    signal_1_hours NUMERIC(7,2) NOT NULL DEFAULT 0,
+    signal_2_hours NUMERIC(7,2) NOT NULL DEFAULT 0,
+    signal_3_hours NUMERIC(7,2) NOT NULL DEFAULT 0,
+    signal_4_hours NUMERIC(7,2) NOT NULL DEFAULT 0,
+    signal_5_hours NUMERIC(7,2) NOT NULL DEFAULT 0,
+    -- Hours under max_signal_level; what AssessmentService buckets into 6/12/24
+    payout_hours NUMERIC(7,2),
+    has_open_interval BOOLEAN NOT NULL DEFAULT FALSE,
+    has_long_gap BOOLEAN NOT NULL DEFAULT FALSE,
+    CONSTRAINT ck_exposure_hours_non_negative CHECK (
+        signal_1_hours >= 0 AND signal_2_hours >= 0 AND signal_3_hours >= 0
+        AND signal_4_hours >= 0 AND signal_5_hours >= 0 AND total_exposure_hours >= 0
+        AND (payout_hours IS NULL OR payout_hours >= 0)
+    ),
+    CONSTRAINT ck_exposure_total_is_sum CHECK (
+        total_exposure_hours = signal_1_hours + signal_2_hours + signal_3_hours
+                               + signal_4_hours + signal_5_hours
+    )
 );
+-- One row per municipality per typhoon regardless of letter case
+-- ('CAGAYAN / PAMPLONA' and 'Cagayan / Pamplona' are the same town).
+CREATE UNIQUE INDEX uq_exposure_typhoon_area_ci
+    ON tbl_area_exposure_summary (typhoon_id, lower(province), lower(municipality));
+
+-- Each continuous stretch a municipality spent under one signal level
+-- (rebuilt on every recompute) -- the audit trail behind the summary hours.
+CREATE TABLE tbl_exposure_intervals (
+    interval_id SERIAL PRIMARY KEY,
+    typhoon_id INT NOT NULL REFERENCES tbl_typhoons(typhoon_id) ON DELETE CASCADE,
+    province VARCHAR(100) NOT NULL,
+    municipality VARCHAR(100) NOT NULL,
+    signal_level INT NOT NULL CHECK (signal_level BETWEEN 1 AND 5),
+    start_time TIMESTAMPTZ NOT NULL,
+    end_time TIMESTAMPTZ NOT NULL,
+    start_tcb_id INT REFERENCES tbl_tropical_cyclone_bulletins(tcb_id) ON DELETE SET NULL,
+    end_tcb_id INT REFERENCES tbl_tropical_cyclone_bulletins(tcb_id) ON DELETE SET NULL,
+    CONSTRAINT ck_exposure_interval_order CHECK (end_time > start_time)
+);
+CREATE INDEX idx_exposure_intervals_area ON tbl_exposure_intervals(typhoon_id, province, municipality);
 
 -- 5b. Automated TCB polling settings (single-row config table backing the
 -- Calibration screen's "TCB Polling Interval" field and the in-process
@@ -314,7 +382,7 @@ INSERT INTO tbl_parser_settings (polling_interval_minutes) VALUES (180);
 CREATE TABLE tbl_activity_log (
     log_id BIGSERIAL PRIMARY KEY,
     user_id INT REFERENCES tbl_system_users(user_id) ON DELETE SET NULL,
-    action VARCHAR(20) NOT NULL, -- LOGIN, LOGOUT, POST, PUT, PATCH, DELETE, GET, INGEST, SYSTEM
+    action VARCHAR(20) NOT NULL, -- LOGIN, LOGOUT, POST, PUT, PATCH, DELETE, GET, INGEST, ASSESS, SYSTEM
     endpoint VARCHAR(255) NOT NULL,
     status_code INT NOT NULL,
     remarks TEXT, -- full sentence of what was done (app/core/activity_log.py)
@@ -403,7 +471,15 @@ CREATE TABLE tbl_backup_log (
     error TEXT,
     gdrive_error TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    created_by INT REFERENCES tbl_system_users(user_id) ON DELETE SET NULL
+    created_by INT REFERENCES tbl_system_users(user_id) ON DELETE SET NULL,
+    -- Integrity + verification (see migrations/2026-10-22_backup_verification.sql)
+    sha256 CHAR(64),
+    row_counts JSONB,
+    encrypted BOOLEAN NOT NULL DEFAULT FALSE,
+    gdrive_md5 VARCHAR(32),
+    verify_status VARCHAR(20) CHECK (verify_status IN ('pending', 'verified', 'failed')),
+    verify_detail JSONB,
+    verified_at TIMESTAMPTZ
 );
 
 CREATE INDEX idx_backup_log_created_at ON tbl_backup_log (created_at DESC);
@@ -423,6 +499,9 @@ CREATE INDEX idx_admin_boundaries_boundary_geom ON tbl_admin_boundaries USING GI
 -- into an effectively O(n^2) table scan as tbl_farms grew mid-upload, which is
 -- what actually made ingestion "hang" rather than just being generically slow.
 CREATE INDEX idx_farms_csv_farm_reference ON tbl_farms (csv_farm_reference);
+-- GPX matching links (2026-10-22, see GpxFarmerMatcherService.match)
+CREATE INDEX idx_farms_track_file_name ON tbl_farms (lower(track_file_name));
+CREATE INDEX idx_farms_georef_id ON tbl_farms (georef_id);
 CREATE INDEX idx_admin_boundaries_province_municipality_barangay
     ON tbl_admin_boundaries (province, municipality, barangay);
 
