@@ -12,7 +12,12 @@ from app.core.scheduler import reschedule_bulletin_job
 from app.core.security import get_current_user
 from app.services.bulletin_parser import BulletinParserService, PagasaScrapeError
 from app.services.email_alert_service import send_new_bulletin_alerts
-from app.services.exposure_calculator import METHODOLOGY_NOTE, ExposureCalculatorService, serialize_summary
+from app.services.exposure_calculator import (
+    METHODOLOGY_NOTE,
+    MIN_ELIGIBLE_SIGNAL,
+    ExposureCalculatorService,
+    serialize_summary,
+)
 from app.services.pagasa_status_scraper import PagasaStatusService
 from app.models.models import (
     AdminBoundary,
@@ -355,7 +360,11 @@ def get_typhoon_summary(typhoon_id: int, db: Session = Depends(get_db)):
     Reads tbl_area_exposure_summary as-is -- that table is already computed
     once per typhoon (after its bulletins stop, not per-TCB), so this endpoint
     does not trigger a recompute. "People hit" is anyone whose farm falls in
-    an affected boundary, regardless of whether a payout was assessed yet.
+    a municipality that reached TCWS 2+ (the payout engine's signal rule),
+    regardless of whether a payout was assessed yet; farmers whose
+    municipality only ever reached Signal 1 are counted separately in
+    `signal_1_only_people_hit` (2026-10-22) so the Assessment empty state can
+    say why nothing was assessed.
     """
     typhoon = db.query(Typhoon).filter(Typhoon.typhoon_id == typhoon_id).first()
     if typhoon is None:
@@ -379,17 +388,27 @@ def get_typhoon_summary(typhoon_id: int, db: Session = Depends(get_db)):
             "end_time": None,
             "exposure_duration_hours": None,
             "people_hit": 0,
+            "signal_1_only_people_hit": 0,
         }
 
     # By (province, municipality), not summary.boundary_id -- that is one
     # barangay row standing in for the whole municipality, so matching on it
     # only counted farmers in that one barangay (same fix as AssessmentService).
-    areas = {(s.province, s.municipality) for s in summaries}
-    people_hit = (
-        db.query(func.count(func.distinct(Farm.farmer_id)))
-        .join(AdminBoundary, Farm.boundary_id == AdminBoundary.boundary_id)
-        .filter(tuple_(AdminBoundary.province, AdminBoundary.municipality).in_(areas))
-        .scalar()
+    def count_farmers(areas: set[tuple[str, str]]) -> int:
+        if not areas:
+            return 0
+        return (
+            db.query(func.count(func.distinct(Farm.farmer_id)))
+            .join(AdminBoundary, Farm.boundary_id == AdminBoundary.boundary_id)
+            .filter(tuple_(AdminBoundary.province, AdminBoundary.municipality).in_(areas))
+            .scalar()
+        )
+
+    people_hit = count_farmers(
+        {(s.province, s.municipality) for s in summaries if s.max_signal_level >= MIN_ELIGIBLE_SIGNAL}
+    )
+    signal_1_only_people_hit = count_farmers(
+        {(s.province, s.municipality) for s in summaries if s.max_signal_level < MIN_ELIGIBLE_SIGNAL}
     )
 
     overall_start = min(s.start_time for s in summaries)
@@ -405,4 +424,5 @@ def get_typhoon_summary(typhoon_id: int, db: Session = Depends(get_db)):
         "end_time": overall_end,
         "exposure_duration_hours": round((overall_end - overall_start).total_seconds() / 3600, 2),
         "people_hit": people_hit,
+        "signal_1_only_people_hit": signal_1_only_people_hit,
     }

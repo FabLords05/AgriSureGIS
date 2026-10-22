@@ -13,11 +13,13 @@ from app.models.models import (
     RiskAssessment,
     TropicalCycloneBulletin,
 )
-from app.services.exposure_calculator import ExposureCalculatorService
+from app.services.exposure_calculator import (
+    MIN_ELIGIBLE_HOURS,
+    MIN_ELIGIBLE_SIGNAL,
+    ExposureCalculatorService,
+)
 
 ELIGIBLE_CROP_STAGES = {1, 2, 3}  # Booting, Flowering, Maturity
-MIN_ELIGIBLE_SIGNAL = 2
-MIN_ELIGIBLE_HOURS = 6
 
 
 class AssessmentService:

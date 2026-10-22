@@ -4,7 +4,8 @@ import { AreaExposureSummary, TyphoonExposure } from "@/lib/api";
 // Shared by the Main Dashboard's Exposure Summary and Assessment &
 // Reporting's Areas Affected (2026-10-22), so both always show the same
 // backend-calculated values (GET /api/bulletins/typhoon/{id}/exposure).
-// Exposure = Signal 1 + ... + Signal 5 hours; it is never recomputed here.
+// TCWS 2+ Exposure = Signal 2 + ... + Signal 5 hours (Signal 1 not counted);
+// it is never recomputed here.
 
 const ISLAND_GROUP_LABELS: Record<number, string> = { 0: "Luzon", 1: "Visayas", 2: "Mindanao" };
 const SIGNAL_LEVELS = [1, 2, 3, 4, 5] as const;
@@ -53,7 +54,7 @@ export function ExposureTable({
               {SIGNAL_LEVELS.map(level => (
                 <th key={level} className="px-2 py-2 text-right font-semibold whitespace-nowrap">Signal {level}</th>
               ))}
-              <th className="px-2 py-2 text-right font-semibold">Exposure</th>
+              <th className="px-2 py-2 text-center font-semibold whitespace-nowrap">TCWS 2+ Exposure (h)</th>
               <th className="px-2 py-2 text-left font-semibold">Start</th>
               <th className="px-2 py-2 text-left font-semibold">End</th>
             </tr>
@@ -79,7 +80,7 @@ export function ExposureTable({
                     </td>
                   );
                 })}
-                <td className="px-2 py-1.5 text-right tabular-nums whitespace-nowrap font-bold">{formatHours(a.total_exposure_hours)}</td>
+                <td className="px-2 py-1.5 text-center tabular-nums whitespace-nowrap font-bold">{formatHours(a.tcws2_plus_exposure_hours)}</td>
                 <td className="px-2 py-1.5 text-muted-foreground whitespace-nowrap">{formatDateTime(a.start_time)}</td>
                 <td className="px-2 py-1.5 text-muted-foreground whitespace-nowrap">{formatDateTime(a.end_time)}</td>
               </tr>
@@ -115,7 +116,7 @@ export function ExposureTable({
         </p>
       )}
       <p className="text-[10px] text-muted-foreground leading-snug">
-        <span className="font-semibold">Exposure</span> = Signal 1 + Signal 2 + Signal 3 + Signal 4 + Signal 5 hours.{" "}
+        <span className="font-semibold">TCWS 2+ Exposure</span> = Signal 2 + Signal 3 + Signal 4 + Signal 5 hours (Signal 1 not counted).{" "}
         {exposure.methodology}
         {hasOpen && " (ongoing) = still under a signal in the latest bulletin."}
         {hasGap && " (gap) = counted across a >12h gap between bulletins."}

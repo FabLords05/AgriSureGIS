@@ -15,6 +15,7 @@ from app.services.exposure_calculator import (
     BulletinSnapshot,
     ExposureCalculatorService,
     build_area_exposures,
+    serialize_summary,
 )
 
 T0 = datetime(2025, 9, 23, 5, 0, tzinfo=timezone.utc)
@@ -212,6 +213,20 @@ class ComputeForTyphoonTests(unittest.TestCase):
         intervals = [obj for obj in mock_db.added if isinstance(obj, ExposureInterval)]
         self.assertEqual([(i.signal_level, i.start_tcb_id, i.end_tcb_id) for i in intervals], [(2, 10, 11), (3, 11, 12)])
 
+    def test_signal_1_only_area_is_not_eligible_even_past_6_hours(self):
+        boundary = MagicMock(boundary_id=5, province="Misamis Oriental", municipality="Claveria")
+        mock_db = self._build_mock_db(
+            bulletins=[self._bulletin(10, 1, 0), self._bulletin(11, 2, 36)],
+            boundaries=[boundary],
+            signals=[self._signal(10, 1)],
+        )
+
+        s = ExposureCalculatorService.compute_for_typhoon(1, mock_db)[0]
+
+        self.assertEqual(s.max_signal_level, 1)
+        self.assertEqual(s.payout_hours, Decimal("36.0"))
+        self.assertFalse(s.is_eligible_6hr)
+
     def test_bulletin_without_parsed_issue_time_is_left_out(self):
         boundary = MagicMock(boundary_id=5, province="Misamis Oriental", municipality="Claveria")
         mock_db = self._build_mock_db(
@@ -300,6 +315,28 @@ class ComputeForTyphoonTests(unittest.TestCase):
     def test_no_bulletins_returns_empty(self):
         mock_db = self._build_mock_db(bulletins=[], boundaries=[], signals=[])
         self.assertEqual(ExposureCalculatorService.compute_for_typhoon(1, mock_db), [])
+
+
+class SerializeSummaryTests(unittest.TestCase):
+    def _summary(self, s1, s2, s3=0, s4=0, s5=0, max_signal_level=2):
+        return AreaExposureSummary(
+            summary_id=1, boundary_id=5, province="Batanes", municipality="Basco", island_group=0,
+            max_signal_level=max_signal_level, signal_1_hours=Decimal(s1), signal_2_hours=Decimal(s2),
+            signal_3_hours=Decimal(s3), signal_4_hours=Decimal(s4), signal_5_hours=Decimal(s5),
+            total_exposure_hours=Decimal(s1) + Decimal(s2) + Decimal(s3) + Decimal(s4) + Decimal(s5),
+            payout_hours=Decimal(s2), start_time=T0, end_time=T0, is_eligible_6hr=max_signal_level >= 2,
+            has_open_interval=False, has_long_gap=False,
+        )
+
+    def test_tcws2_plus_exposure_leaves_out_signal_1(self):
+        data = serialize_summary(self._summary("24", "30", "2.5"))
+        self.assertEqual(data["total_exposure_hours"], 56.5)
+        self.assertEqual(data["tcws2_plus_exposure_hours"], 32.5)
+
+    def test_signal_1_only_area_has_zero_tcws2_plus_exposure(self):
+        data = serialize_summary(self._summary("36", "0", max_signal_level=1))
+        self.assertEqual(data["total_exposure_hours"], 36.0)
+        self.assertEqual(data["tcws2_plus_exposure_hours"], 0)
 
 
 if __name__ == "__main__":

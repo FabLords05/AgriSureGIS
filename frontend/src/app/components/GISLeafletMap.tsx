@@ -746,6 +746,13 @@ export function GISLeafletMap({ farms, selectedFarmId, onSelectFarm, selectedBul
               </div>
             </>
           )}
+          {/* 2026-10-22: a town shaded Signal 1 can still have affected farms
+              -- the filter is per typhoon, the shading per bulletin. */}
+          {affectedTyphoonId != null && (
+            <p className="text-[9px] text-muted-foreground mt-1.5 max-w-[200px] leading-snug">
+              Affected = towns under Signal 2+ in any bulletin of this typhoon. Shading shows the selected bulletin only.
+            </p>
+          )}
         </div>
 
         {selectedBulletin && (

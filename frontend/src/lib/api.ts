@@ -169,6 +169,7 @@ export interface TcbSignal {
 // One municipality's exposure for a typhoon -- backend serialize_summary()
 // (app/services/exposure_calculator.py), shared by every exposure table.
 // signal_N_hours: hours under TCWS N; total_exposure_hours = their sum;
+// tcws2_plus_exposure_hours = Signal 2..5 only (the tables' exposure column);
 // payout_hours: hours under max_signal_level (what the payout uses).
 export interface AreaExposureSummary {
   summary_id: number;
@@ -183,6 +184,7 @@ export interface AreaExposureSummary {
   signal_4_hours: number;
   signal_5_hours: number;
   total_exposure_hours: number;
+  tcws2_plus_exposure_hours: number;
   payout_hours: number | null;
   start_time: string;
   end_time: string;
@@ -230,7 +232,10 @@ export interface TyphoonSummary {
   start_time: string | null;
   end_time: string | null;
   exposure_duration_hours: number | null;
+  // Farmers in municipalities that reached TCWS 2+ (payout-eligible signal)
   people_hit: number;
+  // Farmers whose municipality only ever reached Signal 1 (not eligible)
+  signal_1_only_people_hit: number;
 }
 
 // Every request carries the session token now (2026-08-16) -- harmless on
