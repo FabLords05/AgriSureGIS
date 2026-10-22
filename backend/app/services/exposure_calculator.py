@@ -17,6 +17,10 @@ from app.models.models import (
 logger = logging.getLogger(__name__)
 
 SIGNAL_LEVELS = (1, 2, 3, 4, 5)
+# Payout eligibility: max signal TCWS 2+ with 6+ hours at that signal. Shared
+# with AssessmentService (defined here because it imports this module).
+MIN_ELIGIBLE_SIGNAL = 2
+MIN_ELIGIBLE_HOURS = 6
 # Consecutive bulletins further apart than this are still counted (PAGASA
 # signals stay hoisted until a later bulletin lifts them), but the area is
 # flagged so the stretch can be checked against PAGASA's own records.
@@ -176,6 +180,8 @@ def serialize_summary(summary: AreaExposureSummary) -> dict:
         "signal_4_hours": hours[3],
         "signal_5_hours": hours[4],
         "total_exposure_hours": float(summary.total_exposure_hours),
+        # TCWS 2+ Exposure (h): Signal 2..5 only -- Signal 1 is not counted
+        "tcws2_plus_exposure_hours": round(sum(hours[1:]), 2),
         "payout_hours": float(summary.payout_hours) if summary.payout_hours is not None else None,
         "start_time": summary.start_time,
         "end_time": summary.end_time,
@@ -302,7 +308,9 @@ class ExposureCalculatorService:
                 setattr(summary, f"signal_{level}_hours", hours[level])
             summary.total_exposure_hours = sum(hours.values(), Decimal("0"))
             summary.payout_hours = payout_hours
-            summary.is_eligible_6hr = payout_hours >= 6
+            summary.is_eligible_6hr = (
+                exposure.max_signal_level >= MIN_ELIGIBLE_SIGNAL and payout_hours >= MIN_ELIGIBLE_HOURS
+            )
             summary.has_open_interval = exposure.has_open_interval
             summary.has_long_gap = exposure.has_long_gap
             summaries.append(summary)

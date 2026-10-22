@@ -1138,7 +1138,8 @@ def upload_gpx(
                 status_code=404,
                 detail=(
                     f'No matching farmer/farm found for "{file.filename}". '
-                    "Select the correct farm row manually."
+                    "Its farm may not be imported yet -- upload the CSV that lists this file first, "
+                    "or select the correct farm row manually."
                 ),
             )
         farm = match.farm

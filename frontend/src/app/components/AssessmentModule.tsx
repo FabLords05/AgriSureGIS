@@ -749,9 +749,19 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
       ) : selectedTyphoonName && filtered.length === 0 ? (
         <div className="flex-1 flex flex-col items-center justify-center gap-2 text-center px-8">
           <p className="text-sm font-semibold">No assessments computed yet for Typhoon {selectedTyphoonName}</p>
-          <p className="text-[11px] text-muted-foreground">
-            These records belong to other typhoons. Use "Compute Assessments" above once this typhoon's exposure is ready, or click it again to deselect and see all typhoons.
-          </p>
+          {typhoonSummary && typhoonSummary.areas_hit.length > 0 && typhoonSummary.people_hit === 0 ? (
+            // Every farm in this typhoon's path was Signal 1 only (e.g. ROSAL,
+            // 2026-10-22) -- say why Compute Assessments finds nothing.
+            <p className="text-[11px] text-muted-foreground">
+              No farms were in the Signal 2+ areas of Typhoon {selectedTyphoonName}.
+              {typhoonSummary.signal_1_only_people_hit > 0 &&
+                ` ${typhoonSummary.signal_1_only_people_hit.toLocaleString()} farmer(s) were only under Signal 1, which isn't eligible for payout.`}
+            </p>
+          ) : (
+            <p className="text-[11px] text-muted-foreground">
+              These records belong to other typhoons. Use "Compute Assessments" above once this typhoon's exposure is ready, or click it again to deselect and see all typhoons.
+            </p>
+          )}
         </div>
       ) : (
         <>

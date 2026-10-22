@@ -134,7 +134,7 @@ Note the prefix: it is **`/api/users/...`**, not `/api/auth/...`.
   - **Response:** a **bare array** of `{ signal_id, signal_level, island_group, area_name, province }`.
 * **GET `/api/bulletins/typhoon/{typhoon_id}/summary`**
   - **Description:** Per-typhoon exposure summary for the Assessment & Reporting module's typhoon panel. Reads `tbl_area_exposure_summary` as-is — it does **not** trigger a recompute. "People hit" is anyone whose farm falls in an affected boundary, whether or not a payout was assessed.
-  - **Response:** `{ "status": "success", "typhoon_id", "typhoon_name", "areas_hit": [ { province, municipality, max_signal_level, start_time, end_time, total_exposure_hours } ], "max_signal_level", "start_time", "end_time", "exposure_duration_hours", "people_hit" }`. With no summaries yet, the same shape comes back with an empty `areas_hit` and nulls. 404 unknown typhoon.
+  - **Response:** `{ "status": "success", "typhoon_id", "typhoon_name", "areas_hit": [ { province, municipality, max_signal_level, start_time, end_time, total_exposure_hours } ], "max_signal_level", "start_time", "end_time", "exposure_duration_hours", "people_hit", "signal_1_only_people_hit" }`. `people_hit` counts farmers in municipalities that reached TCWS 2+; `signal_1_only_people_hit` counts farmers whose municipality only reached Signal 1 (2026-10-22). With no summaries yet, the same shape comes back with an empty `areas_hit` and nulls. 404 unknown typhoon.
   - Farmers are matched by `(province, municipality)`, not `boundary_id` — a summary's `boundary_id` is one barangay standing in for the whole municipality.
 
 ## 5. Typhoons (`/api/typhoons`)

@@ -4,6 +4,44 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-22] - Signal 1 Left Out of Eligibility Counts; Explanatory Messages
+
+Payout and assessment already skipped Signal-1-only municipalities (`max_signal_level >= 2`). Signal 1 still leaked into the stored eligibility flag and the typhoon summary's farmer count. Fixed here, with the eligibility rule itself unchanged.
+
+* **`backend/app/services/exposure_calculator.py`**:
+  * `MIN_ELIGIBLE_SIGNAL` (2) and `MIN_ELIGIBLE_HOURS` (6) now live here. They moved from `assessment_service.py`, which imports this module, so defining them there would be circular.
+  * `compute_for_typhoon()` sets `is_eligible_6hr` only when `max_signal_level >= 2` **and** `payout_hours >= 6`. Before, a town with 6h or more of Signal 1 only was flagged eligible. That also inflated the "payout-eligible" count in the compute-exposure Activity Log entry.
+  * Existing rows keep the old flag until that typhoon's exposure is recomputed (the **Recompute** button). No migration.
+* **`backend/app/services/assessment_service.py`**: imports the two constants. Behaviour unchanged.
+* **`backend/app/api/bulletins.py`**: `get_typhoon_summary()`:
+  * `people_hit` now counts only farmers in TCWS 2+ municipalities.
+  * New `signal_1_only_people_hit` counts farmers whose municipality only reached Signal 1.
+  * `areas_hit`, max signal, start/end and duration are unchanged.
+* **`frontend/src/lib/api.ts`**: `TyphoonSummary` gains `signal_1_only_people_hit`.
+* **`frontend/src/app/components/AssessmentModule.tsx`**: when a typhoon has exposed areas but no farmers in Signal 2+ areas, the empty state says so, plus how many farmers were only under Signal 1. **Why:** ROSAL showed Areas Affected but an empty assessment table. Its 7 Signal 2 towns have no farms; every farm in its path was Signal 1 only.
+* **`frontend/src/app/components/GISLeafletMap.tsx`**: with an "Affected by" typhoon selected, the legend notes that affected means Signal 2+ in *any* bulletin, while the shading shows only the selected bulletin. **Why:** a town that went Signal 2 and back to Signal 1 (Calayan, ROSAL) is shaded Signal 1 but its farms are affected.
+* **`backend/app/api/upload.py`**: the GPX "No matching farmer/farm found" message adds that the farm may not be imported yet. **Why:** 378 of 1,677 GPX files failed because their CSV rows were never imported. The CSV import that ran processed 1,329 rows; the Oct 21 Region II CSV has 1,456.
+* **`backend/tests/test_exposure_calculator.py`**:
+  * New `test_signal_1_only_area_is_not_eligible_even_past_6_hours`.
+  * `SerializeSummaryTests._summary()` takes `max_signal_level`.
+
+---
+
+## [2026-10-22] - "TCWS 2+ Exposure (h)" Column in the Exposure Tables
+
+The exposure column of the Main Dashboard's Exposure Summary and Assessment & Reporting's Areas Affected (both render `ExposureTable`) is renamed from "Exposure" to **"TCWS 2+ Exposure (h)"**. It now counts only Signal 2–5 hours, so Signal 1 hours are left out. Display-only change.
+
+* **`backend/app/services/exposure_calculator.py`**: `serialize_summary()` returns a new `tcws2_plus_exposure_hours` (sum of `signal_2_hours`..`signal_5_hours`, rounded to 2 dp). The value is computed when the response is built; nothing new is stored.
+* **`frontend/src/lib/api.ts`**: `AreaExposureSummary` gains `tcws2_plus_exposure_hours`.
+* **`frontend/src/app/components/ExposureTable.tsx`**: the header reads "TCWS 2+ Exposure (h)" (header and cells centered), the cell shows `tcws2_plus_exposure_hours`, and the footnote reads "TCWS 2+ Exposure = Signal 2 + … + Signal 5 hours (Signal 1 not counted)".
+* **`backend/tests/test_exposure_calculator.py`**: new `SerializeSummaryTests`.
+
+### Not changed
+* `tbl_area_exposure_summary.total_exposure_hours` stays the Signal 1–5 sum (its CHECK constraint enforces it), as do the archive, the recompute script and the API field of the same name.
+* `payout_hours`, the payout and assessment logic, Start/End and the (ongoing)/(gap) tags are unchanged; they still reflect all signals.
+
+---
+
 ## [2026-10-22] - Region III "List of Farms with GPX File" as the Official CSV Layout
 
 `docs/Region III List of Farms with GPX File_Corrected Format.csv` is now the official ingestion layout. Most of its columns were already mapped through the Region II aliases. Four gaps were closed. Decisions confirmed before implementation:
