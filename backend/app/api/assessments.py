@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
+from app.core.activity_log import note_activity, plural
 from app.core.database import get_db
 from app.core.farmer_name import format_surname_first
 from app.core.farms_cache import invalidate_farms_cache
@@ -43,10 +44,21 @@ def calculate_assessments(payload: CalculateAssessmentsRequest, db: Session = De
     >= 6h, crop stage in Booting/Flowering/Maturity), and calculates final indemnity
     payments for every active policy in the typhoon-affected area.
     """
+    typhoon = db.get(Typhoon, payload.typhoon_id)
+    typhoon_label = typhoon.name if typhoon else f"typhoon #{payload.typhoon_id}"
+    note_activity(f"Calculate assessments for {typhoon_label} (TCB #{payload.bulletin_id}).")
     try:
         results = AssessmentService.calculate_for_bulletin(payload.typhoon_id, payload.bulletin_id, db)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    total_payout = sum(float(r.final_indemnity_payment or 0) for r in results)
+    with_payout = sum(1 for r in results if (r.final_indemnity_payment or 0) > 0)
+    note_activity(
+        f"Calculated assessments for {typhoon_label} (TCB #{payload.bulletin_id}): "
+        f"{plural(len(results), 'policy', 'policies')} assessed, {with_payout:,} with a payout, "
+        f"total indemnity ₱{total_payout:,.2f}."
+    )
 
     return {
         "status": "success",
@@ -380,6 +392,11 @@ def export_assessments_csv(
         _typhoon_names_for_summaries({a.summary_id for a in assessments if a.summary_id}, db),
         "PCIC_Payout",
     )
+    total_payout = sum(float(a.final_indemnity_payment or 0) for a in assessments)
+    note_activity(
+        f'Exported PCIC payout CSV "{filename}": {plural(len(rows), "assessment row")}'
+        f"{' (all typhoons)' if typhoon_id is None else ''}, total indemnity ₱{total_payout:,.2f}."
+    )
 
     return StreamingResponse(
         iter([buffer.getvalue()]),
@@ -598,7 +615,7 @@ def export_assessments_pabs_csv(db: Session = Depends(get_db)):
     it. POST rather than GET because exporting now changes data.
     """
     rows = _build_pabs_rows(db)
-    AssessmentService.finalize_exported_usage(
+    newly_locked = AssessmentService.finalize_exported_usage(
         [
             (row["insurance_records_id"], row["typhoon_id"], row["assessment_id"])
             for row in rows
@@ -620,6 +637,11 @@ def export_assessments_pabs_csv(db: Session = Depends(get_db)):
 
     filename = _export_filename(
         (row["TYPHOON_NAME"] for row in rows), "Final_Indemnity_Payout"
+    )
+    total_payout = sum(float(row["final_indemnity_payment"] or 0) for row in rows)
+    note_activity(
+        f'Exported final PABS indemnity CSV "{filename}": {plural(len(rows), "row")}, '
+        f"total indemnity ₱{total_payout:,.2f}; {plural(newly_locked or 0, 'policy', 'policies')} newly locked as used."
     )
 
     return StreamingResponse(

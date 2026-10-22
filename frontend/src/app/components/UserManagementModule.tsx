@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { Users, Plus, Save, Settings, Trash2, AlertTriangle } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { Users, Plus, Save, Settings, Trash2, AlertTriangle, Search, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
 import { getUsers, createUser, updateUser, SystemUser } from "@/lib/api";
 
 // Split out of CalibrationModule.tsx into its own admin tab -- previously a
@@ -31,12 +31,48 @@ function ConfirmDialog({ message, onConfirm, onCancel }: ConfirmDialogProps) {
   );
 }
 
-// Only two roles actually mean anything anywhere else in the app (Login's
-// role toggle, Registration's own restriction) -- matches
-// backend/app/api/users.py's ALLOWED_ROLES, not the prototype's wider
-// 4-option dropdown (Data Analyst/Field Supervisor had no backing
-// permission logic anywhere).
-const USER_ROLES = ["GIS Specialist", "System Administrator"] as const;
+// Admins manage GIS Specialist accounts only -- System Administrator accounts
+// are provisioned by the superuser outside the app, and the backend
+// (users.py's MANAGED_ROLE) neither lists nor lets this tab create/edit them.
+// So there's no role picker or Role column here.
+
+// Header click cycles asc -> desc -> off (API order). For Status, "asc" means
+// active accounts first.
+type SortKey = "name" | "status";
+type SortState = { key: SortKey; dir: "asc" | "desc" } | null;
+
+const STATUS_FILTERS = ["All", "Active", "Inactive"] as const;
+type StatusFilter = typeof STATUS_FILTERS[number];
+
+const SORT_COMPARE: Record<SortKey, (a: SystemUser, b: SystemUser) => number> = {
+  name:   (a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }),
+  status: (a, b) => Number(b.is_active) - Number(a.is_active),
+};
+
+interface SortableThProps {
+  label: string;
+  sortKey: SortKey;
+  sort: SortState;
+  onSort: (key: SortKey) => void;
+}
+
+function SortableTh({ label, sortKey, sort, onSort }: SortableThProps) {
+  const active = sort?.key === sortKey;
+  const Icon = !active ? ArrowUpDown : sort?.dir === "asc" ? ArrowUp : ArrowDown;
+  return (
+    <th className="px-3 py-2 text-left font-semibold">
+      <button
+        type="button"
+        onClick={() => onSort(sortKey)}
+        className={`flex items-center gap-1 hover:text-foreground transition-colors ${active ? "text-foreground" : ""}`}
+        title={`Sort by ${label.toLowerCase()}`}
+      >
+        {label}
+        <Icon size={10} className={active ? "" : "opacity-50"} />
+      </button>
+    </th>
+  );
+}
 
 export function UserManagementModule() {
   const [users, setUsers] = useState<SystemUser[]>([]);
@@ -48,6 +84,28 @@ export function UserManagementModule() {
   const [addingUser, setAddingUser]   = useState(false);
   const [newUser, setNewUser]         = useState({ name:"", role:"GIS Specialist", email:"", password:"" });
   const [userActionError, setUserActionError] = useState<string | null>(null);
+
+  const [search, setSearch] = useState("");
+  const [sort, setSort]     = useState<SortState>(null);
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("Active");
+
+  const toggleSort = (key: SortKey) => {
+    setSort(s => (s?.key !== key ? { key, dir: "asc" } : s.dir === "asc" ? { key, dir: "desc" } : null));
+  };
+
+  const visibleUsers = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    const filtered = users.filter(u =>
+      (statusFilter === "All" || u.is_active === (statusFilter === "Active")) &&
+      (!q || u.name.toLowerCase().includes(q))
+    );
+    if (!sort) return filtered;
+    const cmp = SORT_COMPARE[sort.key];
+    return [...filtered].sort((a, b) => (sort.dir === "asc" ? cmp(a, b) : cmp(b, a)));
+  }, [users, search, sort, statusFilter]);
+
+  const statusCount = (f: StatusFilter) =>
+    f === "All" ? users.length : users.filter(u => u.is_active === (f === "Active")).length;
 
   const loadUsers = () => {
     setIsLoadingUsers(true);
@@ -79,7 +137,6 @@ export function UserManagementModule() {
     updateUser(editingUser.user_id, {
       name: editingUser.name,
       email: editingUser.email,
-      role: editingUser.role,
       is_active: editingUser.is_active,
       session_timeout_minutes: editingUser.session_timeout_minutes,
     })
@@ -133,16 +190,6 @@ export function UserManagementModule() {
                     />
                   </div>
                 ))}
-                <div>
-                  <label className="text-[11px] font-semibold block mb-1">Role</label>
-                  <select
-                    value={editingUser.role}
-                    onChange={e => setEditingUser({ ...editingUser, role: e.target.value })}
-                    className="w-full border border-border rounded-lg px-3 py-2 text-[11px] bg-background focus:outline-none focus:border-[#166534]"
-                  >
-                    {USER_ROLES.map(r => <option key={r}>{r}</option>)}
-                  </select>
-                </div>
                 <div>
                   <label className="text-[11px] font-semibold block mb-1">Session Timeout</label>
                   <select
@@ -200,16 +247,7 @@ export function UserManagementModule() {
                     />
                   </div>
                 ))}
-                <div>
-                  <label className="text-[11px] font-semibold block mb-1">Role</label>
-                  <select
-                    value={newUser.role}
-                    onChange={e => setNewUser({ ...newUser, role: e.target.value })}
-                    className="w-full border border-border rounded-lg px-3 py-2 text-[11px] bg-background focus:outline-none focus:border-[#166534]"
-                  >
-                    {USER_ROLES.map(r => <option key={r}>{r}</option>)}
-                  </select>
-                </div>
+                <p className="text-[10px] text-muted-foreground">The account is created as a GIS Specialist.</p>
               </div>
               {(!newUser.name.trim() || !newUser.email.trim()) && (
                 <p className="text-[10px] text-amber-600 mt-2">Name and email are required.</p>
@@ -237,7 +275,7 @@ export function UserManagementModule() {
             <h2 className="font-bold text-foreground flex items-center gap-2">
               <Users size={18} className="text-[#166534]" /> User Management
             </h2>
-            <p className="text-[11px] text-muted-foreground mt-0.5">Manage system access for GIS specialists and administrators.</p>
+            <p className="text-[11px] text-muted-foreground mt-0.5">Manage system access for GIS specialists.</p>
           </div>
           <button
             onClick={() => setAddingUser(true)}
@@ -251,26 +289,52 @@ export function UserManagementModule() {
           {usersError && (
             <p className="text-[10px] text-red-600 mb-2">{usersError}</p>
           )}
+          {users.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2 mb-3">
+              <div className="relative flex-1 min-w-[180px] max-w-xs">
+                <Search size={12} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                <input
+                  type="text"
+                  value={search}
+                  onChange={e => setSearch(e.target.value)}
+                  placeholder="Search by name"
+                  className="w-full border border-border rounded-lg pl-7 pr-3 py-2 text-[11px] bg-background focus:outline-none focus:border-[#166534]"
+                />
+              </div>
+              <div className="flex rounded-lg border border-border overflow-hidden">
+                {STATUS_FILTERS.map(f => (
+                  <button
+                    key={f}
+                    type="button"
+                    onClick={() => setStatusFilter(f)}
+                    className={`px-3 py-2 text-[11px] font-medium transition-colors ${statusFilter === f ? "bg-[#166534] text-white" : "bg-background text-muted-foreground hover:bg-muted"}`}
+                  >
+                    {f} ({statusCount(f)})
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           {isLoadingUsers && users.length === 0 ? (
             <p className="text-[11px] text-muted-foreground py-4 text-center">Loading users…</p>
           ) : users.length === 0 ? (
             <p className="text-[11px] text-muted-foreground py-4 text-center">No user accounts yet.</p>
+          ) : visibleUsers.length === 0 ? (
+            <p className="text-[11px] text-muted-foreground py-4 text-center">No users match the current search and filter.</p>
           ) : (
             <table className="w-full text-[11px]">
               <thead>
                 <tr className="bg-muted/60 text-muted-foreground">
-                  <th className="px-3 py-2 text-left font-semibold">Name</th>
-                  <th className="px-3 py-2 text-left font-semibold">Role</th>
+                  <SortableTh label="Name" sortKey="name" sort={sort} onSort={toggleSort} />
                   <th className="px-3 py-2 text-left font-semibold">Email</th>
-                  <th className="px-3 py-2 text-left font-semibold">Status</th>
+                  <SortableTh label="Status" sortKey="status" sort={sort} onSort={toggleSort} />
                   <th className="px-3 py-2 text-left font-semibold">Actions</th>
                 </tr>
               </thead>
               <tbody>
-                {users.map(u => (
+                {visibleUsers.map(u => (
                   <tr key={u.user_id} className="border-t border-border">
                     <td className="px-3 py-2.5 font-medium">{u.name}</td>
-                    <td className="px-3 py-2.5 text-muted-foreground">{u.role}</td>
                     <td className="px-3 py-2.5 text-muted-foreground font-mono text-[10px]">{u.email}</td>
                     <td className="px-3 py-2.5">
                       <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${u.is_active?"bg-emerald-100 text-emerald-700":"bg-gray-100 text-gray-500"}`}>

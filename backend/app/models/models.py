@@ -30,9 +30,12 @@ class ActivityLog(Base):
 
     log_id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("tbl_system_users.user_id", ondelete="SET NULL"), nullable=True)
-    action = Column(String(20), nullable=False)  # LOGIN, LOGOUT, POST, PUT, PATCH, DELETE
+    action = Column(String(20), nullable=False)  # LOGIN, LOGOUT, POST, PUT, PATCH, DELETE, GET, INGEST, SYSTEM
     endpoint = Column(String(255), nullable=False)
     status_code = Column(Integer, nullable=False)
+    # Full sentence of what was done -- see app/core/activity_log.py. NULL only
+    # for entries written before 2026-10-22.
+    remarks = Column(Text, nullable=True)
     created_at = Column(DateTime, server_default=func.now())
 
     user = relationship("SystemUser")

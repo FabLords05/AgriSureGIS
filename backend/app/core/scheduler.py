@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
+from app.core.activity_log import describe_new_bulletins, plural, record_activity
 from app.core.database import SessionLocal
 from app.services.bulletin_parser import BulletinParserService
 from app.services.email_alert_service import send_new_bulletin_alerts
@@ -59,6 +60,12 @@ def run_scheduled_scrape() -> None:
     except Exception:
         logger.exception("PAGASA active-typhoon status sync failed.")
 
+    try:
+        _log_scheduled_run(db, created, scrape_ok, status_sync_ok)
+    except Exception:
+        db.rollback()
+        logger.exception("Failed to record the scheduled poll in the activity log.")
+
     last_run.update(
         finished_at=datetime.now(timezone.utc),
         scrape_ok=scrape_ok,
@@ -74,6 +81,32 @@ def run_scheduled_scrape() -> None:
         logger.exception("Bulletin alert email step failed.")
     finally:
         db.close()
+
+
+def _log_scheduled_run(db, created: list[dict], scrape_ok: bool, status_sync_ok: bool) -> None:
+    """
+    SYSTEM Activity Log entry for the automatic TCB ingestion (2026-10-22).
+    Only written when something actually happened -- new bulletins saved, or
+    a step newly started failing -- not for every quiet poll: at one run per
+    15 minutes that would be ~96 "nothing new" rows a day burying the real
+    actions. A failure is logged once when it starts (last_run still holds the
+    previous run's outcome here), not again on every poll while PAGASA stays
+    unreachable.
+    """
+    parts = []
+    if created:
+        parts.append(
+            f"Automatic PAGASA poll ingested {plural(len(created), 'new TCB')}: "
+            f"{describe_new_bulletins(created, db)}."
+        )
+    if not scrape_ok and last_run["scrape_ok"] is not False:
+        parts.append("Automatic PAGASA TCB scrape failed (portal unreachable or returned an error); will retry next poll.")
+    if not status_sync_ok and last_run["status_sync_ok"] is not False:
+        parts.append("PAGASA active-typhoon status sync failed; typhoon active/inactive flags were not updated.")
+    if not parts:
+        return
+    status_code = 200 if scrape_ok and status_sync_ok else 500
+    record_activity(db, None, "SYSTEM", "scheduler/pagasa-poll", status_code, " ".join(parts))
 
 
 def build_scheduler(initial_interval_minutes: int) -> BackgroundScheduler:

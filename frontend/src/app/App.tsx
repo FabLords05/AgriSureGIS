@@ -78,9 +78,10 @@ function UploadFailuresModal({ failures, onClose }: { failures: string[]; onClos
 }
 
 export default function App() {
-  // Lazy initializer reads localStorage synchronously on first render, so a
+  // Lazy initializer reads sessionStorage synchronously on first render, so a
   // refresh never flashes the login screen before rehydrating -- the user
-  // stays logged in until they explicitly log out (see handleLogout below).
+  // stays logged in until they log out (see handleLogout below), go idle, or
+  // close the app (authStorage.ts, 2026-10-22).
   const [currentUser, setCurrentUser]     = useState<CurrentUser | null>(loadPersistedUser);
   // System Administrators only ever see the Calibration/Admin panel (see
   // Header.tsx's ADMIN_MODULES) -- default there directly instead of
@@ -214,7 +215,7 @@ export default function App() {
   };
 
   // Account Settings tab hands back the full updated row after a save --
-  // reconcile it into currentUser/localStorage immediately (no re-login
+  // reconcile it into currentUser/sessionStorage immediately (no re-login
   // needed) so the idle-timeout effect below picks up a changed session
   // timeout right away, and the Header user menu reflects a changed
   // name/email without a refresh.

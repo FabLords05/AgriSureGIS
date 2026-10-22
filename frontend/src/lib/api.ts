@@ -808,17 +808,38 @@ export function updateMe(payload: UpdateMePayload): Promise<{ status: string; da
 
 export interface ActivityLogEntry {
   log_id: number;
+  user_id: number | null;
   user_name: string | null;
   user_email: string | null;
   action: string;
   endpoint: string;
   summary: string;
+  // Full sentence of what was done (2026-10-22); null only for older entries.
+  remarks: string | null;
   status_code: number;
   created_at: string | null;
 }
 
-export function getActivityLog(): Promise<{ status: string; data: ActivityLogEntry[] }> {
-  return request<{ status: string; data: ActivityLogEntry[] }>('/api/activity-log/');
+// Filters run server-side (2026-10-22) so a narrowed view reaches past the
+// newest `limit` rows. actionType is one of ActivityLogFilters.action_types.
+export function getActivityLog(
+  filters: { userId?: number; actionType?: string; limit?: number } = {},
+): Promise<{ status: string; data: ActivityLogEntry[] }> {
+  const params = new URLSearchParams();
+  if (filters.userId !== undefined) params.set('user_id', String(filters.userId));
+  if (filters.actionType) params.set('action_type', filters.actionType);
+  if (filters.limit !== undefined) params.set('limit', String(filters.limit));
+  const query = params.toString();
+  return request<{ status: string; data: ActivityLogEntry[] }>(`/api/activity-log/${query ? `?${query}` : ''}`);
+}
+
+export interface ActivityLogFilters {
+  users: { user_id: number; name: string; email: string; role: string }[];
+  action_types: string[];
+}
+
+export function getActivityLogFilters(): Promise<{ status: string; data: ActivityLogFilters }> {
+  return request<{ status: string; data: ActivityLogFilters }>('/api/activity-log/filters');
 }
 
 // "Verify Farm Planted" (2026-10-12) -- pre-event Sentinel-1 VV/VH colour layer

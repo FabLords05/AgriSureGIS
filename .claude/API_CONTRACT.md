@@ -28,8 +28,9 @@ out of `backend/app/api/` — this file documents what exists, not what is plann
   - 401 messages: `"Not authenticated."`, `"Session expired."`,
     `"Invalid session token."`, `"Account not found or deactivated."`.
 - **Activity logging:** an HTTP middleware in `backend/app/main.py` records every
-  **mutating** (`POST`/`PUT`/`PATCH`/`DELETE`) request to `tbl_activity_log` as it
-  finishes, attributed to `request.state.user`. `/api/users/login` and
+  **mutating** (`POST`/`PUT`/`PATCH`/`DELETE`) request, plus the two CSV export
+  GETs, to `tbl_activity_log` as it finishes, attributed to
+  `request.state.user`, with a detailed `remarks` sentence (see §2). `/api/users/login` and
   `/api/users/logout` are excluded there because they self-log a more specific
   `LOGIN`/`LOGOUT` action from inside their own route bodies.
 - **Pagination:** keyset pagination exists on **`GET /api/farms/` only**
@@ -75,10 +76,14 @@ Note the prefix: it is **`/api/users/...`**, not `/api/auth/...`.
 ## 2. Activity Log (`/api/activity-log`) — admin-only
 
 * **GET `/api/activity-log/`**
-  - **Query:** `limit` (default 200, 1-1000), `user_id` (optional, narrows to one account).
-  - **Description:** Every login, logout and mutating backend call, newest first. Capped by `limit` because this table has no upper bound on growth.
-  - **Response:** `{ "status": "success", "data": [ { "log_id", "user_name", "user_email", "action", "endpoint", "summary", "status_code", "created_at" } ] }`
+  - **Query:** `limit` (default 200, 1-1000), `user_id` (optional, narrows to one account), `action_type` (optional, one label from `/filters`' `action_types`, e.g. `"Uploaded a CSV file"`; 400 if unknown).
+  - **Description:** Every login, logout and mutating backend call, plus the two CSV export GETs (`/api/assessments/export`, `/api/sar/field-verify/export`), the background CSV ingestion's outcome (`action: "INGEST"`), and the scheduled PAGASA TCB ingestion (`action: "SYSTEM"`, `endpoint: "scheduler/pagasa-poll"`, no user). Newest first. Capped by `limit` because this table has no upper bound on growth.
+  - **Response:** `{ "status": "success", "data": [ { "log_id", "user_id", "user_name", "user_email", "action", "endpoint", "summary", "remarks", "status_code", "created_at" } ] }`
+  - `remarks` (2026-10-22) is a full sentence saying exactly what was done: which file or record, before → after values, how many rows were accepted, skipped or rejected and why, and, for a failed request, the error message the user saw (`Rejected: ...` / `Failed: ...`). Routes set it with `note_activity()` (`app/core/activity_log.py`). Passwords are never included.
   - `summary` is a human-readable label from `_ENDPOINT_SUMMARIES` in `app/api/activity_log.py` (e.g. `"Uploaded a CSV file"`, `"Logged in"`, `"Failed login attempt"`). A mutating route added without a matching entry falls through to the raw `"{ACTION} {endpoint}"` string, so nothing is ever hidden — but new routes should get an entry.
+* **GET `/api/activity-log/filters`** (2026-10-22)
+  - **Description:** Options for the Activity Log tab's User and Action dropdowns.
+  - **Response:** `{ "status": "success", "data": { "users": [ { "user_id", "name", "email", "role" } ], "action_types": [ "Logged in", ..., "Uploaded a CSV file", ... ] } }`. `users` = every account with at least one log entry, admins included.
 
 ## 3. Spatial Data & Profile Ingestion (`/api/upload`)
 

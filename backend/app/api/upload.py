@@ -20,6 +20,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core import upload_jobs
+from app.core.activity_log import note_activity, plural, record_activity
 from app.core.database import SessionLocal, get_db
 from app.core.farms_cache import invalidate_farms_cache
 from app.core.farms_view import refresh_farm_latest_insurance_view
@@ -659,7 +660,35 @@ def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> 
     return _result("inserted")
 
 
-def _run_csv_ingestion(job_id: str, filename: str, dataframe: pd.DataFrame) -> None:
+# How many individual rejected rows/features a remark spells out before
+# summarising the rest as "... and N more".
+_REMARKS_FAILURE_EXAMPLES = 5
+
+
+def _describe_failures(failures: list[dict[str, Any]], label) -> str:
+    shown = "; ".join(label(f) for f in failures[:_REMARKS_FAILURE_EXAMPLES])
+    extra = len(failures) - _REMARKS_FAILURE_EXAMPLES
+    return shown + (f"; and {extra:,} more" if extra > 0 else "")
+
+
+def _csv_failure_label(failure: dict[str, Any]) -> str:
+    policy = f" (policy {failure['policy_no']})" if failure.get("policy_no") else ""
+    return f"row {failure['row']}{policy}: {failure['error']}"
+
+
+def _log_csv_outcome(user_id: int | None, status_code: int, remarks: str) -> None:
+    """The INGEST Activity Log entry for a finished background CSV job. The
+    POST /csv entry itself is written when the request returns, before any
+    row is processed -- so the real accepted/rejected counts need their own
+    entry. Own session: the job's session may be mid-rollback here."""
+    db = SessionLocal()
+    try:
+        record_activity(db, user_id, "INGEST", "/api/upload/csv", status_code, remarks)
+    finally:
+        db.close()
+
+
+def _run_csv_ingestion(job_id: str, filename: str, dataframe: pd.DataFrame, user_id: int | None = None) -> None:
     """
     The actual row-by-row ingestion work, moved off the request thread
     (2026-08-16) so the frontend can poll GET /csv/status/{job_id} for a
@@ -758,6 +787,11 @@ def _run_csv_ingestion(job_id: str, filename: str, dataframe: pd.DataFrame) -> N
             db.rollback()
             logger.exception("CSV ingestion for %s failed and was rolled back", filename)
             upload_jobs.mark_error(job_id, f"CSV ingestion failed: {exc}")
+            _log_csv_outcome(
+                user_id, 500,
+                f'CSV ingestion of "{filename}" ({plural(total_rows, "row")}) failed and was rolled back; '
+                f"nothing was imported. Error: {exc}",
+            )
             return
 
         # A no-op unless REDIS_URL is configured -- see app/core/farms_cache.py.
@@ -780,6 +814,15 @@ def _run_csv_ingestion(job_id: str, filename: str, dataframe: pd.DataFrame) -> N
         if failed_rows:
             message = f"CSV data ingested with {failed_rows} row(s) skipped due to errors."
 
+        remarks = (
+            f'CSV ingestion of "{filename}" finished in {elapsed:.0f}s: {plural(processed_rows, "row")} processed -- '
+            f"{inserted_rows:,} accepted (new policies imported), "
+            f"{skipped_rows:,} skipped (already on file), {failed_rows:,} rejected."
+        )
+        if failures:
+            remarks += " Rejected: " + _describe_failures(failures, _csv_failure_label) + "."
+        _log_csv_outcome(user_id, 200, remarks)
+
         upload_jobs.mark_done(job_id, {
             "status": "success",
             "message": message,
@@ -796,6 +839,7 @@ def _run_csv_ingestion(job_id: str, filename: str, dataframe: pd.DataFrame) -> N
         # forever from the frontend's point of view.
         logger.exception("CSV ingestion for %s crashed unexpectedly", filename)
         upload_jobs.mark_error(job_id, str(exc))
+        _log_csv_outcome(user_id, 500, f'CSV ingestion of "{filename}" crashed; nothing was imported. Error: {exc}')
     finally:
         db.close()
 
@@ -803,6 +847,7 @@ def _run_csv_ingestion(job_id: str, filename: str, dataframe: pd.DataFrame) -> N
 @router.post("/csv", status_code=status.HTTP_200_OK)
 def upload_csv(
     file: UploadFile = File(...),
+    current_user: models.SystemUser = Depends(get_current_user),
 ):
     """
     Validates and parses the file synchronously (fast), then hands the slow
@@ -811,6 +856,7 @@ def upload_csv(
     poll GET /csv/status/{job_id} for real progress instead of the request
     blocking until a large export finishes.
     """
+    note_activity(f'CSV upload "{file.filename}".')
     if not file.filename or not file.filename.lower().endswith(".csv"):
         raise HTTPException(status_code=400, detail="Please upload a CSV file.")
 
@@ -860,15 +906,20 @@ def upload_csv(
             "rows_failed": 0,
             "failures": [],
         })
+        note_activity(f'Uploaded CSV "{file.filename}": no data rows found, nothing imported.')
         return {"status": "processing", "job_id": job_id, "total_rows": 0}
 
     total_rows = len(dataframe)
     job_id = upload_jobs.create_job(total=total_rows)
     threading.Thread(
         target=_run_csv_ingestion,
-        args=(job_id, file.filename, dataframe),
+        args=(job_id, file.filename, dataframe, current_user.user_id),
         daemon=True,
     ).start()
+    note_activity(
+        f'Uploaded CSV "{file.filename}" ({plural(total_rows, "row")}, {len(raw_bytes) / 1024:,.0f} KB); '
+        "ingestion started -- see the INGEST entry for accepted/rejected counts."
+    )
 
     return {"status": "processing", "job_id": job_id, "total_rows": total_rows}
 
@@ -894,6 +945,8 @@ def upload_gpx(
     farm_id: int | None = Form(default=None),
     db: Session = Depends(get_db),
 ):
+    mode = f"manually assigned to farm #{farm_id}" if farm_id is not None else "auto-matched by filename"
+    note_activity(f'GPX upload "{file.filename}" ({mode}).')
     if not file.filename or not file.filename.lower().endswith(".gpx"):
         raise HTTPException(status_code=400, detail="Please upload a GPX file.")
 
@@ -951,9 +1004,18 @@ def upload_gpx(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Unable to parse GPX file: {exc}") from exc
 
+    had_boundary = farm.location_geom is not None
     farm.location_geom = location_geom
     db.commit()
     db.refresh(farm)
+
+    farmer_name = f"{farm.farmer.first_name} {farm.farmer.last_name}".strip() if farm.farmer else "unknown farmer"
+    place = f", Brgy. {farm.boundary.barangay}, {farm.boundary.municipality}" if farm.boundary else ""
+    note_activity(
+        f'Uploaded GPX "{file.filename}": boundary of farm #{farm.farm_id} '
+        f"(FARMID {farm.csv_farm_reference or 'n/a'}, {farmer_name}{place}) "
+        f"{'replaced' if had_boundary else 'saved for the first time'}; matched {matched_by}."
+    )
 
     # A no-op unless REDIS_URL is configured -- see app/core/farms_cache.py.
     # location_geom is part of the cached farms list response.
@@ -982,6 +1044,7 @@ def upload_gpkg(
     created (per Fabio, 2026-10-08: unmatched features are reported so the
     matching CSV can be imported first and the file re-uploaded).
     """
+    note_activity(f'GeoPackage upload "{file.filename}".')
     if not file.filename or not file.filename.lower().endswith(".gpkg"):
         raise HTTPException(status_code=400, detail="Please upload a GeoPackage (.gpkg) file.")
 
@@ -1058,6 +1121,17 @@ def upload_gpkg(
         "GPKG ingestion finished: %s -- %d feature(s), %d updated, %d failed, %d duplicate(s) skipped",
         file.filename, len(features), updated, len(failures), len(duplicates),
     )
+
+    remarks = (
+        f'Uploaded GeoPackage "{file.filename}": {plural(len(features), "feature")} -- '
+        f"{updated:,} accepted (farm boundaries updated), {len(failures):,} rejected, "
+        f"{len(duplicates):,} duplicate(s) skipped."
+    )
+    if failures:
+        remarks += " Rejected: " + _describe_failures(
+            failures, lambda f: f'"{f["file_name"]}" (FARMID {f["farm_reference"] or "n/a"}): {f["error"]}'
+        ) + "."
+    note_activity(remarks)
 
     message = f"Updated {updated} farm boundary(ies) from GeoPackage."
     if failures:

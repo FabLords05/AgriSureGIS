@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 import os
 import shutil
 
+from app.core.activity_log import describe_new_bulletins, note_activity, plural
 from app.core.database import get_db
 from app.core.scheduler import reschedule_bulletin_job
 from app.core.security import get_current_user
@@ -63,11 +64,16 @@ def update_parser_settings(payload: ParserSettingsUpdate, request: Request, db: 
     background scraper job to match, without requiring a backend restart.
     """
     settings = _get_or_create_settings(db)
+    previous = settings.polling_interval_minutes
     settings.polling_interval_minutes = payload.polling_interval_minutes
     db.commit()
     db.refresh(settings)
 
     reschedule_bulletin_job(request.app.state.scheduler, settings.polling_interval_minutes)
+    note_activity(
+        f"Changed the TCB polling interval from {previous} to {settings.polling_interval_minutes} minutes; "
+        "background scraper rescheduled."
+    )
 
     return {"polling_interval_minutes": settings.polling_interval_minutes}
 
@@ -109,6 +115,7 @@ async def trigger_pagasa_scrape(db: Session = Depends(get_db)):
     """
     Triggers web scraping of the PAGASA portal to download and parse any active bulletins.
     """
+    note_activity("Manual PAGASA TCB scrape.")
     try:
         links = await BulletinParserService.fetch_active_bulletin_links()
     except PagasaScrapeError:
@@ -121,6 +128,12 @@ async def trigger_pagasa_scrape(db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="No active bulletin PDFs found on PAGASA portal.")
 
     bulletins_created = await BulletinParserService.scrape_and_save_all(db, TEMP_DIR)
+    remarks = f"Manual PAGASA TCB scrape: {plural(len(links), 'bulletin PDF')} listed on the portal, "
+    if bulletins_created:
+        remarks += f"{len(bulletins_created)} new ingested -- {describe_new_bulletins(bulletins_created, db)}."
+    else:
+        remarks += "no new bulletins (all already on file, or none could be parsed)."
+    note_activity(remarks)
 
     # Independent of the TCB scrape above -- a failure here shouldn't hide a
     # successful bulletin parse, and vice versa (see PagasaStatusService).
@@ -150,6 +163,7 @@ async def upload_bulletin_pdf(file: UploadFile = File(...), db: Session = Depend
     """
     Allows manual upload of a PAGASA bulletin PDF if the scraping portal is offline.
     """
+    note_activity(f'Manual TCB PDF upload "{file.filename}".')
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
         
@@ -164,6 +178,11 @@ async def upload_bulletin_pdf(file: UploadFile = File(...), db: Session = Depend
         # Parse and save
         parsed_data = BulletinParserService.parse_bulletin_text(temp_path)
         bulletin, created = BulletinParserService.upsert_bulletin(parsed_data, db)
+        described = describe_new_bulletins([{"tcb_id": bulletin.tcb_id, "title": bulletin.title}], db)
+        note_activity(
+            f'Manually uploaded TCB PDF "{file.filename}": '
+            + (f"ingested {described}." if created else f"{described} was already on file; nothing new saved.")
+        )
 
         # Clean up
         if os.path.exists(temp_path):
@@ -216,11 +235,20 @@ def compute_exposure(tcb_id: int, db: Session = Depends(get_db)):
     parsed so far. Sprint 3 scope only — does not compute yield loss or payouts
     (that depends on Sprint 4's RecsapMatrix/RiskAssessment work).
     """
+    note_activity(f"Compute exposure for TCB #{tcb_id}.")
     bulletin = db.query(TropicalCycloneBulletin).filter(TropicalCycloneBulletin.tcb_id == tcb_id).first()
     if bulletin is None:
         raise HTTPException(status_code=404, detail="Bulletin not found.")
 
     summaries = ExposureCalculatorService.compute_for_typhoon(bulletin.typhoon_id, db)
+    typhoon = db.get(Typhoon, bulletin.typhoon_id) if bulletin.typhoon_id else None
+    eligible = sum(1 for s in summaries if s.is_eligible_6hr)
+    note_activity(
+        f"Computed exposure for {typhoon.name if typhoon else 'unknown typhoon'} "
+        f"(from TCB #{tcb_id}, Bulletin #{bulletin.bulletin_count}): "
+        f"{plural(len(summaries), 'municipality', 'municipalities')} exposed, "
+        f"{eligible:,} with 6+ hours of exposure (payout-eligible)."
+    )
 
     return {
         "status": "success",

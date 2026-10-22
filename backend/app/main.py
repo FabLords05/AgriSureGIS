@@ -2,8 +2,11 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.exception_handlers import http_exception_handler, request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 # Import our database connection and models
 from app.api.activity_log import router as activity_log_router
@@ -16,7 +19,13 @@ from app.api.sar import router as sar_router
 from app.api.typhoons import router as typhoons_router
 from app.api.system import router as system_router
 from app.api.users import router as users_router
-from app.core.activity_log import record_activity
+from app.core.activity_log import (
+    compose_request_remarks,
+    end_request_remarks,
+    note_activity_error,
+    record_activity,
+    start_request_remarks,
+)
 from app.core.database import SessionLocal, get_db
 from app.core.scheduler import FIXED_POLL_INTERVAL_MINUTES, build_scheduler
 from app.models import models
@@ -41,6 +50,10 @@ for _name in ("agrisuregis", "app"):
 # excluded here to avoid double-logging them as a generic "POST".
 _SELF_LOGGED_PATHS = {"/api/users/login", "/api/users/logout"}
 _MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+# Read-only routes still worth an audit entry: the two CSV downloads that hand
+# insured farmers' data out of the system (2026-10-22). Every other GET (page
+# loads, polling) stays unlogged -- it would bury the real actions.
+_LOGGED_GET_PATHS = {"/api/assessments/export", "/api/sar/field-verify/export"}
 
 
 @asynccontextmanager
@@ -103,18 +116,65 @@ async def activity_log_middleware(request: Request, call_next):
     Opens its own short-lived DB session rather than reusing the route's --
     middleware runs outside any single route's `Depends(get_db)` scope, and
     by the time control reaches here that session may already be closed.
+
+    Since 2026-10-22 it also opens the per-request remarks holder the route
+    fills via note_activity() (and the exception handlers below fill with
+    the error), and writes the composed sentence alongside the entry. An
+    unhandled exception is logged as a 500 before it is re-raised, so a
+    crashed action is never missing from the log.
     """
-    response = await call_next(request)
+    logged = (
+        (request.method in _MUTATING_METHODS and request.url.path not in _SELF_LOGGED_PATHS)
+        or (request.method == "GET" and request.url.path in _LOGGED_GET_PATHS)
+    )
+    if not logged:
+        return await call_next(request)
 
-    if request.method in _MUTATING_METHODS and request.url.path not in _SELF_LOGGED_PATHS:
-        user = getattr(request.state, "user", None)
-        db = SessionLocal()
-        try:
-            record_activity(db, user.user_id if user else None, request.method, request.url.path, response.status_code)
-        finally:
-            db.close()
+    holder, token = start_request_remarks()
+    try:
+        response = await call_next(request)
+        status_code = response.status_code
+    except Exception as exc:
+        status_code = 500
+        if not holder["error"]:
+            note_activity_error(f"Unexpected server error: {exc}")
+        _log_request_activity(request, holder, status_code)
+        raise
+    finally:
+        end_request_remarks(token)
 
+    _log_request_activity(request, holder, status_code)
     return response
+
+
+def _log_request_activity(request: Request, holder: dict, status_code: int) -> None:
+    user = getattr(request.state, "user", None)
+    db = SessionLocal()
+    try:
+        record_activity(
+            db,
+            user.user_id if user else None,
+            request.method,
+            request.url.path,
+            status_code,
+            compose_request_remarks(holder, status_code),
+        )
+    finally:
+        db.close()
+
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_exception_with_activity_remarks(request: Request, exc: StarletteHTTPException):
+    # Hands the message the user saw to the Activity Log (e.g. why a CSV was
+    # rejected), then answers exactly as FastAPI's default handler does.
+    note_activity_error(exc.detail)
+    return await http_exception_handler(request, exc)
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error_with_activity_remarks(request: Request, exc: RequestValidationError):
+    note_activity_error(exc.errors())
+    return await request_validation_exception_handler(request, exc)
 
 # --- THE TEST ENDPOINT ---
 @app.get("/api/test-db")

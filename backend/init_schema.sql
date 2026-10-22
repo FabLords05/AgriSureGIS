@@ -312,9 +312,10 @@ INSERT INTO tbl_parser_settings (polling_interval_minutes) VALUES (180);
 CREATE TABLE tbl_activity_log (
     log_id BIGSERIAL PRIMARY KEY,
     user_id INT REFERENCES tbl_system_users(user_id) ON DELETE SET NULL,
-    action VARCHAR(20) NOT NULL, -- LOGIN, LOGOUT, POST, PUT, PATCH, DELETE
+    action VARCHAR(20) NOT NULL, -- LOGIN, LOGOUT, POST, PUT, PATCH, DELETE, GET, INGEST, SYSTEM
     endpoint VARCHAR(255) NOT NULL,
     status_code INT NOT NULL,
+    remarks TEXT, -- full sentence of what was done (app/core/activity_log.py)
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

@@ -4,6 +4,218 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-22] - Closing the App Logs Out (Sprint 3)
+
+Explicit request: closing the app should log the user out. Before this, the
+session lived in `localStorage`, so it survived closing the tab, the installed
+PWA window, and even a browser restart. It now lives in `sessionStorage`,
+which the browser keeps across a refresh but discards when the tab or app
+window closes. Frontend only; no backend or schema change.
+
+### 1. File: `frontend/src/lib/authStorage.ts`
+* `loadPersistedUser()`, `persistUser()`, `clearPersistedUser()`,
+  `loadPersistedToken()` and `persistToken()` use `sessionStorage` instead of
+  `localStorage`. The storage keys are unchanged.
+* A one-time module-load cleanup removes the old `localStorage` copies of both
+  keys, so a session saved by an earlier build doesn't stay on disk.
+* Trade-offs, documented in the module comment:
+  * A second tab doesn't share the session and asks for login.
+  * Closing the app writes no `LOGOUT` to the Activity Log. The browser gives
+    no reliable signal that tells closing apart from refreshing, so a close
+    can't be told to the backend. The token is stateless and is simply
+    discarded with the storage.
+
+### 2. File: `frontend/src/app/App.tsx`
+* Comments only: storage references updated to `sessionStorage`.
+
+---
+
+## [2026-10-22] - Activity Log Remarks: Every Action Recorded in Detail (Sprint 3)
+
+Requested explicitly: every Activity Log entry should say exactly what was done,
+like the REMARKS column of the PABS export. Before this, an entry stored only
+action, endpoint and status, so the panel could say "Uploaded a CSV file" but
+not which file, how many records were accepted or rejected, or why a wrong
+CSV/GPX was rejected. New `remarks TEXT` column. The existing log is
+**cleared** by the migration, as requested, so the table starts in the new
+format. Also new: the two CSV export GETs, the background CSV ingestion's real
+outcome (`INGEST`), and the scheduled PAGASA TCB ingestion (`SYSTEM`) are now
+logged.
+
+### 1. File: `backend/migrations/2026-10-22_activity_log_remarks.sql` (new) / `backend/init_schema.sql`
+* `ALTER TABLE tbl_activity_log ADD COLUMN remarks TEXT`, then
+  `TRUNCATE tbl_activity_log RESTART IDENTITY` (deletes every existing entry).
+* `init_schema.sql` creates the column directly.
+
+### 2. File: `backend/app/models/models.py`
+* `ActivityLog.remarks` (`Text`, nullable).
+
+### 3. File: `backend/app/core/activity_log.py`
+* A per-request remarks holder in a `ContextVar`: **`start_request_remarks()`** /
+  **`end_request_remarks()`** (middleware), **`note_activity(text)`** (routes;
+  a no-op outside a request, so tests that call route functions directly are
+  unaffected, and no route needs a `Request` parameter), and
+  **`note_activity_error(detail)`** (exception handlers).
+* **`compose_request_remarks()`**: route remarks plus `Rejected: <error>`
+  (4xx) or `Failed: <error>` (5xx).
+* **`describe_new_bulletins()`**: one phrase per new TCB (typhoon, bulletin #,
+  category, max signal, winds, final). Shared by `/bulletins/parse`,
+  `/bulletins/upload` and the scheduler. It never raises: a lookup problem
+  falls back to the bulletin's title, so describing an ingestion can't fail
+  the route that saved it. Caught by `test_email_alert_service.py`'s
+  upload-route tests, whose mock session made the join raise.
+* **`plural()`** formatting helper.
+* **`record_activity()`** gains `remarks=None`, truncated at 2,000 characters.
+
+### 4. File: `backend/app/main.py`
+* `activity_log_middleware` opens the remarks holder, also logs
+  `_LOGGED_GET_PATHS` (the payout and SAR field-verify CSV exports), writes the
+  composed remarks, and logs an unhandled exception as a 500 before re-raising.
+  The write itself moves to the new `_log_request_activity()`.
+* New exception handlers for `HTTPException` and `RequestValidationError`.
+  They pass the error message to the log, then defer to FastAPI's default
+  handlers, so responses are unchanged.
+
+### 5. File: `backend/app/api/upload.py`
+* `upload_csv()`: new `current_user` dependency, so the uploader is passed to
+  the ingestion thread. Remarks name the file, row count and size, or why it was
+  rejected (wrong type, undecodable, missing PABS columns).
+* `_run_csv_ingestion()`: new `user_id` argument; when the job finishes it
+  writes an **`INGEST`** entry through the new **`_log_csv_outcome()`**, with
+  counts for accepted, skipped (already on file) and rejected rows, plus the
+  first 5 rejected rows and their reasons (**`_describe_failures()`**,
+  **`_csv_failure_label()`**). A rollback or crash is logged as a 500.
+* `upload_gpx()`: remarks name the farm, FARMID, farmer and barangay, the match
+  mode, and whether an existing boundary was replaced.
+* `upload_gpkg()`: counts for accepted, rejected and duplicate features, plus
+  the first rejected features and their reasons.
+
+### 6. File: `backend/app/api/bulletins.py`
+* `/parse`: number of PDFs listed and the new TCBs ingested.
+* `/upload`: the bulletin ingested, or that it was already on file.
+* `/{tcb_id}/compute-exposure`: municipalities exposed and the number with 6+
+  hours of exposure.
+* `/settings`: polling interval before → after.
+
+### 7. File: `backend/app/core/scheduler.py`
+* New **`_log_scheduled_run()`**: a **`SYSTEM`** entry when the automatic poll
+  ingests new TCBs, or when the scrape or the status sync *starts* failing. A
+  quiet poll is not logged, and an ongoing failure is not logged again on every
+  15-minute run. Wrapped in its own try/except so it can never break the job.
+
+### 8. File: `backend/app/api/users.py`
+* New **`_full_name()`** and **`_account_changes()`**: before → after phrases
+  for name, email, role, activation and session timeout. A password change is
+  named only, never logged.
+* Login records the reason for a failure (wrong password, or no account with
+  that email) and a blocked inactive account. Remarks added to register,
+  create, `/me` and `/{user_id}`, including the activation email being sent.
+
+### 9. File: `backend/app/api/assessments.py`
+* `/calculate`: policies assessed, the number with a payout, and total
+  indemnity.
+* `GET /export`: file name, rows and total.
+* `/export-pabs`: file name, rows, total, and policies newly locked (now reads
+  `finalize_exported_usage()`'s return value).
+
+### 10. File: `backend/app/api/sar.py`
+* New **`_activity_typhoon_label()`** and **`_activity_farm_label()`**.
+* Remarks for `/layer`, `/check` (planted, field-verify by reason, GEE vs
+  cache), verification set (verdict before → after, notes) and clear, and the
+  field-verify CSV export.
+
+### 11. File: `backend/app/api/activity_log.py`
+* The response includes `remarks`. `_ENDPOINT_SUMMARIES` gains `/upload/gpkg`,
+  `/sar/check`, both exports, `/export-pabs`, `INGEST` and `SYSTEM`.
+
+### 12. File: `frontend/src/lib/api.ts` / `frontend/src/app/components/ActivityLogModule.tsx`
+* `ActivityLogEntry.remarks`. New **Remarks** column (wrapping text, "—" when
+  empty), action badges for `GET` / `INGEST` / `SYSTEM`, "System" as the user
+  for scheduler entries, and the panel widened to `max-w-7xl`.
+
+### 13. File: `backend/tests/test_activity_log_remarks.py` (new)
+* Helper tests (combining remarks and errors, validation-error flattening,
+  `plural`, truncation). Middleware tests through `TestClient`: a sync route's
+  remarks reach the log along with the rejection reason; an unauthenticated
+  upload is logged as rejected; an unlogged GET writes nothing.
+
+### 14. User / Action filters and sorting (same day, explicit request)
+Filter the log to one user or one kind of action, and sort it. Filtering runs
+in the database, not the browser, so a narrowed view reaches past the newest
+rows.
+* `backend/app/api/activity_log.py`: `GET /api/activity-log/` gains
+  **`action_type`**, one summary label, translated to SQL by the new
+  **`_action_type_filter()`**. Endpoint labels use the same regex as
+  `_ENDPOINT_SUMMARIES`, through Postgres `~`. LOGIN/LOGOUT labels come from
+  **`_LOGIN_LABEL_FILTERS`** (action + status code). An unknown label returns
+  400. New **`ACTION_TYPES`** list. Entries now include `user_id`. New
+  **`GET /api/activity-log/filters`** (**`list_activity_log_filters()`**)
+  returns every account with at least one entry (admins included) plus
+  `ACTION_TYPES`.
+* `frontend/src/lib/api.ts`: `getActivityLog()` takes
+  `{ userId, actionType, limit }`; new `getActivityLogFilters()` and
+  `ActivityLogFilters`; `ActivityLogEntry.user_id`.
+* `frontend/src/app/components/ActivityLogModule.tsx`: User and Action
+  dropdowns, Clear filters, and an entry count. Clicking a user's name or a
+  summary in a row applies that filter. Timestamp, User, Summary and Status
+  headers are sortable (asc → desc → off), using the same `SortableTh` pattern
+  as User Management. Fetches 500 rows per view. A stale response for an older
+  filter is discarded.
+* `backend/tests/test_activity_log_filters.py` (new): every label is offered and
+  unique; the compiled SQL targets the right method and pattern or status;
+  unknown label → 400; no pattern shadows another's label.
+
+---
+
+## [2026-10-22] - User Management: GIS Specialists Only; Status Filter, Search, Sort (Sprint 3)
+
+Requested by Cristian. User Management is now for managing GIS Specialists
+only. System Administrator accounts are created by the superuser outside the
+app (`seed_system_users.py` / SQL), so admins can no longer see, create,
+promote to, or edit an admin account, and public registration can no longer
+request one. The rule is enforced in the API as well as the UI. The table also
+gets an All / Active / Inactive filter (default Active), name search, and
+sortable headers. These go beyond the UI prototype and were added on explicit
+request. No schema change.
+
+### 1. File: `backend/app/api/users.py`
+* `ALLOWED_ROLES` is replaced by **`MANAGED_ROLE = "GIS Specialist"`**;
+  **`_require_role()`** now rejects any other role with a 400.
+* **`RegisterRequest.role`** / **`CreateUserRequest.role`**: default to
+  `MANAGED_ROLE`, and are still validated.
+* **`list_users()`** (`GET /api/users/`): returns GIS Specialist accounts only.
+* **`update_user()`** (`PATCH /api/users/{user_id}`): a System Administrator
+  target returns 404, the same as a missing user. Promoting to admin is
+  rejected through `_require_role`.
+* `register_user()` / `create_user()`: unchanged code, but they now only
+  accept GIS Specialist via `_require_role`.
+
+### 2. File: `frontend/src/app/components/UserManagementModule.tsx`
+* Removed `USER_ROLES`, the Role dropdowns in the Add/Edit modals, and the Role
+  column. The edit payload no longer sends `role`. Add User notes that the
+  account is created as a GIS Specialist.
+* New **`SortKey` / `SortState`** types, the **`SORT_COMPARE`** map (name is
+  case-insensitive; for status, ascending puts active first), and the
+  **`SortableTh`** clickable header component.
+* New **`STATUS_FILTERS`** / **`StatusFilter`**: `All | Active | Inactive`.
+* **`UserManagementModule`**: new `search`, `sort` and `statusFilter`
+  (default `"Active"`) state; `toggleSort()` (click cycles ascending →
+  descending → off); `statusCount()` for the per-option counts; and a memoized
+  `visibleUsers` (status filter + name search, then sort). The search box and
+  segmented filter sit above the table. Name and Status are sortable.
+
+### 3. File: `frontend/src/app/components/LoginScreen.tsx`
+* **`RegistrationPanel`**: the two-option Access Role selector is replaced by
+  a fixed "GIS Specialist" badge. The `RegRole` type and the `Shield` import
+  are removed.
+
+### 4. File: `backend/tests/test_users_api.py` (new)
+* `ManagedRoleTests`: the list filters to GIS Specialist; editing an admin
+  returns 404; promoting, creating, or registering an admin returns 400; and
+  create defaults to GIS Specialist.
+
+---
+
 ## [2026-10-22] - One Email per New TCB; Account Activated/Deactivated Email (Sprint 3)
 
 A new TCB arrived and the GIS Specialist got no alert. When an email did come,
