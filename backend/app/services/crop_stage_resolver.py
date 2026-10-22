@@ -1,3 +1,4 @@
+import dataclasses
 import logging
 import re
 from dataclasses import dataclass
@@ -25,6 +26,36 @@ def normalize_stage_label(value: Any) -> str | None:
         return None
     text = re.sub(r"\s+", " ", str(value)).strip().lower()
     return text or None
+
+
+# PCIC's own stage names -> the legacy "Stage No." code they carry. The official
+# Region III "List of Farms with GPX File" export (2026-10-22) writes "Stage of
+# Crop" as e.g. 'Mn. Tl. Stg. (EARLY VEGETATIVE)' -- the legacy export's "Stage"
+# column ('1 - Mn. Tl. Stg. (EARLY VEGETATIVE)') minus its "N - " prefix -- and
+# leaves the code column blank. Codes 8/9 (HD/YR) are left out on purpose: their
+# label has not appeared in any real file yet, so they stay unmapped and logged.
+_PCIC_STAGE_LABEL_CODES: dict[str, int] = {
+    "s/tstg": 0,
+    "mntlstg": 1,
+    "mxtlstg": 2,
+    "pistg": 3,
+    "bootingstg": 4,
+    "floweringstg": 5,
+    "milkingstg": 6,
+    "doughstg": 7,
+}
+
+
+def pcic_label_to_code(value: Any) -> int | None:
+    """'Booting Stg. (REPRODUCTIVE)' or '4 - Booting Stg. (REPRODUCTIVE)' -> 4.
+    The trailing '(...)' group is ignored -- the code's tbl_crop_stage_mapping row
+    is what decides the stage group, not the label's own wording."""
+    label = normalize_stage_label(value)
+    if label is None:
+        return None
+    label = re.sub(r"^\d+\s*-\s*", "", label)
+    label = label.split("(", 1)[0]
+    return _PCIC_STAGE_LABEL_CODES.get(re.sub(r"[^a-z0-9/]", "", label))
 
 
 def coerce_stage_code(value: Any) -> int | None:
@@ -140,6 +171,13 @@ class CropStageResolver:
         label = normalize_stage_label(stage_label)
         if label is not None and label in self._by_label:
             return self._by_label[label]
+
+        # PCIC's long stage name ('Mn. Tl. Stg. (EARLY VEGETATIVE)') resolves
+        # through the code it stands for, so eligibility and group still come
+        # from that code's own mapping row.
+        label_code = pcic_label_to_code(label)
+        if label_code is not None and label_code in self._by_code:
+            return dataclasses.replace(self._by_code[label_code], matched_by="label")
 
         if code is not None or label is not None:
             self._warn_unmapped(code if label is None else label)

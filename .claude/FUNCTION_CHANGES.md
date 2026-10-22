@@ -4,6 +4,42 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-22] - Region III "List of Farms with GPX File" as the Official CSV Layout
+
+`docs/Region III List of Farms with GPX File_Corrected Format.csv` is now the official ingestion layout. Most of its columns were already mapped through the Region II aliases. Four gaps were closed. Decisions confirmed before implementation:
+1. **Stage labels resolve in code** through PCIC's legacy codes 0–7. No migration.
+2. **The last word of Farmer Name is the middle name** for CSV ingestion.
+3. **`StgeCode` is not read** (blank, numbering unknown).
+4. **Every row is ingested** regardless of Insurance Status.
+
+### 1. Crop stage
+* **`backend/app/services/crop_stage_resolver.py`**:
+  * New `_PCIC_STAGE_LABEL_CODES` and `pcic_label_to_code()` map PCIC's long stage names to their legacy "Stage No." code, e.g. `Mn. Tl. Stg. (EARLY VEGETATIVE)` → 1 and `Booting Stg. (REPRODUCTIVE)` → 4. An optional `N - ` prefix is accepted.
+  * `CropStageResolver.resolve()` tries this after the code and DB-label lookups. The code's own `tbl_crop_stage_mapping` row still decides `crop_stage_no` and `stage_group`.
+  * **Why:** none of the file's labels matched the table, so every row ingested with no stage. Booting, flowering and maturity policies would never have been assessed.
+  * HD/YR (8/9) are left out because their label hasn't appeared in any real file. They stay unmapped and logged.
+
+### 2. CSV row parsing
+* **`backend/app/api/upload.py`**:
+  * `prepare_row_payload()` accepts the `Amount Cover` header. Before, a filled value was silently replaced by the default rate.
+  * The combined Farmer Name is split with `full_middle_name=True`.
+  * New `_repair_enye()` is applied in `_normalize_value()` to every string cell. It turns a `�` (U+FFFD, left by re-saving the cp1252 file through a UTF-8 tool) back into **Ñ** at the start of a word or in uppercase context, otherwise **ñ**. **Why:** `SANTO NI�O` missed PSGC, and names were stored corrupted.
+  * `prepare_row_payload()` returns a `repaired_enye` flag. `_run_csv_ingestion()` counts the flagged rows and adds the count to the INGEST Activity Log remark.
+* **`backend/app/services/gpx_farmer_matcher.py`**:
+  * `parse_farmer_name()` gains keyword-only `full_middle_name` (default `False`, so GPX and GPKG behaviour is unchanged). When it is set, a trailing word that isn't an initial or a JR./SR./II–V extension becomes the middle name: `DIMALANTA, EDUARDO MENDOZA` → (`DIMALANTA`, `EDUARDO`, `MENDOZA`).
+  * Known limitation: two-word middle names such as `DELA CRUZ` split on the last word.
+
+### 3. Tests
+* `tests/test_csv_upload.py`: `RegionIIIOfficialLayoutTests` (real rows with the exact 31-column header, read as cp1252) and `RepairEnyeTests`.
+* `tests/test_crop_stage_resolver.py`: `PcicStageLabelTests`; the seed gains codes 0, 2 and 5.
+* `tests/test_gpx_farmer_matcher.py`: `ParseFullMiddleNameTests`.
+
+### Not changed
+* Mobile No., IR ID, Policy Date Issued, Commodity, planting dates, Insurance Status, Tenurial Status, Farm Name and the image/track-date columns are not stored, because storing them would need schema changes.
+* Farmers already on file are not renamed by a re-upload. Backfill fills blank fields only.
+
+---
+
 ## [2026-10-22] - Per-Signal Exposure Hours, Assessment Progress, TCB Coverage, PCIC Import, Backup Verification
 
 Asked for as one batch of enhancements. Decisions confirmed before implementation:

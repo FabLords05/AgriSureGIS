@@ -132,6 +132,36 @@ class ParseFarmerNameTests(unittest.TestCase):
         self.assertEqual(GpxFarmerMatcherService.parse_farmer_name("UNSTRUCTURED NAME"), (None, None, None))
 
 
+class ParseFullMiddleNameTests(unittest.TestCase):
+    """full_middle_name=True: the official Region III CSV writes the whole middle
+    name, so a trailing word is the middle name -- which also lines its first
+    name up with the GPX filename's ('TAB_DIMALANTA, EDUARDO M._...')."""
+
+    def _parse(self, name):
+        return GpxFarmerMatcherService.parse_farmer_name(name, full_middle_name=True)
+
+    def test_last_word_is_the_middle_name(self):
+        self.assertEqual(self._parse("DIMALANTA, EDUARDO MENDOZA"), ("DIMALANTA", "EDUARDO", "MENDOZA"))
+
+    def test_extension_stays_with_the_first_name(self):
+        self.assertEqual(self._parse("BARIAS, ATILANO JR. TAYAG"), ("BARIAS", "ATILANO JR.", "TAYAG"))
+
+    def test_trailing_extension_is_not_a_middle_name(self):
+        self.assertEqual(self._parse("CRUZ, JUAN JR."), ("CRUZ", "JUAN JR.", None))
+
+    def test_trailing_initial_still_reads_as_before(self):
+        self.assertEqual(self._parse("ACERO, ANNA MARIE S."), ("ACERO", "ANNA MARIE", "S"))
+
+    def test_single_first_name_has_no_middle_name(self):
+        self.assertEqual(self._parse("SMITH, JOHN"), ("SMITH", "JOHN", None))
+
+    def test_default_is_unchanged_for_gpx_and_gpkg(self):
+        self.assertEqual(
+            GpxFarmerMatcherService.parse_farmer_name("DIMALANTA, EDUARDO MENDOZA"),
+            ("DIMALANTA", "EDUARDO MENDOZA", None),
+        )
+
+
 
 def _mock_db(farmer_query, farm_query):
     mock_db = MagicMock()

@@ -76,6 +76,30 @@ def _fold_upper(name: str) -> str:
     return "".join(ch for ch in name if not unicodedata.combining(ch)).upper().strip()
 
 
+_REPLACEMENT_CHAR = "�"
+
+
+def _repair_enye(text: str) -> str:
+    """Restores the letter a lossy re-save turned into '�' (U+FFFD) as Ñ/ñ.
+    The official Region III export stores Ñ as cp1252 byte 0xD1, which
+    upload_csv() decodes correctly -- but once the file goes through a UTF-8
+    tool (Excel, Sheets, Notepad) that byte becomes a literal '�', and
+    'SANTO NI�O' then misses PSGC entirely. Ñ is by far the most common
+    non-ASCII letter in Filipino names and places (2026-10-22): uppercase at the
+    start of a word or next to an uppercase letter, lowercase otherwise."""
+    if _REPLACEMENT_CHAR not in text:
+        return text
+    chars = list(text)
+    for i, ch in enumerate(chars):
+        if ch != _REPLACEMENT_CHAR:
+            continue
+        prev = chars[i - 1] if i > 0 else ""
+        nxt = chars[i + 1] if i + 1 < len(chars) else ""
+        upper = not prev.isalpha() or prev.isupper() or nxt.isupper()
+        chars[i] = "Ñ" if upper else "ñ"
+    return "".join(chars)
+
+
 @functools.lru_cache(maxsize=1)
 def _load_psgc_lookup() -> dict[tuple[str, str, str], str]:
     """Same reference file backend/seed_database.py already uses. Loaded once per
@@ -216,7 +240,7 @@ def _normalize_value(value: Any) -> Any:
         value = value.strip()
         if value == "" or value.lower() in {"nan", "none", "null"}:
             return None
-        return value
+        return _repair_enye(value)
 
     return value
 
@@ -338,7 +362,9 @@ def _normalize_header(key: str) -> str:
 # optional, exactly as prepare_row_payload() treats it.
 _REQUIRED_CSV_COLUMNS: tuple[tuple[str, ...], ...] = (
     # "... Address" is PCIC's "List of Farms with GPX File" export (Region II,
-    # 2026-10-22); without these aliases that file was rejected outright.
+    # 2026-10-22); without these aliases that file was rejected outright. Its
+    # Region III edition is the official ingestion layout -- see
+    # docs/Region III List of Farms with GPX File_Corrected Format.csv.
     ("Province", "Province Address"),
     ("Municipality", "Municipality Address"),
     ("Barangay", "Barangay Address"),
@@ -364,6 +390,9 @@ def _missing_csv_columns(columns: Iterable[Any]) -> list[str]:
 def prepare_row_payload(row: Any) -> dict[str, Any]:
     raw = row.to_dict() if hasattr(row, "to_dict") else dict(row)
     normalized = {_normalize_header(k): v for k, v in raw.items()}
+    # Counted per upload so the INGEST remark can say the file was re-saved lossy;
+    # the repair itself happens in _normalize_value().
+    repaired_enye = any(isinstance(v, str) and _REPLACEMENT_CHAR in v for v in raw.values())
 
     def get(*header_names: str) -> Any:
         for name in header_names:
@@ -392,13 +421,17 @@ def prepare_row_payload(row: Any) -> dict[str, Any]:
     # GeoPackage path uses on the same field, so a farmer created here and the .gpkg
     # feature that later carries its boundary agree on the name -- that agreement is
     # what makes GpxFarmerMatcherService's name-based fallback work.
+    # full_middle_name: the official Region III export writes the whole middle
+    # name ('DIMALANTA, EDUARDO MENDOZA'); a trailing initial still reads as before.
     last_name = _normalize_text_upper(get("Surname"))
     first_name = _normalize_text_upper(get("Firstname"))
     middle_name = _normalize_text_upper(get("Middlename"))
     if not last_name and not first_name:
         combined = _normalize_value(get("FARMER NAME"))
         if combined:
-            parsed_last, parsed_first, parsed_middle = GpxFarmerMatcherService.parse_farmer_name(str(combined))
+            parsed_last, parsed_first, parsed_middle = GpxFarmerMatcherService.parse_farmer_name(
+                str(combined), full_middle_name=True
+            )
             last_name = _normalize_text_upper(parsed_last)
             first_name = _normalize_text_upper(parsed_first)
             middle_name = middle_name or _normalize_text_upper(parsed_middle)
@@ -430,7 +463,8 @@ def prepare_row_payload(row: Any) -> dict[str, Any]:
         # dates were NULL and AssessmentService never found the policy in effect.
         "effectivity_date": _parse_date(get("Effectivity Date", "Date Effectivity")),
         "expiry_date": _parse_date(get("Expiry Date", "Date Expiry")),
-        "amount_cover": _parse_decimal(get("AmountofCover", "AMOUNT OF COVER")),
+        # "Amount Cover": the official Region III export's spelling.
+        "amount_cover": _parse_decimal(get("AmountofCover", "AMOUNT OF COVER", "Amount Cover")),
     }
 
     # Not a real computed assessment -- just carries the CSV's own crop-stage/damage
@@ -442,6 +476,9 @@ def prepare_row_payload(row: Any) -> dict[str, Any]:
     # "Stage No." is the legacy export's PCIC 0-9 agronomic code, NOT the Table 11
     # 1/2/3 scale AssessmentService reads; writing it straight through (as this did
     # before 2026-10-09) silently mis-staged every assessable row.
+    # The Region III export's "StgeCode" is deliberately not read: it is blank in
+    # every row so far and its numbering is unknown, so stage_code stays None and
+    # "Stage of Crop" ('Mn. Tl. Stg. (EARLY VEGETATIVE)') drives the stage.
     crop_stage_seed = {
         "stage_code": _normalize_value(get("Stage No.")),
         "stage_label": _normalize_value(get("Stage of Crop")),
@@ -456,6 +493,7 @@ def prepare_row_payload(row: Any) -> dict[str, Any]:
         "farm": farm,
         "insurance": insurance,
         "crop_stage_seed": crop_stage_seed,
+        "repaired_enye": repaired_enye,
     }
 
 
@@ -810,6 +848,7 @@ def _run_csv_ingestion(job_id: str, filename: str, dataframe: pd.DataFrame, user
         skipped_rows = 0
         failed_rows = 0
         defaulted_ac_rows = 0
+        repaired_enye_rows = 0
         failures: list[dict[str, Any]] = []
 
         # Parsing a row (prepare_row_payload) never touches the DB, so failures here
@@ -819,7 +858,9 @@ def _run_csv_ingestion(job_id: str, filename: str, dataframe: pd.DataFrame, user
         for row_number, (_, row) in enumerate(dataframe.iterrows(), start=1):
             processed_rows += 1
             try:
-                prepared_rows.append((row_number, prepare_row_payload(row)))
+                payload = prepare_row_payload(row)
+                prepared_rows.append((row_number, payload))
+                repaired_enye_rows += payload["repaired_enye"]
             except Exception as exc:
                 failed_rows += 1
                 failures.append({"row": row_number, "policy_no": None, "error": str(exc)})
@@ -922,6 +963,11 @@ def _run_csv_ingestion(job_id: str, filename: str, dataframe: pd.DataFrame, user
             remarks += (
                 f" {plural(defaulted_ac_rows, 'policy', 'policies')} had no Amount of Cover and used the default "
                 f"₱{caches.coverage_rate_per_ha:,.2f}/ha x farm area."
+            )
+        if repaired_enye_rows:
+            remarks += (
+                f" {plural(repaired_enye_rows, 'row')} had an unreadable character (�) restored as Ñ/ñ -- "
+                "the file was likely re-saved in a different encoding."
             )
         if failures:
             remarks += " Rejected: " + _describe_failures(failures, _csv_failure_label) + "."
