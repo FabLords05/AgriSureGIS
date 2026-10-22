@@ -20,13 +20,14 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.api.assessments import PABS_PREVALENCE, _pabs_remarks, _yield_loss_fraction
+from app.api.users import _verify_password
 from app.core.activity_log import note_activity, plural
 from app.core.database import ArchiveNotConfiguredError, archive_configured, get_db
 from app.core.farmer_name import format_surname_first
 from app.core.security import get_current_user, require_admin
 from app.models.models import BackupLog, RecsapMatrix, SystemUser
 from app.services import archive_service
-from app.services.archive_service import CONFIRM_WORD, ArchiveBusyError, ArchiveError
+from app.services.archive_service import ArchiveBusyError, ArchiveError
 from app.services.backup_service import (
     BackupError,
     backup_file_path,
@@ -41,7 +42,9 @@ router = APIRouter(tags=["archives"], dependencies=[Depends(get_current_user)])
 
 
 class ArchiveRequest(BaseModel):
-    confirm: str
+    # The signed-in user's own password -- re-checked here so an unattended
+    # signed-in session can't clear the live records.
+    password: str
 
 
 def _not_configured(exc: ArchiveNotConfiguredError) -> HTTPException:
@@ -64,7 +67,6 @@ def _require_archive(archive_id: int) -> dict:
 def get_eligibility(db: Session = Depends(get_db)):
     data = archive_service.eligibility(db)
     data["archive_configured"] = archive_configured()
-    data["confirm_word"] = CONFIRM_WORD
     return {"status": "success", "data": data}
 
 
@@ -75,8 +77,9 @@ def archive_and_clear(
     user: SystemUser = Depends(get_current_user),
 ):
     note_activity("Attempted Archive & Clear of the live PABS records.")
-    if payload.confirm.strip() != CONFIRM_WORD:
-        raise HTTPException(status_code=400, detail=f'Type "{CONFIRM_WORD}" to confirm.')
+    if not payload.password or not _verify_password(payload.password, user.password_hash):
+        note_activity("Archive & Clear rejected: incorrect password.")
+        raise HTTPException(status_code=400, detail="Incorrect password.")
     try:
         result = archive_service.archive_and_clear(db, user)
     except ArchiveNotConfiguredError as exc:

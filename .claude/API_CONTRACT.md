@@ -281,13 +281,13 @@ pass, no field visit) or YELLOW `field_verify` (anything else). SAR never return
 Archives live in a **separate, read-only database** (`backend/archive_schema.sql`). Every archive endpoint answers **503** if `ARCHIVE_DATABASE_URL` / `ARCHIVE_WRITER_DATABASE_URL` are unset.
 
 * **GET `/api/archives/eligibility`** (any signed-in user)
-  - **Response:** `{ "data": { eligible, reason, eligible_at, clear_after_days: 7, counts: { farmers, farms, policies, assessments }, typhoons: [ { typhoon_id, name, year, last_bulletin_at, clear_after } ], label, archive_configured, confirm_word: "CLEAR" } }`
+  - **Response:** `{ "data": { eligible, reason, counts: { farmers, farms, policies, assessments }, typhoons: [ { typhoon_id, name, year, last_bulletin_at } ], label, archive_configured } }`
   - Eligible only when all of these hold:
     - there is live data
     - at least one typhoon was assessed, locked or SAR-checked against it
-    - now ≥ every such typhoon's last bulletin + 7 days
+  - There is no waiting period after the last bulletin; the password on POST is the safeguard.
 * **POST `/api/archives`** (any signed-in user: Admin or GIS Specialist)
-  - **Body:** `{ "confirm": "CLEAR" }`
+  - **Body:** `{ "password": "<the signed-in user's own password>" }` — a wrong or empty password returns **400** "Incorrect password." and nothing runs.
   - Runs a safety `pg_dump` (sent to Google Drive), then copies every uploaded PABS record and polygon into the archive, verifies the counts, and deletes them from live.
   - Typhoons, bulletins, signals, exposure summaries and boundaries are copied but kept live.
   - **Errors:**

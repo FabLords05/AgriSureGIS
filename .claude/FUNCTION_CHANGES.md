@@ -4,6 +4,34 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-22] - Archive & Clear Confirmed With the User's Password
+
+The Archive & Clear dialog asked the user to type `CLEAR`. It now asks for the signed-in user's own password, checked on the server, so an unattended signed-in session can't clear the live records.
+
+* **`backend/app/api/archives.py`**:
+  * `ArchiveRequest` takes `password` instead of `confirm`.
+  * `archive_and_clear()` checks it with `users._verify_password()` against `user.password_hash` before anything runs. A wrong or empty password returns 400 "Incorrect password." and logs an Activity Log entry.
+  * `GET /archives/eligibility` no longer returns `confirm_word`.
+* **`backend/app/services/archive_service.py`**: `CONFIRM_WORD` removed.
+* **`frontend/src/lib/api.ts`**: `archiveAndClear(password)` sends `{ password }`. `ArchiveEligibility` loses `confirm_word`.
+* **`frontend/src/app/components/ArchiveClearCard.tsx`**: the input is now a password field ("Enter your password to confirm"). Enter submits, and the field clears after a failed attempt.
+* **`backend/tests/test_archive_service.py`**: `test_wrong_password_is_rejected_before_anything_runs` (empty, `CLEAR`, and a near-miss) and `test_correct_password_runs_the_archive`.
+* **`.claude/API_CONTRACT.md`**: body and response updated.
+
+### 7-day wait removed
+With the password as the safeguard, Archive & Clear no longer waits 7 days after the last bulletin of every assessed typhoon. It is allowed as soon as there is live data and at least one typhoon has been assessed, locked or SAR-checked against it. That requirement is kept, so a fresh, never-assessed upload still can't be archived.
+
+* **`backend/app/services/archive_service.py`**:
+  * `CLEAR_AFTER_DAYS` removed.
+  * `_live_typhoons()` no longer returns `clear_after`.
+  * `eligibility()` loses its `now` parameter, the "too early" branch, and the `eligible_at` / `clear_after_days` fields.
+  * New archive batches' `typhoons` JSON no longer carries `clear_after`. Existing batches keep theirs, and nothing reads it.
+* **`frontend/src/lib/api.ts`**: `ArchiveTyphoon.clear_after`, `ArchiveEligibility.eligible_at` and `clear_after_days` removed.
+* **`frontend/src/app/components/ArchiveClearCard.tsx`**: the "Allowed 7 days after…", "→ clearable from …" and "Eligible after: …" text is gone. Each typhoon line still shows its last bulletin.
+* **`backend/tests/test_archive_service.py`**: the three timing tests are replaced by `test_assessed_typhoon_is_clearable_right_after_its_last_bulletin` and `test_label_names_every_assessed_typhoon`.
+
+---
+
 ## [2026-10-22] - Signal 1 Left Out of Eligibility Counts; Explanatory Messages
 
 Payout and assessment already skipped Signal-1-only municipalities (`max_signal_level >= 2`). Signal 1 still leaked into the stored eligibility flag and the typhoon summary's farmer count. Fixed here, with the eligibility rule itself unchanged.
