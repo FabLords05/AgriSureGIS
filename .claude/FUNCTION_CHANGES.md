@@ -4,6 +4,55 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-22] - PSGC Lookup: Four Barangay Spellings Aligned to the Legacy System, Plus Two Source Papers
+
+Per Fabio's working list ("updated the PSGC brgy and areas so that it would
+match the legacy system"). Data and documents only — no function, route, schema
+or API surface touched.
+
+### 1. File: `backend/app/data/psgc_nationwide_boundaries.csv`
+Four barangay names re-spelled to the form the legacy PABS exports actually
+carry, keyed by unchanged PSGC codes:
+* `0201506025` Cagayan / Baggao — `Imurung` → `Imurong`
+* `0201527041` Cagayan / Solana — `Gen. Eulogio Balao` → `Gen. Balao`
+* `0203114030` Isabela / City of Ilagan — `Cabeseria 3` → `Cabiseria 3`
+* `0203125013` Isabela / Reina Mercedes — `Nappaccu Pequeño` → `Napaccu Pequeño`
+
+**Why the CSV and not an alias rule.** `_resolve_psgc_code` /
+`_municipality_alias_variants` in `backend/app/api/upload.py` only retry
+*convention* differences — `X CITY` ↔ `CITY OF X`, `STA.` ↔ `SANTA`, a trailing
+`(...)` qualifier. All four of these are letter-level spelling differences, so
+no fallback could ever reach them; a CSV row that disagrees with the upload file
+is reported as a genuine missing-PSGC miss and the row is rejected. Correcting
+the lookup data is the only fix that does not mean inventing a per-barangay
+exception table.
+
+**Consumers that read this file** (behaviour unchanged, but they re-read it):
+`backend/app/api/upload.py` (ingestion PSGC resolution),
+`backend/seed_admin_boundaries.py` and `backend/seed_database.py` (seeding
+`tbl_admin_boundaries`), `backend/scripts/benchmark_csv_ingestion.py`. Rows
+already seeded keep the old spelling until the boundary seed is re-run — the
+PSGC codes are untouched, so no foreign key moves.
+
+### 2. Files: `docs/SEPARABILITY_OF_TRANSPLANTED_AND_DIRECT_SEEDED_RIC.pdf`,
+`docs/THE_RICE_PLANTING_WINDOW_IN_THE_PHILIPPINES_AN_ANA.pdf` (new)
+The two source papers behind the SAR planted-check reasoning, committed so the
+claims in `docs/SAR_ISPLANTED_METHOD.md` and `docs/SAR_PHASE1_VS_PHASE2.md` §7
+can be checked against the literature instead of taken on trust. Reference
+material only — nothing reads them at runtime.
+
+### Status / Next Steps
+* Re-run the admin-boundary seed to propagate the four spellings into
+  `tbl_admin_boundaries`; until then only fresh ingests benefit.
+* No automated test covers PSGC spelling. Validation is an upload of a real
+  PABS export containing one of these four barangays, confirming it no longer
+  lands in the rejected-rows report.
+* `backend/app/__pycache__/*.pyc` remains tracked from an earlier commit despite
+  `__pycache__/` being in `.gitignore`; its churn is deliberately left out of
+  this commit. Worth a `git rm --cached` in a future housekeeping pass.
+
+---
+
 ## [2026-10-18] - Docs: SAR Phase 1 vs Phase 2 Explainer for the Documenter
 
 Per Fabio: a standalone document for Albritch (Documenter & System Analyst) so
