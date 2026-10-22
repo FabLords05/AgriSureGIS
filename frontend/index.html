@@ -5,8 +5,30 @@
       
       <meta charset="UTF-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-      <title>Desktop App Development</title>
-      <meta name="description" content="A desktop-only web app that organizes uploaded images and text files, enabling users to efficiently manage and reference their content in one place." />
+      <title>AgriSureGIS</title>
+      <meta name="description" content="Parametric crop insurance risk assessment for typhoon-affected farms." />
+      <!-- PWA install support (see src/lib/pwaInstall.ts) -->
+      <link rel="manifest" href="/manifest.webmanifest" />
+      <!-- Desktop-only: drop the manifest on phones/tablets so the browser
+           never offers "Install app" there. Same check as isMobileDevice()
+           in src/lib/pwaInstall.ts -- keep the two in step. -->
+      <script>
+        (function () {
+          var ua = navigator.userAgent;
+          var mobile = (navigator.userAgentData && navigator.userAgentData.mobile)
+            || /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile|Silk|Kindle/i.test(ua)
+            || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+          if (mobile) {
+            var link = document.querySelector('link[rel="manifest"]');
+            if (link) link.parentNode.removeChild(link);
+          }
+        })();
+      </script>
+      <meta name="theme-color" content="#166534" />
+      <link rel="icon" type="image/png" href="/icons/icon-192.png" />
+      <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+      <meta name="apple-mobile-web-app-capable" content="yes" />
+      <meta name="apple-mobile-web-app-title" content="AgriSureGIS" />
       <meta name="robots" content="noindex, nofollow" />
       <style>html, body { height: 100%; margin: 0; } #root { height: 100%; }</style>
       

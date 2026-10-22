@@ -1,0 +1,420 @@
+import unittest
+from datetime import date, datetime, timezone
+from decimal import Decimal
+from unittest.mock import MagicMock, patch
+
+from sqlalchemy.sql import operators
+
+from app.models.models import (
+    IndemnityFactorMatrix,
+    InsuranceRecord,
+    InsuranceUsage,
+    RecsapMatrix,
+    RiskAssessment,
+    TropicalCycloneBulletin,
+)
+from app.services.assessment_service import AssessmentService
+
+
+class AssessmentServiceTests(unittest.TestCase):
+    def _bulletin(self):
+        return MagicMock(
+            spec=TropicalCycloneBulletin,
+            tcb_id=12,
+            typhoon_id=1,
+            issued_at=datetime(2026, 8, 20, tzinfo=timezone.utc),
+        )
+
+    def _summary(self, boundary_id=5, max_signal_level=3, total_exposure_hours=12.0, payout_hours=12.0):
+        return MagicMock(
+            summary_id=99,
+            boundary_id=boundary_id,
+            province="Surigao del Norte",
+            municipality="Mainit",
+            max_signal_level=max_signal_level,
+            total_exposure_hours=total_exposure_hours,
+            payout_hours=payout_hours,
+        )
+
+    def _insurance_record(self, insurance_records_id=7, area_size="2.5", amount_cover="50000.00"):
+        farm = MagicMock(area_size=Decimal(area_size))
+        return MagicMock(
+            spec=InsuranceRecord,
+            insurance_records_id=insurance_records_id,
+            farm=farm,
+            amount_cover=Decimal(amount_cover),
+            effectivity_date=date(2026, 1, 1),
+            expiry_date=date(2026, 12, 31),
+        )
+
+    def _build_mock_db(
+        self,
+        bulletin,
+        insurance_records,
+        prior_assessment,
+        yield_loss_rule,
+        indemnity_rule=None,
+        existing_assessment=None,
+    ):
+        mock_db = MagicMock()
+
+        bulletin_query = MagicMock()
+        bulletin_query.filter.return_value.first.return_value = bulletin
+
+        insurance_query = MagicMock()
+        # InsuranceRecord -> Farm -> AdminBoundary, then filtered by the
+        # summary's province/municipality.
+        insurance_query.join.return_value.join.return_value.filter.return_value.all.return_value = insurance_records
+
+        # get_matrix_rule() does two chained lookups: RecsapMatrix (yield loss %)
+        # then, only if that matched, IndemnityFactorMatrix (indemnity factor).
+        yield_loss_query = MagicMock()
+        yield_loss_query.filter.return_value.first.return_value = yield_loss_rule
+
+        indemnity_query = MagicMock()
+        indemnity_query.filter.return_value.first.return_value = indemnity_rule
+
+        risk_assessment_returns = []
+        for _ in insurance_records:
+            prior_query = MagicMock()
+            prior_query.filter.return_value.order_by.return_value.first.return_value = prior_assessment
+            existing_query = MagicMock()
+            existing_query.filter.return_value.first.return_value = existing_assessment
+            risk_assessment_returns.extend([prior_query, existing_query])
+        risk_assessment_calls = iter(risk_assessment_returns)
+
+        def query_side_effect(model):
+            if model is TropicalCycloneBulletin:
+                return bulletin_query
+            if model is InsuranceRecord:
+                return insurance_query
+            if model is RecsapMatrix:
+                return yield_loss_query
+            if model is IndemnityFactorMatrix:
+                return indemnity_query
+            if model is RiskAssessment:
+                return next(risk_assessment_calls)
+            raise AssertionError(f"Unexpected model queried in test: {model}")
+
+        mock_db.query.side_effect = query_side_effect
+        # Exposed so a test can assert WHICH crop_stage_group the step-2 lookup
+        # filtered on -- the mock returns the same rule regardless, so the filter
+        # arguments are the only evidence the right bracket was chosen.
+        mock_db.indemnity_query = indemnity_query
+        mock_db.insurance_query = insurance_query
+        return mock_db
+
+    @patch("app.services.assessment_service.ExposureCalculatorService.compute_for_typhoon")
+    def test_calculate_for_bulletin_creates_assessment_for_eligible_policy(self, mock_compute):
+        bulletin = self._bulletin()
+        summary = self._summary()
+        mock_compute.return_value = [summary]
+
+        insurance = self._insurance_record()
+        prior = MagicMock(spec=RiskAssessment, crop_stage_no=2, crop_stage="Flowering", stage_group="Reproductive")
+        # Flowering -> Reproductive stage group; 25.00% falls in the >20 to 25 bracket.
+        yield_loss_rule = MagicMock(spec=RecsapMatrix, matrix_id=3, estimated_yield_loss=Decimal("25.00"))
+        indemnity_rule = MagicMock(spec=IndemnityFactorMatrix, indemnity_id=8, indemnity_factor=Decimal("330.00"))
+
+        mock_db = self._build_mock_db(bulletin, [insurance], prior, yield_loss_rule, indemnity_rule)
+
+        results = AssessmentService.calculate_for_bulletin(1, 12, mock_db)
+
+        self.assertEqual(len(results), 1)
+        result = results[0]
+        self.assertEqual(result.insurance_records_id, 7)
+        self.assertEqual(result.summary_id, 99)
+        self.assertEqual(result.matrix_id, 3)
+        self.assertEqual(result.indemnity_matrix_id, 8)
+        self.assertEqual(result.crop_stage_no, 2)
+        self.assertEqual(result.crop_stage, "Flowering")
+        self.assertEqual(result.stage_group, "Reproductive")
+        self.assertEqual(result.period_of_exposure, 12)
+        self.assertEqual(result.wind_velocity, 3)
+        # I = (AC / 1000) * IF = (50000 / 1000) * 330.00 = 16500.0
+        self.assertEqual(result.final_indemnity_payment, 16500.0)
+        self.assertEqual(result.estimated_damage, 12500.0)  # 50000 * 25 / 100
+        mock_db.commit.assert_called_once()
+
+    @patch("app.services.assessment_service.ExposureCalculatorService.compute_for_typhoon")
+    def test_policies_matched_by_municipality_not_the_summarys_single_barangay(self, mock_compute):
+        # A summary's boundary_id is one barangay row standing in for the whole
+        # municipality; farms reference their own barangay. Matching on
+        # boundary_id skipped every farm in the municipality's other barangays,
+        # so the policy lookup must filter on province + municipality instead.
+        bulletin = self._bulletin()
+        mock_compute.return_value = [self._summary()]
+        mock_db = self._build_mock_db(bulletin, [], prior_assessment=None, yield_loss_rule=None)
+
+        AssessmentService.calculate_for_bulletin(1, 12, mock_db)
+
+        filter_call = mock_db.insurance_query.join.return_value.join.return_value.filter.call_args
+        filtered = {
+            criterion.left.name: getattr(criterion.right, "value", None)
+            for criterion in filter_call.args
+            if criterion.left.table.name == "tbl_admin_boundaries"
+        }
+        self.assertEqual(filtered, {"province": "Surigao del Norte", "municipality": "Mainit"})
+        self.assertNotIn(
+            "boundary_id",
+            {criterion.left.name for criterion in filter_call.args if criterion.left.table.name == "tbl_farms"},
+        )
+
+    @patch("app.services.assessment_service.ExposureCalculatorService.compute_for_typhoon")
+    def test_policies_locked_by_a_final_export_are_excluded(self, mock_compute):
+        # Once the final PABS CSV is exported, a policy can't be assessed again
+        # for any typhoon -- the lookup must exclude finalized usage rows.
+        bulletin = self._bulletin()
+        mock_compute.return_value = [self._summary()]
+        mock_db = self._build_mock_db(bulletin, [], prior_assessment=None, yield_loss_rule=None)
+
+        AssessmentService.calculate_for_bulletin(1, 12, mock_db)
+
+        filter_call = mock_db.insurance_query.join.return_value.join.return_value.filter.call_args
+        lock_criteria = [
+            criterion
+            for criterion in filter_call.args
+            if criterion.operator is operators.not_in_op
+            and criterion.left.table.name == "tbl_insurance_records"
+            and criterion.left.name == "insurance_records_id"
+        ]
+        self.assertEqual(len(lock_criteria), 1)
+        locked_subquery_sql = str(lock_criteria[0].right)
+        self.assertIn("tbl_insurance_usage.finalized_at IS NOT NULL", locked_subquery_sql)
+        self.assertIn("tbl_insurance_usage.is_used IS true", locked_subquery_sql)
+
+    @patch("app.services.assessment_service.ExposureCalculatorService.compute_for_typhoon")
+    def test_calculate_for_bulletin_skips_ineligible_crop_stage(self, mock_compute):
+        bulletin = self._bulletin()
+        summary = self._summary()
+        mock_compute.return_value = [summary]
+
+        insurance = self._insurance_record()
+        prior = MagicMock(spec=RiskAssessment, crop_stage_no=5, crop_stage="Ripening", stage_group="Maturity")
+
+        mock_db = self._build_mock_db(bulletin, [insurance], prior, yield_loss_rule=None)
+
+        results = AssessmentService.calculate_for_bulletin(1, 12, mock_db)
+
+        self.assertEqual(results, [])
+        mock_db.commit.assert_called_once()
+
+    @patch("app.services.assessment_service.ExposureCalculatorService.compute_for_typhoon")
+    def test_milking_stage_uses_its_own_group_not_the_one_implied_by_crop_stage_no(self, mock_compute):
+        # Milking resolves to crop_stage_no 2, the same Table 11 row as Flowering
+        # (PCIC pairs FS/MS), but sits in the Late Reproductive indemnity group
+        # rather than Reproductive. Deriving the group from crop_stage_no -- which
+        # is what CROP_STAGE_TO_INDEMNITY_GROUP does -- would pay the wrong factor,
+        # so the row's own resolved stage_group has to win.
+        bulletin = self._bulletin()
+        summary = self._summary()
+        mock_compute.return_value = [summary]
+
+        insurance = self._insurance_record()
+        prior = MagicMock(
+            spec=RiskAssessment, crop_stage_no=2, crop_stage="Milking Stage", stage_group="Late Reproductive"
+        )
+        yield_loss_rule = MagicMock(spec=RecsapMatrix, matrix_id=3, estimated_yield_loss=Decimal("25.00"))
+        # >20 to 25, Late Reproductive -> 372.00 (Reproductive would be 330.00).
+        indemnity_rule = MagicMock(spec=IndemnityFactorMatrix, indemnity_id=13, indemnity_factor=Decimal("372.00"))
+
+        mock_db = self._build_mock_db(bulletin, [insurance], prior, yield_loss_rule, indemnity_rule)
+
+        results = AssessmentService.calculate_for_bulletin(1, 12, mock_db)
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].stage_group, "Late Reproductive")
+        # I = (50000 / 1000) * 372.00
+        self.assertEqual(results[0].final_indemnity_payment, 18600.0)
+
+        groups_filtered = {
+            criterion.right.value
+            for call in mock_db.indemnity_query.filter.call_args_list
+            for criterion in call.args
+            if getattr(criterion.left, "name", None) == "crop_stage_group"
+        }
+        self.assertEqual(groups_filtered, {"Late Reproductive"})
+
+    @patch("app.services.assessment_service.ExposureCalculatorService.compute_for_typhoon")
+    def test_calculate_for_bulletin_skips_summary_below_signal_threshold(self, mock_compute):
+        bulletin = self._bulletin()
+        summary = self._summary(max_signal_level=1)
+        mock_compute.return_value = [summary]
+
+        mock_db = self._build_mock_db(bulletin, [], prior_assessment=None, yield_loss_rule=None)
+
+        results = AssessmentService.calculate_for_bulletin(1, 12, mock_db)
+
+        self.assertEqual(results, [])
+
+    @patch("app.services.assessment_service.ExposureCalculatorService.compute_for_typhoon")
+    def test_calculate_for_bulletin_uses_hours_at_max_signal_not_total(self, mock_compute):
+        # 30h of total exposure, but only 4h of it under Signal 3 (the max):
+        # payout eligibility reads payout_hours, so nothing is assessed.
+        bulletin = self._bulletin()
+        summary = self._summary(max_signal_level=3, total_exposure_hours=30.0, payout_hours=4.0)
+        mock_compute.return_value = [summary]
+
+        mock_db = self._build_mock_db(bulletin, [], prior_assessment=None, yield_loss_rule=None)
+
+        results = AssessmentService.calculate_for_bulletin(1, 12, mock_db)
+
+        self.assertEqual(results, [])
+
+    def test_calculate_for_bulletin_raises_if_bulletin_not_found(self):
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = None
+
+        with self.assertRaises(ValueError):
+            AssessmentService.calculate_for_bulletin(1, 999, mock_db)
+
+
+class InsuranceUsageSyncTests(unittest.TestCase):
+    """
+    Exercises _sync_insurance_usage() directly (rather than through the full
+    calculate_for_bulletin flow) since it needs a result whose insurance_record
+    relationship is actually populated -- a bare `RiskAssessment(...)` built
+    outside a real Session (as the tests above do) resolves that relationship
+    to None, which is also why calculate_for_bulletin's own tests don't
+    exercise this path: touched stays False and _sync_insurance_usage is a
+    no-op, so they don't need any changes here.
+    """
+
+    def _result(self, insurance_records_id=7, payment=16500.0, assessment_id=42, is_used=False, used_for_typhoon_id=None):
+        insurance = MagicMock(
+            spec=InsuranceRecord,
+            insurance_records_id=insurance_records_id,
+            is_used=is_used,
+            used_for_typhoon_id=used_for_typhoon_id,
+            used_at=None,
+        )
+        result = MagicMock(
+            spec=RiskAssessment,
+            insurance_record=insurance,
+            final_indemnity_payment=payment,
+            assessment_id=assessment_id,
+        )
+        return result, insurance
+
+    def test_marks_insurance_used_when_payout_positive(self):
+        result, insurance = self._result(payment=16500.0)
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = None  # no existing usage row yet
+
+        AssessmentService._sync_insurance_usage(1, [result], mock_db)
+
+        self.assertTrue(insurance.is_used)
+        self.assertEqual(insurance.used_for_typhoon_id, 1)
+        self.assertIsNotNone(insurance.used_at)
+        mock_db.add.assert_called_once()  # new InsuranceUsage row
+        mock_db.commit.assert_called_once()
+
+    def test_unmarks_insurance_when_same_typhoon_recomputes_to_zero_payout(self):
+        result, insurance = self._result(payment=0.0, used_for_typhoon_id=1)
+        insurance.is_used = True
+        mock_usage = MagicMock(is_used=True)
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = mock_usage
+
+        AssessmentService._sync_insurance_usage(1, [result], mock_db)
+
+        self.assertFalse(mock_usage.is_used)
+        self.assertFalse(insurance.is_used)
+        self.assertIsNone(insurance.used_for_typhoon_id)
+        mock_db.commit.assert_called_once()
+
+    def test_does_not_clobber_a_different_typhoons_real_usage(self):
+        # Insurance is genuinely used for typhoon 2. Typhoon 1's assessment
+        # finds zero payout for this same policy -- must not overwrite typhoon
+        # 2's mark, or a farmer already paid for a past typhoon would
+        # incorrectly show as unused/available again for a new one.
+        result, insurance = self._result(payment=0.0, used_for_typhoon_id=2)
+        insurance.is_used = True
+        mock_db = MagicMock()
+        mock_db.query.return_value.filter.return_value.first.return_value = None
+
+        AssessmentService._sync_insurance_usage(1, [result], mock_db)
+
+        self.assertTrue(insurance.is_used)
+        self.assertEqual(insurance.used_for_typhoon_id, 2)
+
+    def test_skips_commit_when_no_result_has_a_loaded_insurance_record(self):
+        result = MagicMock(spec=RiskAssessment, insurance_record=None)
+        mock_db = MagicMock()
+
+        AssessmentService._sync_insurance_usage(1, [result], mock_db)
+
+        mock_db.commit.assert_not_called()
+
+
+class FinalizeExportedUsageTests(unittest.TestCase):
+    """finalize_exported_usage(): the lock applied when the final PABS CSV is exported."""
+
+    def _mock_db(self, usages, records):
+        mock_db = MagicMock()
+        usage_query = MagicMock()
+        usage_query.filter.return_value.all.return_value = usages
+        record_query = MagicMock()
+        record_query.filter.return_value.all.return_value = records
+
+        def query_side_effect(model):
+            if model is InsuranceUsage:
+                return usage_query
+            if model is InsuranceRecord:
+                return record_query
+            raise AssertionError(f"Unexpected model queried in test: {model}")
+
+        mock_db.query.side_effect = query_side_effect
+        return mock_db
+
+    def test_locks_provisional_usage_and_updates_mirror(self):
+        usage = MagicMock(insurance_records_id=7, typhoon_id=1, is_used=True, finalized_at=None)
+        insurance = MagicMock(spec=InsuranceRecord, insurance_records_id=7, is_used=False, used_for_typhoon_id=None)
+        mock_db = self._mock_db([usage], [insurance])
+
+        locked = AssessmentService.finalize_exported_usage([(7, 1, 42)], mock_db)
+
+        self.assertEqual(locked, 1)
+        self.assertIsNotNone(usage.finalized_at)
+        self.assertTrue(usage.is_used)
+        self.assertEqual(usage.assessment_id, 42)
+        self.assertTrue(insurance.is_used)
+        self.assertEqual(insurance.used_for_typhoon_id, 1)
+        mock_db.add.assert_not_called()
+        mock_db.commit.assert_called_once()
+
+    def test_creates_usage_row_when_none_exists(self):
+        insurance = MagicMock(spec=InsuranceRecord, insurance_records_id=7)
+        mock_db = self._mock_db([], [insurance])
+
+        locked = AssessmentService.finalize_exported_usage([(7, 1, 42)], mock_db)
+
+        self.assertEqual(locked, 1)
+        mock_db.add.assert_called_once()
+        added = mock_db.add.call_args.args[0]
+        self.assertIsInstance(added, InsuranceUsage)
+        self.assertEqual((added.insurance_records_id, added.typhoon_id), (7, 1))
+        self.assertIsNotNone(added.finalized_at)
+
+    def test_re_export_leaves_an_already_locked_row_untouched(self):
+        first_locked_at = datetime(2026, 10, 1, tzinfo=timezone.utc)
+        usage = MagicMock(insurance_records_id=7, typhoon_id=1, is_used=True, finalized_at=first_locked_at, assessment_id=42)
+        mock_db = self._mock_db([usage], [])
+
+        locked = AssessmentService.finalize_exported_usage([(7, 1, 99)], mock_db)
+
+        self.assertEqual(locked, 0)
+        self.assertEqual(usage.finalized_at, first_locked_at)
+        self.assertEqual(usage.assessment_id, 42)
+
+    def test_nothing_to_export_skips_the_database(self):
+        mock_db = MagicMock()
+
+        self.assertEqual(AssessmentService.finalize_exported_usage([], mock_db), 0)
+
+        mock_db.query.assert_not_called()
+        mock_db.commit.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

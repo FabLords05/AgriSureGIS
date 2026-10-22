@@ -1,37 +1,23 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import { toast } from "sonner";
 import {
-  Activity, Download, CheckCircle, Clock, AlertTriangle, FileDown,
-  Wifi, RefreshCw, Eye, BarChart2, TrendingUp, Zap,
-  Satellite, X, MapPin, User
+  Activity, Download, FileDown,
+  RefreshCw, Eye, Zap, AlertTriangle,
+  X, MapPinned, ShieldCheck,
+  ChevronUp, ChevronDown, ArrowUpDown, Check, CheckCircle2, Clock, Wifi, ListChecks
 } from "lucide-react";
 import {
-  BarChart, Bar, XAxis, YAxis, Tooltip as RTooltip, ResponsiveContainer,
-  PieChart, Pie, Cell, LineChart, Line, CartesianGrid, Legend
-} from "recharts";
-import { mockFarmers, FarmerRecord } from "./mockData";
-import { Bulletin, TcbSignal, getBulletins, parseBulletins, getBulletinSignals } from "@/lib/api";
+  Bulletin, TcbSignal, InsuranceSummary, ActiveTyphoon, AssessmentsSummary,
+  getBulletins, parseBulletins, getBulletinSignals,
+  computeExposure, getTyphoonExposure, TyphoonExposure, getAssessmentsSummary, getInsuranceSummary,
+  getActiveTyphoons, TyphoonProgress, getTyphoonProgress, SystemStatus, getSystemStatus, AssessmentStageStatus,
+} from "@/lib/api";
+import { ExposureTable } from "./ExposureTable";
+import { DataImportPanel, ImportSummary } from "./DataImportPanel";
+import { AssessmentProgressBar } from "./AssessmentProgressBar";
 
-const signalChartData = [
-  { signal:"Signal 1", farms:6,  area:12.0 },
-  { signal:"Signal 2", farms:11, area:26.0 },
-  { signal:"Signal 3", farms:5,  area:14.5 },
-];
-
-const growthPieData = [
-  { name:"Seedling",     value:5, color:"#86efac" },
-  { name:"Vegetative",   value:6, color:"#22c55e" },
-  { name:"Reproductive", value:5, color:"#eab308" },
-  { name:"Ripening",     value:4, color:"#f59e0b" },
-];
-
-const timelineData = [
-  { time:"00:00", bulletins:1, farms:0 },
-  { time:"03:00", bulletins:2, farms:5 },
-  { time:"06:00", bulletins:3, farms:11 },
-  { time:"09:00", bulletins:4, farms:16 },
-  { time:"12:00", bulletins:5, farms:19 },
-  { time:"15:00", bulletins:6, farms:19 },
-];
+type BulletinSortField = "bulletin_count" | "typhoon_name" | "issued_at" | "category" | "max_sustained_winds" | "gustiness";
+type SortDir = "asc" | "desc";
 
 function uniqueAreas(signals: TcbSignal[]): string[] {
   return Array.from(new Set(signals.map(s => s.area_name)));
@@ -41,11 +27,261 @@ function maxSignalLevel(signals: TcbSignal[]): number {
   return signals.length ? Math.max(...signals.map(s => s.signal_level)) : 0;
 }
 
+// Groups signals by level (highest first) so each level's areas can be shown
+// under its own header, instead of merging every level's areas into one flat
+// list under a single "highest signal" banner.
+function groupAreasBySignalLevel(signals: TcbSignal[]): { level: number; areas: string[] }[] {
+  const byLevel = new Map<number, Set<string>>();
+  for (const s of signals) {
+    if (!byLevel.has(s.signal_level)) byLevel.set(s.signal_level, new Set());
+    byLevel.get(s.signal_level)!.add(s.area_name);
+  }
+  return Array.from(byLevel.entries())
+    .sort((a, b) => b[0] - a[0])
+    .map(([level, areas]) => ({ level, areas: Array.from(areas) }));
+}
+
+const ISLAND_GROUP_LABELS: Record<string, string> = { "0": "Luzon", "1": "Visayas", "2": "Mindanao" };
+
+// PAGASA's raw TCWS text per level (highest first), each with its island-group
+// cells -- fallback for when no area resolved to a tbl_tcb_signals row.
+function rawTcwsByLevel(tcwsAreas: Bulletin["tcws_areas"]): { level: number; cells: { island: string; text: string }[] }[] {
+  if (!tcwsAreas) return [];
+  return Object.entries(tcwsAreas)
+    .map(([level, byIsland]) => ({
+      level: Number(level),
+      cells: Object.entries(byIsland)
+        .sort((a, b) => Number(a[0]) - Number(b[0]))
+        .map(([group, text]) => ({ island: ISLAND_GROUP_LABELS[group] ?? `Group ${group}`, text })),
+    }))
+    .sort((a, b) => b.level - a.level);
+}
+
+function signalLevelColor(level: number): string {
+  return level >= 3 ? "#ef4444" : level === 2 ? "#d97706" : "#166534";
+}
+
+function formatIssuedAt(isoString: string | null | undefined): string {
+  if (!isoString) return "Unknown";
+  const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) return "Unknown";
+  return new Intl.DateTimeFormat("en-PH", {
+    timeZone: "Asia/Manila",
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
+}
+
+function formatClock(isoString: string | null | undefined): string {
+  if (!isoString) return "—";
+  const date = new Date(isoString);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat("en-PH", { timeZone: "Asia/Manila", timeStyle: "short" }).format(date);
+}
+
+// Typhoon progress strip (2026-10-11) -- where the tracked typhoon is in the
+// workflow, from bulletins collected to the final PABS export. "Current" is
+// the first step not done yet.
+function TyphoonProgressStrip({ progress, onNavigateToAssessment }: {
+  progress: TyphoonProgress;
+  onNavigateToAssessment?: () => void;
+}) {
+  const job = progress.active_job;
+  const raw: { title: string; done: boolean; detail: string }[] = [
+    {
+      title: "Bulletins collected",
+      done: progress.bulletin_count > 0,
+      detail: `${progress.bulletin_count} TCB${progress.bulletin_count === 1 ? "" : "s"} downloaded`,
+    },
+    {
+      title: "Final TCB issued",
+      done: progress.final_bulletin !== null,
+      detail: progress.final_bulletin
+        ? `TCB #${progress.final_bulletin.bulletin_count} · ${formatIssuedAt(progress.final_bulletin.issued_at)}`
+        : "Waiting for PAGASA's final bulletin",
+    },
+    {
+      title: "Exposure computed",
+      done: progress.exposure_areas > 0,
+      detail: progress.exposure_areas > 0
+        ? `${progress.exposure_areas} municipalit${progress.exposure_areas === 1 ? "y" : "ies"}`
+        : "Not computed yet",
+    },
+    {
+      title: "Assessment calculated",
+      done: progress.assessed_farms > 0 && job?.status !== "processing" && job?.status !== "error",
+      detail: job?.status === "processing"
+        ? `${job.current_stage_label ?? "Running"} · ${job.percent}%`
+        : job?.status === "error"
+          ? "Last calculation failed"
+          : progress.assessed_farms > 0
+            ? `${progress.assessed_farms} farm${progress.assessed_farms === 1 ? "" : "s"} assessed`
+            : "Not calculated yet",
+    },
+    {
+      title: "Exported to PABS",
+      done: progress.exported_policies > 0,
+      detail: progress.exported_policies > 0
+        ? `${progress.exported_policies} polic${progress.exported_policies === 1 ? "y" : "ies"} · ${formatIssuedAt(progress.exported_at)}`
+        : "Not exported yet",
+    },
+  ];
+
+  // Strictly sequential (2026-10-22): a step only shows Completed when every
+  // step before it has, so a later step never visually jumps an earlier one
+  // (e.g. exposure is now computed as each bulletin arrives, before the
+  // final TCB). The first unfinished step is the one active stage; it is
+  // Failed / Processing from the real assessment job, else Processing while
+  // PAGASA is still issuing bulletins, else Pending (waiting on a user step).
+  const currentIndex = raw.findIndex(s => !s.done);
+  const steps = raw.map((s, i): { title: string; detail: string; status: AssessmentStageStatus } => {
+    if (currentIndex === -1 || i < currentIndex) return { ...s, status: "completed" };
+    if (i > currentIndex) return { ...s, status: "pending" };
+    if (i === 3 && job?.status === "error") return { ...s, status: "failed" };
+    if (i === 3 && job?.status === "processing") return { ...s, status: "processing" };
+    if (i <= 1 && progress.in_par) return { ...s, status: "processing" };
+    return { ...s, status: "pending" };
+  });
+  const statusLabel: Record<AssessmentStageStatus, string> = {
+    pending: "Pending", processing: "Processing", completed: "Completed", failed: "Failed",
+  };
+
+  return (
+    <div className="bg-card border border-border rounded-xl shrink-0">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+        <div className="flex items-center gap-2">
+          <ListChecks size={15} className="text-[#166534]" />
+          <span className="text-sm font-semibold">{progress.typhoon_name} — Assessment Progress</span>
+        </div>
+        {progress.in_par ? (
+          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-red-100 text-red-700 dark:bg-red-950/40 dark:text-red-400">
+            <span className="w-2 h-2 rounded-full bg-current" /> Inside PAR
+          </span>
+        ) : (
+          <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-muted text-muted-foreground">
+            <span className="w-2 h-2 rounded-full bg-current" /> Exited PAR
+          </span>
+        )}
+      </div>
+      <div className="grid grid-cols-5 px-4 py-4">
+        {steps.map((s, i) => {
+          const isCurrent = i === currentIndex;
+          const done = s.status === "completed";
+          return (
+            <div key={s.title} className="relative px-2 text-center">
+              {i > 0 && (
+                <div className={`absolute top-[14px] -left-1/2 w-full h-[3px] ${done || isCurrent ? "bg-[#166534]" : "bg-border"}`} />
+              )}
+              <div className={`relative z-10 mx-auto mb-1.5 w-[30px] h-[30px] rounded-full flex items-center justify-center text-[12px] font-bold border-[3px] ${
+                done
+                  ? "bg-[#166534] border-[#166534] text-white"
+                  : s.status === "failed"
+                    ? "bg-card border-red-600 text-red-600 ring-4 ring-red-600/20"
+                    : isCurrent
+                      ? "bg-card border-[#ca8a04] text-[#ca8a04] ring-4 ring-[#ca8a04]/20"
+                      : "bg-card border-border text-muted-foreground"
+              }`}>
+                {done ? <Check size={14} strokeWidth={3} /> : s.status === "failed" ? <X size={14} strokeWidth={3} /> : i + 1}
+              </div>
+              <p className="text-[12px] font-semibold">{s.title}</p>
+              <p className={`text-[10px] font-semibold uppercase tracking-wide ${
+                s.status === "failed" ? "text-red-600" : s.status === "processing" ? "text-[#ca8a04]" : done ? "text-[#166534]" : "text-muted-foreground"
+              }`}>{statusLabel[s.status]}</p>
+              <p className="text-[11px] text-muted-foreground">{s.detail}</p>
+              {isCurrent && i >= 3 && onNavigateToAssessment && (
+                <button onClick={onNavigateToAssessment} className="mt-0.5 text-[11px] font-medium text-[#ca8a04] hover:underline">
+                  Go to Assessment &amp; Reporting →
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {/* The calculation's own stages, while running or after a failure. */}
+      {job && job.status !== "done" && (
+        <div className="px-4 pb-4">
+          <AssessmentProgressBar job={job} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// System Status panel (2026-10-11) -- PAGASA polling job, newest bulletin,
+// and email alert config, from GET /api/system/status. Calibration keeps its
+// own Backend API row separately.
+function SystemStatusPanel({ status, checkedAt }: { status: SystemStatus | null; checkedAt: string | null }) {
+  const parser = status?.parser;
+  const parserOk = parser?.last_run_at ? parser.scrape_ok && parser.status_sync_ok : null;
+  const rows: { label: string; ok: boolean | null; detail: string; sub?: string }[] = status ? [
+    {
+      label: "PAGASA Parser",
+      ok: parserOk,
+      detail: parser?.last_run_at
+        ? `Last run ${formatClock(parser.last_run_at)}${parserOk ? "" : " (failed)"}`
+        : "Not run yet since restart",
+      sub: `Next ${formatClock(parser?.next_run_at)} · every ${parser?.interval_minutes} min`,
+    },
+    {
+      label: "Last bulletin parsed",
+      ok: status.last_bulletin ? true : null,
+      detail: status.last_bulletin
+        ? `TCB #${status.last_bulletin.bulletin_count}${status.last_bulletin.is_final ? " (Final)" : ""} · ${status.last_bulletin.typhoon_name ?? "Unknown"}`
+        : "None yet",
+      sub: status.last_bulletin ? formatIssuedAt(status.last_bulletin.issued_at) : undefined,
+    },
+    {
+      label: "Email Alerts",
+      ok: status.email_alerts.configured,
+      detail: status.email_alerts.configured ? "Configured" : "Not configured",
+    },
+  ] : [];
+
+  return (
+    <div className="bg-card border border-border rounded-xl p-4 flex flex-col min-h-0">
+      <div className="flex items-center gap-2 mb-3">
+        <Wifi size={15} className="text-[#166534]" />
+        <span className="text-sm font-semibold">System Status</span>
+      </div>
+      {status === null ? (
+        <p className="text-[12px] text-muted-foreground">Status unavailable.</p>
+      ) : (
+        <div className="divide-y divide-border">
+          {rows.map(r => (
+            <div key={r.label} className="py-2 flex items-start justify-between gap-3">
+              <div className="flex items-center gap-2">
+                {r.ok === null
+                  ? <span className="w-3 h-3 rounded-full border-2 border-muted-foreground/50 shrink-0" />
+                  : r.ok
+                    ? <CheckCircle2 size={13} className="text-emerald-500 shrink-0" />
+                    : <AlertTriangle size={13} className="text-amber-500 shrink-0" />}
+                <span className="text-[12px]">{r.label}</span>
+              </div>
+              <div className="text-right">
+                <p className="text-[12px] font-medium">{r.detail}</p>
+                {r.sub && <p className="text-[11px] text-muted-foreground">{r.sub}</p>}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="mt-auto pt-2 border-t border-border flex items-center gap-1.5">
+        <Clock size={11} className="text-muted-foreground" />
+        <span className="text-[11px] text-muted-foreground">Checked {checkedAt ?? "—"}</span>
+      </div>
+    </div>
+  );
+}
+
 // ─── TCB Detail Viewer Modal ─────────────────────────────────────────────────
 function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bulletin: Bulletin; signals: TcbSignal[]; isLoadingSignals: boolean; onClose: () => void }) {
-  const highestSignal = maxSignalLevel(signals);
-  const signalColor = highestSignal === 3 ? "#ef4444" : highestSignal === 2 ? "#d97706" : "#166534";
-  const areas = uniqueAreas(signals);
+  const highestSignal = Math.max(maxSignalLevel(signals), bulletin.max_signal_level ?? 0);
+  const signalColor = signalLevelColor(highestSignal);
+  const areasByLevel = groupAreasBySignalLevel(signals);
+  const rawAreasByLevel = rawTcwsByLevel(bulletin.tcws_areas);
+  // max_signal_level 0 = PAGASA explicitly stated no wind signal is hoisted
+  // (vs null = no signal information parsed at all).
+  const noSignalHoisted = highestSignal === 0 && bulletin.max_signal_level === 0;
 
   const handleDownloadTCB = () => {
     const content = [
@@ -57,12 +293,24 @@ function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bull
       `TROPICAL CYCLONE: ${bulletin.typhoon_name.toUpperCase()}`,
       `BULLETIN NO.: ${bulletin.bulletin_count}`,
       `CATEGORY: ${bulletin.category ?? "Unknown"}`,
-      `ISSUED: ${bulletin.issued_at ?? "Unknown"}`,
+      `ISSUED: ${formatIssuedAt(bulletin.issued_at)}`,
       `MAX SUSTAINED WINDS: ${bulletin.max_sustained_winds ?? "—"} km/h`,
       `GUSTINESS: ${bulletin.gustiness ?? "—"} km/h`,
       "",
       "AREAS UNDER SIGNAL WARNING:",
-      ...(areas.length ? areas.map(a => `  • ${a}`) : ["  (no signal data recorded for this bulletin)"]),
+      ...(areasByLevel.length
+        ? areasByLevel.flatMap(({ level, areas }) => [
+            `  Signal No. ${level}:`,
+            ...areas.map(a => `    • ${a}`),
+          ])
+        : rawAreasByLevel.length
+        ? rawAreasByLevel.flatMap(({ level, cells }) => [
+            `  Signal No. ${level}:`,
+            ...cells.map(c => `    ${c.island}: ${c.text.replace(/\s*\n\s*/g, " ")}`),
+          ])
+        : noSignalHoisted
+        ? ["  No Wind Signal is currently hoisted (per PAGASA)."]
+        : ["  (no signal data recorded for this bulletin)"]),
       "",
       "═══════════════════════════════════════════════════════════════════",
       "This bulletin is intended for PCIC risk assessment purposes.",
@@ -87,7 +335,7 @@ function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bull
             <FileDown size={15} className="text-emerald-400" />
             <div>
               <p className="text-[12px] font-bold text-white">TCB No. {bulletin.bulletin_count} — Tropical Cyclone {bulletin.typhoon_name}</p>
-              <p className="text-[10px] text-white/60">{bulletin.issued_at ?? "Unknown date"}</p>
+              <p className="text-[10px] text-white/60">{formatIssuedAt(bulletin.issued_at)}</p>
             </div>
           </div>
           <button onClick={onClose} className="w-6 h-6 flex items-center justify-center rounded hover:bg-white/10 text-white/60 hover:text-white transition-colors">
@@ -108,7 +356,7 @@ function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bull
               <div className="px-6 py-3 rounded-xl border-2 text-center" style={{ borderColor: signalColor, background: signalColor + "15" }}>
                 <p className="text-[10px] uppercase tracking-widest" style={{ color: signalColor }}>{bulletin.category ?? "Tropical Cyclone"}</p>
                 <p className="text-3xl font-black" style={{ color: signalColor }}>
-                  {isLoadingSignals ? "…" : highestSignal > 0 ? `Signal No. ${highestSignal}` : "No Signal Data"}
+                  {isLoadingSignals ? "…" : highestSignal > 0 ? `Signal No. ${highestSignal}` : noSignalHoisted ? "No Wind Signal Is Raised" : "No Signal Data"}
                 </p>
                 <p className="text-[11px] font-semibold mt-0.5" style={{ color: signalColor }}>
                   {bulletin.max_sustained_winds ?? "—"} km/h sustained · gusts {bulletin.gustiness ?? "—"} km/h
@@ -122,7 +370,7 @@ function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bull
                 ["Cyclone Name", bulletin.typhoon_name],
                 ["Bulletin No.", String(bulletin.bulletin_count)],
                 ["Category", bulletin.category ?? "Unknown"],
-                ["Issued", bulletin.issued_at ?? "Unknown"],
+                ["Issued", formatIssuedAt(bulletin.issued_at)],
                 ["Max Winds", `${bulletin.max_sustained_winds ?? "—"} km/h`],
               ].map(([k, v]) => (
                 <div key={k} className="flex gap-2">
@@ -136,15 +384,44 @@ function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bull
               <p className="font-bold text-[11px] mb-2 uppercase tracking-wide">Areas Under Signal Warning</p>
               {isLoadingSignals ? (
                 <p className="text-[10px] text-muted-foreground">Loading affected areas…</p>
-              ) : areas.length ? (
-                <ul className="space-y-0.5">
-                  {areas.map((a, i) => (
-                    <li key={i} className="flex items-center gap-2 text-[10px]">
-                      <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: signalColor }} />
-                      {a}
-                    </li>
+              ) : areasByLevel.length ? (
+                <div className="space-y-2.5">
+                  {areasByLevel.map(({ level, areas: levelAreas }) => (
+                    <div key={level}>
+                      <p className="text-[10px] font-bold mb-1" style={{ color: signalLevelColor(level) }}>
+                        Signal No. {level}
+                      </p>
+                      <ul className="space-y-0.5 pl-1">
+                        {levelAreas.map((a, i) => (
+                          <li key={i} className="flex items-center gap-2 text-[10px]">
+                            <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: signalLevelColor(level) }} />
+                            {a}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
                   ))}
-                </ul>
+                </div>
+              ) : rawAreasByLevel.length ? (
+                <div className="space-y-2.5">
+                  {rawAreasByLevel.map(({ level, cells }) => (
+                    <div key={level}>
+                      <p className="text-[10px] font-bold mb-1" style={{ color: signalLevelColor(level) }}>
+                        Signal No. {level}
+                      </p>
+                      <ul className="space-y-0.5 pl-1">
+                        {cells.map(({ island, text }) => (
+                          <li key={island} className="flex items-start gap-2 text-[10px]">
+                            <span className="w-1.5 h-1.5 rounded-full shrink-0 mt-1" style={{ background: signalLevelColor(level) }} />
+                            <span><span className="font-semibold">{island}:</span> {text.replace(/\s*\n\s*/g, " ")}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              ) : noSignalHoisted ? (
+                <p className="text-[10px] text-muted-foreground">No Wind Signal is Currently Listed.</p>
               ) : (
                 <p className="text-[10px] text-muted-foreground">No signal/area data recorded for this bulletin.</p>
               )}
@@ -174,85 +451,32 @@ function TCBViewerModal({ bulletin, signals, isLoadingSignals, onClose }: { bull
   );
 }
 
-// ─── SAR Quick-View Modal (mock — no backend GEE integration exists yet) ────
-function SARQuickViewModal({ farmer, onClose }: { farmer: FarmerRecord; onClose: () => void }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    const W = canvas.width, H = canvas.height;
-
-    let seed = farmer.rowId * 1234567;
-    const rand = () => { seed = (seed * 16807 + 0) % 2147483647; return seed / 2147483647; };
-
-    const imgData = ctx.createImageData(W, H);
-    for (let y = 0; y < H; y++) {
-      for (let x = 0; x < W; x++) {
-        const i = (y * W + x) * 4;
-        const n = rand();
-        const isFloodArea = y > H * 0.55 && x > W * 0.3 && x < W * 0.75 && n > 0.35;
-        const isFarmArea  = x > W * 0.25 && x < W * 0.75 && y > H * 0.25 && y < H * 0.75;
-        const brightness  = n * 180;
-        if (isFloodArea) {
-          imgData.data[i]   = Math.floor(10 + rand() * 20);
-          imgData.data[i+1] = Math.floor(20 + rand() * 40);
-          imgData.data[i+2] = Math.floor(60 + rand() * 60);
-        } else if (isFarmArea) {
-          const v = Math.floor(50 + rand() * 100);
-          imgData.data[i]   = Math.floor(v * 0.3);
-          imgData.data[i+1] = Math.floor(v * 0.8);
-          imgData.data[i+2] = Math.floor(v * 0.4);
-        } else {
-          imgData.data[i]   = Math.floor(brightness * 0.5);
-          imgData.data[i+1] = Math.floor(brightness * 0.5);
-          imgData.data[i+2] = Math.floor(brightness * 0.4);
-        }
-        imgData.data[i+3] = 255;
-      }
-    }
-    ctx.putImageData(imgData, 0, 0);
-
-    ctx.strokeStyle = "#fbbf24";
-    ctx.lineWidth = 2;
-    ctx.setLineDash([4, 3]);
-    const fw = W * 0.45, fh = H * 0.42;
-    const fx = (W - fw) / 2, fy = (H - fh) / 2;
-    ctx.strokeRect(fx, fy, fw, fh);
-    ctx.setLineDash([]);
-
-    ctx.fillStyle = "rgba(30, 100, 220, 0.35)";
-    ctx.fillRect(fx + fw * 0.1, fy + fh * 0.6, fw * 0.65, fh * 0.35);
-
-    ctx.fillStyle = "#fbbf24";
-    ctx.font = "bold 10px monospace";
-    ctx.fillText(farmer.farmId, fx + 4, fy - 4);
-
-    ctx.fillStyle = "rgba(0,0,0,0.55)";
-    ctx.fillRect(4, H - 32, 130, 28);
-    ctx.fillStyle = "#86efac"; ctx.fillRect(8, H - 28, 8, 8);
-    ctx.fillStyle = "#fff"; ctx.font = "9px sans-serif";
-    ctx.fillText("Planted Area", 20, H - 20);
-    ctx.fillStyle = "rgba(30,100,220,0.7)"; ctx.fillRect(8, H - 18, 8, 8);
-    ctx.fillStyle = "#fff"; ctx.fillText("Flood Extent", 20, H - 10);
-
-  }, [farmer]);
-
-  const floodPct = 25 + (farmer.rowId * 7) % 45;
-  const plantedPct = 60 + (farmer.rowId * 13) % 35;
-  const coherence = (0.42 + (farmer.rowId * 0.037) % 0.4).toFixed(2);
-
+// ─── TCB Exposure Summary Modal ──────────────────────────────────────────────
+// Per municipality: Max Signal, hours under each of Signal 1-5, and Total
+// Exposure (their sum) for the bulletin's typhoon, read from the same
+// endpoint as Assessment & Reporting's Areas Affected (2026-10-22).
+function ExposureSummaryModal({
+  bulletin, result, isLoading, error, isRecomputing, onRecompute, onClose,
+}: {
+  bulletin: Bulletin;
+  result: TyphoonExposure | null;
+  isLoading: boolean;
+  error: string | null;
+  isRecomputing: boolean;
+  onRecompute: () => void;
+  onClose: () => void;
+}) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65">
-      <div className="bg-card border border-border rounded-2xl shadow-2xl w-[700px] flex flex-col overflow-hidden">
-        <div className="flex items-center justify-between px-4 py-3 border-b border-border" style={{ background: "#0f1e0f" }}>
-          <div className="flex items-center gap-2.5">
-            <Satellite size={15} className="text-emerald-400" />
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+      <div className="bg-card border border-border rounded-2xl shadow-2xl w-[95vw] max-w-5xl max-h-[85vh] flex flex-col overflow-hidden">
+        <div className="flex items-center justify-between px-5 py-3 border-b border-border shrink-0" style={{ background: "#0f1e0f" }}>
+          <div className="flex items-center gap-3">
+            <MapPinned size={15} className="text-emerald-400" />
             <div>
-              <p className="text-[12px] font-bold text-white">Sentinel-1 SAR Imagery — {farmer.farmId}</p>
-              <p className="text-[10px] text-white/60">Google Earth Engine · C-Band SAR · VV+VH · simulated preview</p>
+              <p className="text-[12px] font-bold text-white">Exposure Summary — {bulletin.typhoon_name}</p>
+              <p className="text-[10px] text-white/60">
+                Hours each municipality spent under each wind signal, across all {result?.bulletin_count ?? ""} TCB(s) of this typhoon
+              </p>
             </div>
           </div>
           <button onClick={onClose} className="w-6 h-6 flex items-center justify-center rounded hover:bg-white/10 text-white/60 hover:text-white transition-colors">
@@ -260,70 +484,32 @@ function SARQuickViewModal({ farmer, onClose }: { farmer: FarmerRecord; onClose:
           </button>
         </div>
 
-        <div className="flex flex-1 overflow-hidden">
-          <div className="flex-1 bg-black relative">
-            <canvas ref={canvasRef} width={420} height={280} className="w-full h-full object-contain" />
-            <div className="absolute top-2 right-2 flex flex-col gap-1">
-              {["VV", "VH", "RGB"].map(b => (
-                <button key={b} className="px-2 py-0.5 rounded bg-black/60 border border-white/20 text-white text-[9px] hover:bg-white/10 transition-colors">{b}</button>
-              ))}
-            </div>
-          </div>
-
-          <div className="w-52 shrink-0 border-l border-border flex flex-col overflow-auto bg-card">
-            <div className="px-3 py-2.5 border-b border-border">
-              <div className="flex items-center gap-1.5 mb-2">
-                <User size={11} className="text-[#166534]" />
-                <p className="text-[11px] font-bold">{farmer.insuredName}</p>
-              </div>
-              <div className="space-y-1 text-[10px]">
-                <div className="flex justify-between"><span className="text-muted-foreground">Farm ID</span><span className="font-mono text-[#166534]">{farmer.farmId}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Municipality</span><span>{farmer.municipality}</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Area</span><span>{farmer.areaHectare.toFixed(2)} ha</span></div>
-                <div className="flex justify-between"><span className="text-muted-foreground">Growth Stage</span><span className="font-medium">{farmer.growthStage}</span></div>
-                <div className="flex justify-between">
-                  <span className="text-muted-foreground">Signal</span>
-                  <span className={`px-1.5 py-0.5 rounded border text-[9px] font-bold ${farmer.signalNo === 2 ? "bg-amber-100 text-amber-700 border-amber-200" : farmer.signalNo === 3 ? "bg-red-100 text-red-700 border-red-200" : "bg-emerald-100 text-emerald-700 border-emerald-200"}`}>
-                    S{farmer.signalNo}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            <div className="px-3 py-2.5 border-b border-border">
-              <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2">SAR Metrics</p>
-              <div className="space-y-2">
-                {[
-                  { label: "Flood Extent", value: `${floodPct}%`, color: "text-blue-600" },
-                  { label: "Planted Area", value: `${plantedPct}%`, color: "text-emerald-600" },
-                  { label: "Coherence", value: coherence, color: "text-purple-600" },
-                  { label: "Pass Dir.", value: "Descending", color: "" },
-                  { label: "Resolution", value: "10m × 10m", color: "" },
-                ].map((m, i) => (
-                  <div key={i} className="flex justify-between items-center">
-                    <span className="text-[10px] text-muted-foreground">{m.label}</span>
-                    <span className={`text-[10px] font-bold ${m.color}`}>{m.value}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            <div className="px-3 py-2.5">
-              <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide mb-2">Flood Risk Assessment</p>
-              <div className="w-full h-2 rounded-full bg-muted overflow-hidden mb-1">
-                <div className="h-full rounded-full bg-blue-500 transition-all" style={{ width: `${floodPct}%` }} />
-              </div>
-              <p className="text-[9px] text-muted-foreground">{floodPct}% of farm polygon shows backscatter consistent with inundation.</p>
-              <div className={`mt-2 px-2 py-1.5 rounded-lg text-[10px] font-medium ${floodPct > 50 ? "bg-red-100 text-red-700" : floodPct > 25 ? "bg-amber-100 text-amber-700" : "bg-emerald-100 text-emerald-700"}`}>
-                {floodPct > 50 ? "High Flood Risk — Recommend field verification" : floodPct > 25 ? "Moderate — Confirm with ground survey" : "Low — SAR shows minimal inundation"}
-              </div>
-            </div>
-          </div>
+        <div className="flex-1 overflow-auto p-4">
+          {isLoading ? (
+            <p className="text-[11px] text-muted-foreground text-center py-6">Loading exposure summary…</p>
+          ) : error ? (
+            <div className="px-3 py-2 text-[11px] text-white bg-red-600 rounded-lg">{error}</div>
+          ) : result ? (
+            <ExposureTable exposure={result} />
+          ) : null}
         </div>
 
-        <div className="flex items-center justify-between px-4 py-2 border-t border-border bg-muted/20 shrink-0">
-          <p className="text-[9px] text-muted-foreground">Simulated GEE Sentinel-1 result · For assessment reference only · Verify with field data</p>
-          <button onClick={onClose} className="px-3 py-1 rounded-lg bg-[#166534] text-white text-[10px] font-semibold hover:bg-[#14532d] transition-colors">Close</button>
+        <div className="flex items-center justify-between px-5 py-3 border-t border-border shrink-0">
+          <p className="text-[10px] text-muted-foreground">
+            {result ? `${result.areas.length} municipality(ies)` : ""}
+          </p>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onRecompute}
+              disabled={isRecomputing || isLoading}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border text-xs hover:bg-muted transition-colors disabled:opacity-50"
+              title="Rebuild this typhoon's exposure from all of its bulletins"
+            >
+              <RefreshCw size={11} className={isRecomputing ? "animate-spin" : ""} />
+              {isRecomputing ? "Recomputing…" : "Recompute"}
+            </button>
+            <button onClick={onClose} className="px-3 py-1.5 rounded-lg border border-border text-xs hover:bg-muted transition-colors">Close</button>
+          </div>
         </div>
       </div>
     </div>
@@ -332,16 +518,38 @@ function SARQuickViewModal({ farmer, onClose }: { farmer: FarmerRecord; onClose:
 
 interface MonitoringModuleProps {
   darkMode: boolean;
+  selectedBulletin: Bulletin | null;
+  onSelectBulletin: (bulletin: Bulletin | null) => void;
+  onNavigateToAssessment?: () => void;
+  // Data Import / PCIC Data Upload (2026-10-22, moved from Spatial Analysis).
+  // Handlers + progress are owned by App.tsx so uploads survive tab switches.
+  csvUploadProgress: { processed: number; total: number } | null;
+  gpxUploadProgress: { current: number; total: number } | null;
+  onCsvFileSelected: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  onGpxFilesSelected: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  lastImport: ImportSummary | null;
+  onViewImportDetails: (failures: string[]) => void;
 }
 
-export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
+const SYSTEM_STATUS_REFRESH_MS = 60_000;
+// Assessment Progress strip refresh while a calculation is running.
+const PROGRESS_POLL_MS = 1000;
+
+export function MonitoringModule({
+  selectedBulletin, onSelectBulletin, onNavigateToAssessment,
+  csvUploadProgress, gpxUploadProgress, onCsvFileSelected, onGpxFilesSelected, lastImport, onViewImportDetails,
+}: MonitoringModuleProps) {
   const [bulletins, setBulletins] = useState<Bulletin[]>([]);
   const [isLoadingBulletins, setIsLoadingBulletins] = useState(false);
   const [isParsing, setIsParsing] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [lastCheck, setLastCheck] = useState<string | null>(null);
 
-  const [selectedBulletin, setSelectedBulletin] = useState<Bulletin | null>(null);
+  // Default matches the backend's own ordering (newest issued first) --
+  // chronological by issued_at, not by bulletin_count (which resets per
+  // typhoon and so isn't a true chronological key across typhoons).
+  const [bulletinSortField, setBulletinSortField] = useState<BulletinSortField>("issued_at");
+  const [bulletinSortDir, setBulletinSortDir] = useState<SortDir>("desc");
+
   const [selectedSignals, setSelectedSignals] = useState<TcbSignal[]>([]);
   const [isLoadingSelectedSignals, setIsLoadingSelectedSignals] = useState(false);
 
@@ -349,12 +557,59 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
   const [viewingSignals, setViewingSignals] = useState<TcbSignal[]>([]);
   const [isLoadingViewingSignals, setIsLoadingViewingSignals] = useState(false);
 
-  const [sarFarmer, setSarFarmer] = useState<FarmerRecord | null>(null);
+  const [exposureBulletin, setExposureBulletin] = useState<Bulletin | null>(null);
+  const [exposureResult, setExposureResult] = useState<TyphoonExposure | null>(null);
+  const [isLoadingExposure, setIsLoadingExposure] = useState(false);
+  const [isRecomputingExposure, setIsRecomputingExposure] = useState(false);
+  const [exposureError, setExposureError] = useState<string | null>(null);
 
-  const totalFarms = mockFarmers.length;
-  const plantedFarms = mockFarmers.filter(f => f.planted).length;
-  const totalArea = mockFarmers.reduce((s, f) => s + (f.planted ? f.areaHectare : 0), 0);
-  const totalIndemnity = mockFarmers.reduce((s, f) => s + f.indemnityPayment, 0);
+  const [assessmentsSummary, setAssessmentsSummary] = useState<AssessmentsSummary | null>(null);
+  const [insuranceSummary, setInsuranceSummary] = useState<InsuranceSummary | null>(null);
+  const [activeTyphoons, setActiveTyphoons] = useState<ActiveTyphoon[]>([]);
+  const [typhoonProgress, setTyphoonProgress] = useState<TyphoonProgress | null>(null);
+  const [systemStatus, setSystemStatus] = useState<SystemStatus | null>(null);
+  const [systemStatusCheckedAt, setSystemStatusCheckedAt] = useState<string | null>(null);
+
+  const loadSystemStatus = useCallback(async () => {
+    try {
+      setSystemStatus(await getSystemStatus());
+    } catch {
+      setSystemStatus(null);
+    } finally {
+      setSystemStatusCheckedAt(formatClock(new Date().toISOString()));
+    }
+  }, []);
+
+  // Refreshed every minute so the parser's last/next run stays current
+  // while the dashboard is left open.
+  useEffect(() => {
+    loadSystemStatus();
+    const id = setInterval(loadSystemStatus, SYSTEM_STATUS_REFRESH_MS);
+    return () => clearInterval(id);
+  }, [loadSystemStatus]);
+
+  const loadActiveTyphoons = useCallback(async () => {
+    try {
+      const res = await getActiveTyphoons();
+      setActiveTyphoons(res.active_typhoons);
+    } catch {
+      setActiveTyphoons([]);
+    }
+  }, []);
+
+  // Stat cards + charts all come from one server-side aggregate now
+  // (2026-08-18, stage 2 of the on-demand-pagination redesign -- see
+  // .claude/FUNCTION_CHANGES.md) instead of reducing over the full farms
+  // array + a separate unpaginated GET /assessments/ fetch client-side.
+  useEffect(() => {
+    getAssessmentsSummary().then(setAssessmentsSummary).catch(() => setAssessmentsSummary(null));
+    getInsuranceSummary().then(setInsuranceSummary).catch(() => setInsuranceSummary(null));
+    loadActiveTyphoons();
+  }, [loadActiveTyphoons]);
+
+  const totalFarms = assessmentsSummary?.total_farms ?? 0;
+  const affectedFarms = assessmentsSummary?.affected_farms ?? 0;
+  const totalArea = assessmentsSummary?.total_area ?? 0;
 
   const loadBulletins = useCallback(async () => {
     setIsLoadingBulletins(true);
@@ -362,7 +617,6 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
     try {
       const data = await getBulletins();
       setBulletins(data);
-      setLastCheck(new Date().toLocaleTimeString());
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : "Failed to load bulletins.");
     } finally {
@@ -376,20 +630,27 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
 
   const handleParseLatest = async () => {
     setIsParsing(true);
-    setLoadError(null);
     try {
-      await parseBulletins();
+      const result = await parseBulletins();
       await loadBulletins();
+      await loadActiveTyphoons();
+      loadSystemStatus();
+      toast.success(
+        result.parsed_count > 0
+          ? `Parsed ${result.parsed_count} new bulletin(s).`
+          : "No new bulletins to parse — already up to date."
+      );
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : "Failed to parse latest bulletin.");
+      toast.error(error instanceof Error ? error.message : "Failed to parse latest bulletin.");
     } finally {
       setIsParsing(false);
     }
   };
 
   const handleSelectBulletin = async (b: Bulletin) => {
-    setSelectedBulletin(prev => (prev?.tcb_id === b.tcb_id ? null : b));
-    if (selectedBulletin?.tcb_id === b.tcb_id) return;
+    const isDeselecting = selectedBulletin?.tcb_id === b.tcb_id;
+    onSelectBulletin(isDeselecting ? null : b);
+    if (isDeselecting) return;
     setSelectedSignals([]);
     setIsLoadingSelectedSignals(true);
     try {
@@ -414,6 +675,35 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
     }
   };
 
+  const handleViewExposure = async (b: Bulletin) => {
+    setExposureBulletin(b);
+    setExposureResult(null);
+    setExposureError(null);
+    setIsLoadingExposure(true);
+    try {
+      setExposureResult(await getTyphoonExposure(b.typhoon_id));
+    } catch (error) {
+      setExposureError(error instanceof Error ? error.message : "Failed to load exposure summary.");
+    } finally {
+      setIsLoadingExposure(false);
+    }
+  };
+
+  const handleRecomputeExposure = async () => {
+    if (!exposureBulletin) return;
+    setIsRecomputingExposure(true);
+    setExposureError(null);
+    try {
+      await computeExposure(exposureBulletin.tcb_id);
+      setExposureResult(await getTyphoonExposure(exposureBulletin.typhoon_id));
+      toast.success("Exposure recomputed from all of this typhoon's bulletins.");
+    } catch (error) {
+      setExposureError(error instanceof Error ? error.message : "Failed to recompute exposure.");
+    } finally {
+      setIsRecomputingExposure(false);
+    }
+  };
+
   const handleDownloadBulletinSummary = (b: Bulletin) => {
     const content = [
       "PAGASA TROPICAL CYCLONE BULLETIN",
@@ -421,7 +711,7 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
       `Cyclone: ${b.typhoon_name}`,
       `Bulletin No.: ${b.bulletin_count}`,
       `Category: ${b.category ?? "Unknown"}`,
-      `Issued: ${b.issued_at ?? "Unknown"}`,
+      `Issued: ${formatIssuedAt(b.issued_at)}`,
       `Max Sustained Winds: ${b.max_sustained_winds ?? "—"} km/h`,
       `Gustiness: ${b.gustiness ?? "—"} km/h`,
     ].join("\n");
@@ -435,18 +725,135 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
   };
 
   const latestBulletin = bulletins[0];
-  const selectedMaxSignal = maxSignalLevel(selectedSignals);
 
-  const statCards = [
-    { label:"Active Typhoon",       value: latestBulletin?.typhoon_name ?? "—", sub: latestBulletin?.category ?? "No bulletins yet", icon:<Zap size={18} />,        color:"#ef4444", bg:"bg-red-50 dark:bg-red-950/30",     border:"border-red-200 dark:border-red-900" },
-    { label:"TCBs Downloaded",      value: bulletins.length, sub:"from PAGASA parser",  icon:<Download size={18} />,   color:"#1e3a5f", bg:"bg-blue-50 dark:bg-blue-950/30",   border:"border-blue-200 dark:border-blue-900" },
-    { label:"Affected Farms",       value:`${plantedFarms}/${totalFarms}`,  sub:`${totalArea.toFixed(1)} ha planted`,icon:<Activity size={18} />, color:"#166534", bg:"bg-green-50 dark:bg-green-950/30", border:"border-green-200 dark:border-green-900" },
-    { label:"Est. Total Indemnity", value:`₱${(totalIndemnity/1000).toFixed(0)}K`, sub:"Pending finalization", icon:<BarChart2 size={18} />, color:"#ca8a04", bg:"bg-amber-50 dark:bg-amber-950/30", border:"border-amber-200 dark:border-amber-900" },
+  // Client-side sort for the bulletins table -- separate from the raw
+  // `bulletins` array (which stays in API order, newest-issued-first, for
+  // `latestBulletin` above) so sorting the table doesn't change what counts
+  // as "latest."
+  const sortedBulletins = useMemo(() => {
+    const indexed = bulletins.map((b, i) => ({ b, i }));
+    indexed.sort((x, y) => {
+      let cmp: number;
+      if (bulletinSortField === "issued_at") {
+        cmp = (x.b.issued_at ? Date.parse(x.b.issued_at) : 0) - (y.b.issued_at ? Date.parse(y.b.issued_at) : 0);
+      } else {
+        const av = x.b[bulletinSortField];
+        const cv = y.b[bulletinSortField];
+        cmp = typeof av === "number" && typeof cv === "number"
+          ? av - cv
+          : String(av ?? "").localeCompare(String(cv ?? ""));
+      }
+      if (cmp === 0) cmp = x.i - y.i; // stable tiebreak
+      return bulletinSortDir === "asc" ? cmp : -cmp;
+    });
+    return indexed.map(({ b }) => b);
+  }, [bulletins, bulletinSortField, bulletinSortDir]);
+
+  const handleBulletinSort = (field: BulletinSortField) => {
+    if (bulletinSortField === field) {
+      setBulletinSortDir(d => (d === "asc" ? "desc" : "asc"));
+    } else {
+      setBulletinSortField(field);
+      setBulletinSortDir(field === "issued_at" ? "desc" : "asc");
+    }
+  };
+
+  const BulletinSortIcon = ({ field }: { field: BulletinSortField }) =>
+    bulletinSortField === field
+      ? bulletinSortDir === "asc" ? <ChevronUp size={11} /> : <ChevronDown size={11} />
+      : <ArrowUpDown size={11} className="opacity-30" />;
+
+  const bulletinSortableCols: { label: string; field: BulletinSortField }[] = [
+    { label: "Bulletin", field: "bulletin_count" },
+    { label: "Typhoon", field: "typhoon_name" },
+    { label: "Issued", field: "issued_at" },
+    { label: "Category", field: "category" },
+    { label: "Max Winds", field: "max_sustained_winds" },
+    { label: "Gust", field: "gustiness" },
+  ];
+
+  const activeTyphoonNames = activeTyphoons.map(t => t.name).join(", ");
+
+  // TCBs Downloaded is scoped to one typhoon, not a lifetime total -- the
+  // first/primary active typhoon if there is one (per Fabio: two storms
+  // active at once is rare enough not to bother summing/listing separately),
+  // falling back to the most recently-issued bulletin's typhoon once nothing
+  // is active anymore, so the count + alert below still has something to
+  // point at right after a typhoon closes out. Matched by typhoon_id, not
+  // name -- PAGASA reuses local names across seasons.
+  const primaryTyphoonId = activeTyphoons[0]?.typhoon_id ?? bulletins[0]?.typhoon_id ?? null;
+  const primaryTyphoonName = activeTyphoons[0]?.name ?? bulletins[0]?.typhoon_name ?? null;
+  const primaryTyphoonBulletins = primaryTyphoonId !== null
+    ? bulletins.filter(b => b.typhoon_id === primaryTyphoonId)
+    : [];
+  // "Ready for assessment" = PAGASA has issued this typhoon's final bulletin
+  // (the stored is_final marker -- trailing "F" on the bulletin number, or an
+  // LPA bulletin). Replaces the earlier "no longer on PAGASA's active list"
+  // signal, which was only a stand-in while is_final wasn't persisted: a
+  // storm drops off the active list even if its final TCB was never
+  // downloaded. See .claude/FUNCTION_CHANGES.md (2026-10-09).
+  const typhoonDoneCollecting = primaryTyphoonBulletins.some(b => b.is_final);
+
+  // Progress strip follows the same typhoon as the TCBs Downloaded card, and
+  // refetches when that typhoon's bulletin count or PAR status changes.
+  const primaryTyphoonInPar = activeTyphoons.some(t => t.typhoon_id === primaryTyphoonId);
+  useEffect(() => {
+    if (primaryTyphoonId === null) {
+      setTyphoonProgress(null);
+      return;
+    }
+    let cancelled = false;
+    getTyphoonProgress(primaryTyphoonId)
+      .then(p => { if (!cancelled) setTyphoonProgress(p); })
+      .catch(() => { if (!cancelled) setTyphoonProgress(null); });
+    return () => { cancelled = true; };
+  }, [primaryTyphoonId, primaryTyphoonBulletins.length, primaryTyphoonInPar]);
+
+  // While an assessment calculation runs, follow its real progress
+  // (2026-10-22). One sequential loop -- each request waits for the last --
+  // and it stops as soon as the job is no longer processing.
+  const progressJobRunning = typhoonProgress?.active_job?.status === "processing";
+  useEffect(() => {
+    if (primaryTyphoonId === null || !progressJobRunning) return;
+    let cancelled = false;
+    (async () => {
+      while (!cancelled) {
+        await new Promise(resolve => setTimeout(resolve, PROGRESS_POLL_MS));
+        if (cancelled) return;
+        try {
+          const p = await getTyphoonProgress(primaryTyphoonId);
+          if (cancelled) return;
+          setTyphoonProgress(p);
+          if (p.active_job?.status !== "processing") return;
+        } catch {
+          return; // keep the last known state; the next mount refetches
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [primaryTyphoonId, progressJobRunning]);
+
+  const statCards: {
+    label: string; value: string | number; sub: string; icon: React.ReactNode;
+    color: string; bg: string; border: string; alert: string | null;
+  }[] = [
+    { label:"Active Typhoon",   value: activeTyphoonNames || "N/A", sub:"From PAGASA status page", icon:<Zap size={18} />,        color:"#ef4444", bg:"bg-red-50 dark:bg-red-950/30",     border:"border-red-200 dark:border-red-900", alert: null },
+    {
+      label:"TCBs Downloaded",
+      value: primaryTyphoonBulletins.length,
+      sub: primaryTyphoonName ? `for ${primaryTyphoonName}` : "No tracked typhoon yet",
+      icon: typhoonDoneCollecting ? <AlertTriangle size={18} /> : <Download size={18} />,
+      color: typhoonDoneCollecting ? "#d97706" : "#1e3a5f",
+      bg: typhoonDoneCollecting ? "bg-amber-50 dark:bg-amber-950/30" : "bg-blue-50 dark:bg-blue-950/30",
+      border: typhoonDoneCollecting ? "border-amber-300 dark:border-amber-700" : "border-blue-200 dark:border-blue-900",
+      alert: typhoonDoneCollecting ? "Ready for assessment" : null,
+    },
+    { label:"Affected Farms",   value:`${affectedFarms}/${totalFarms}`,  sub:`${totalArea.toFixed(1)} ha`,icon:<Activity size={18} />, color:"#166534", bg:"bg-green-50 dark:bg-green-950/30", border:"border-green-200 dark:border-green-900", alert: null },
+    { label:"Active Insurance", value: insuranceSummary ? `${insuranceSummary.active_count}/${insuranceSummary.total_count}` : "—", sub:"In coverage · not yet used", icon:<ShieldCheck size={18} />, color:"#7c3aed", bg:"bg-purple-50 dark:bg-purple-950/30", border:"border-purple-200 dark:border-purple-900", alert: null },
   ];
 
   return (
-    <div className="h-full overflow-auto bg-background p-4 space-y-4">
-      {sarFarmer && <SARQuickViewModal farmer={sarFarmer} onClose={() => setSarFarmer(null)} />}
+    <div className="h-full overflow-hidden bg-background p-4 flex flex-col gap-4">
       {viewingTCB && (
         <TCBViewerModal
           bulletin={viewingTCB}
@@ -455,32 +862,55 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
           onClose={() => setViewingTCB(null)}
         />
       )}
+      {exposureBulletin && (
+        <ExposureSummaryModal
+          bulletin={exposureBulletin}
+          result={exposureResult}
+          isLoading={isLoadingExposure}
+          error={exposureError}
+          isRecomputing={isRecomputingExposure}
+          onRecompute={handleRecomputeExposure}
+          onClose={() => setExposureBulletin(null)}
+        />
+      )}
 
-      {/* Stat Cards */}
-      <div className="grid grid-cols-4 gap-3">
+      {/* Stat Cards -- Est. Total Indemnity and Growth Stage/TCB Timeline
+          charts removed per Fabio's redesign; TCBs Downloaded brought back
+          but rescoped to one typhoon with a "Ready for assessment" alert. */}
+      <div className="grid grid-cols-4 gap-4 shrink-0">
         {statCards.map((c, i) => (
-          <div key={i} className={`bg-card border rounded-xl p-4 ${c.border}`}>
-            <div className="flex items-start justify-between">
+          <div key={i} className={`bg-card border rounded-xl p-5 transition-shadow hover:shadow-md ${c.border}`}>
+            <div className="flex items-center justify-between">
               <div>
-                <p className="text-[11px] text-muted-foreground uppercase tracking-wide">{c.label}</p>
-                <p className="text-2xl font-bold mt-0.5" style={{ color: c.color }}>{c.value}</p>
-                <p className="text-[10px] text-muted-foreground mt-0.5">{c.sub}</p>
+                <p className="text-[12px] text-muted-foreground uppercase tracking-wide">{c.label}</p>
+                <p className="text-3xl font-bold mt-1" style={{ color: c.color }}>{c.value}</p>
+                <p className="text-[11px] text-muted-foreground mt-1">{c.sub}</p>
               </div>
-              <div className="w-10 h-10 rounded-lg flex items-center justify-center" style={{ backgroundColor: c.color + "20", color: c.color }}>
+              <div className="w-14 h-14 rounded-xl flex items-center justify-center" style={{ backgroundColor: c.color + "20", color: c.color }}>
                 {c.icon}
               </div>
             </div>
+            {c.alert && (
+              <div className="mt-3 flex items-center gap-1.5 px-2 py-1.5 rounded-lg bg-amber-100 dark:bg-amber-900/40 text-amber-700 dark:text-amber-300">
+                <AlertTriangle size={12} className="shrink-0" />
+                <span className="text-[10px] font-medium leading-tight">{c.alert}</span>
+              </div>
+            )}
           </div>
         ))}
       </div>
 
-      <div className="grid grid-cols-3 gap-4">
+      {typhoonProgress && (
+        <TyphoonProgressStrip progress={typhoonProgress} onNavigateToAssessment={onNavigateToAssessment} />
+      )}
+
+      <div className="grid grid-cols-3 gap-4 flex-1 min-h-0">
         {/* TCB Bulletin List */}
-        <div className="col-span-2 bg-card border border-border rounded-xl flex flex-col overflow-hidden">
+        <div className="col-span-2 bg-card border border-border rounded-xl flex flex-col overflow-hidden min-h-0">
           <div className="flex items-center justify-between px-4 py-3 border-b border-border">
             <div className="flex items-center gap-2">
               <FileDown size={15} className="text-[#166534]" />
-              <span className="text-sm font-semibold">PAGASA TCB Bulletins</span>
+              <span className="text-sm font-semibold">PAGASA TCB Lists</span>
             </div>
             <button
               onClick={handleParseLatest}
@@ -496,26 +926,31 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
             <div className="px-4 py-2 text-[11px] text-white bg-red-600">{loadError}</div>
           )}
 
-          <div className="flex-1 overflow-auto">
+          {/* Fills whatever space is left in this card and scrolls internally --
+              the page itself no longer scrolls, only this list does. */}
+          <div className="flex-1 min-h-0 overflow-auto">
             {isLoadingBulletins && bulletins.length === 0 ? (
               <p className="px-4 py-3 text-[11px] text-muted-foreground">Loading bulletins…</p>
             ) : bulletins.length === 0 ? (
               <p className="px-4 py-3 text-[11px] text-muted-foreground">No bulletins parsed yet.</p>
             ) : (
               <table className="w-full text-[11px]">
-                <thead>
+                <thead className="sticky top-0 z-10 bg-card">
                   <tr className="bg-muted/50 text-muted-foreground">
-                    <th className="px-3 py-2 text-left font-semibold">Bulletin</th>
-                    <th className="px-3 py-2 text-left font-semibold">Typhoon</th>
-                    <th className="px-3 py-2 text-left font-semibold">Issued</th>
-                    <th className="px-3 py-2 text-left font-semibold">Category</th>
-                    <th className="px-3 py-2 text-left font-semibold">Max Winds</th>
-                    <th className="px-3 py-2 text-left font-semibold">Gust</th>
+                    {bulletinSortableCols.map(col => (
+                      <th
+                        key={col.field}
+                        className="px-3 py-2 text-left font-semibold cursor-pointer hover:bg-muted/80 select-none"
+                        onClick={() => handleBulletinSort(col.field)}
+                      >
+                        <span className="flex items-center gap-1">{col.label}<BulletinSortIcon field={col.field} /></span>
+                      </th>
+                    ))}
                     <th className="px-3 py-2 text-left font-semibold">Action</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {bulletins.map(b => (
+                  {sortedBulletins.map(b => (
                     <tr
                       key={b.tcb_id}
                       className={`border-t border-border hover:bg-muted/30 cursor-pointer transition-colors ${selectedBulletin?.tcb_id === b.tcb_id ? "bg-[#166534]/10" : ""}`}
@@ -523,7 +958,7 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
                     >
                       <td className="px-3 py-2.5 font-semibold">TCB No. {b.bulletin_count}</td>
                       <td className="px-3 py-2.5">{b.typhoon_name}</td>
-                      <td className="px-3 py-2.5 text-muted-foreground">{b.issued_at ?? "—"}</td>
+                      <td className="px-3 py-2.5 text-muted-foreground">{formatIssuedAt(b.issued_at)}</td>
                       <td className="px-3 py-2.5">{b.category ?? "—"}</td>
                       <td className="px-3 py-2.5">{b.max_sustained_winds ?? "—"} km/h</td>
                       <td className="px-3 py-2.5">{b.gustiness ?? "—"} km/h</td>
@@ -543,6 +978,13 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
                           >
                             <Download size={11} className="text-muted-foreground" />
                           </button>
+                          <button
+                            onClick={e => { e.stopPropagation(); handleViewExposure(b); }}
+                            className="p-1 hover:bg-muted rounded"
+                            title="View Exposure Summary (areas & exposure time)"
+                          >
+                            <MapPinned size={11} className="text-emerald-600" />
+                          </button>
                         </div>
                       </td>
                     </tr>
@@ -558,149 +1000,33 @@ export function MonitoringModule({ darkMode }: MonitoringModuleProps) {
               <div className="flex items-start justify-between px-4 py-2.5">
                 <div>
                   <p className="text-[11px] font-bold text-[#166534]">TCB No. {selectedBulletin.bulletin_count} — {selectedBulletin.typhoon_name}</p>
-                  <p className="text-[10px] text-muted-foreground">{selectedBulletin.issued_at ?? "Unknown"} · {selectedBulletin.category ?? "Unknown category"}</p>
+                  <p className="text-[10px] text-muted-foreground">{formatIssuedAt(selectedBulletin.issued_at)} · {selectedBulletin.category ?? "Unknown category"}</p>
                   <p className="text-[10px] mt-0.5">Max winds: {selectedBulletin.max_sustained_winds ?? "—"} km/h · Gust: {selectedBulletin.gustiness ?? "—"} km/h</p>
                   <p className="text-[10px] text-muted-foreground">
                     Areas: {isLoadingSelectedSignals ? "Loading…" : (uniqueAreas(selectedSignals).join(" • ") || "No signal data recorded")}
                   </p>
                 </div>
-                <button onClick={() => setSelectedBulletin(null)} className="text-muted-foreground text-[10px] hover:text-foreground mt-0.5">✕</button>
+                <button onClick={() => onSelectBulletin(null)} className="text-muted-foreground text-[10px] hover:text-foreground mt-0.5">✕</button>
               </div>
-              {/* Farmer list with SAR quick-view, cross-referenced by the bulletin's highest recorded signal level */}
-              {selectedMaxSignal > 0 && (
-                <div className="border-t border-[#166534]/20 px-4 py-2">
-                  <div className="flex items-center gap-2 mb-1.5">
-                    <Satellite size={11} className="text-[#166534]" />
-                    <p className="text-[10px] font-semibold">Farmers Under Signal No. {selectedMaxSignal} — Click to view SAR Imagery</p>
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {mockFarmers
-                      .filter(f => f.signalNo === selectedMaxSignal && f.planted)
-                      .slice(0, 10)
-                      .map(f => (
-                        <button
-                          key={f.farmId}
-                          onClick={() => setSarFarmer(f)}
-                          className="flex items-center gap-1 px-2 py-1 rounded-lg bg-card border border-border hover:bg-[#166534] hover:text-white hover:border-[#166534] transition-all group text-[10px]"
-                          title={`${f.insuredName} — ${f.municipality}`}
-                        >
-                          <MapPin size={9} className="text-[#166534] group-hover:text-white" />
-                          <span className="font-mono">{f.farmId}</span>
-                          <span className="text-muted-foreground group-hover:text-white/80 text-[9px]">{f.insuredName.split(" ").pop()}</span>
-                          <Satellite size={8} className="text-muted-foreground group-hover:text-white/80 ml-0.5" />
-                        </button>
-                      ))
-                    }
-                  </div>
-                </div>
-              )}
             </div>
           )}
         </div>
 
-        {/* Right Panel */}
-        <div className="flex flex-col gap-4">
-          {/* System Status */}
-          <div className="bg-card border border-border rounded-xl p-4">
-            <div className="flex items-center gap-2 mb-3">
-              <Wifi size={14} className="text-[#166534]" />
-              <span className="text-xs font-semibold">System Status</span>
-            </div>
-            <div className="space-y-2">
-              {[
-                { label:"Backend API",      ok: !loadError, detail: loadError ? "Unreachable" : "Connected" },
-                { label:"GEE Connection",   ok:true,  detail:"1000 EEC allocated (mock)"  },
-                { label:"Email Alerts",     ok:true,  detail:"SMTP connected (mock)"      },
-                { label:"Database Backup",  ok:false, detail:"Last: 30 Oct 2024 (mock)"   },
-                { label:"Session Monitor",  ok:true,  detail:"5-min timeout active (mock)"},
-              ].map((s, i) => (
-                <div key={i} className="flex items-center justify-between">
-                  <div className="flex items-center gap-2">
-                    {s.ok
-                      ? <CheckCircle size={11} className="text-emerald-500 shrink-0" />
-                      : <AlertTriangle size={11} className="text-amber-500 shrink-0" />
-                    }
-                    <span className="text-[11px]">{s.label}</span>
-                  </div>
-                  <span className="text-[10px] text-muted-foreground">{s.detail}</span>
-                </div>
-              ))}
-            </div>
-            <div className="mt-3 pt-2 border-t border-border flex items-center gap-1.5">
-              <Clock size={10} className="text-muted-foreground" />
-              <span className="text-[10px] text-muted-foreground">Last check: {lastCheck ?? "—"}</span>
-            </div>
-          </div>
+        {/* System Status took the slot Farms by Signal Number had (removed
+            2026-10-11 per Cristian; Growth Stage Distribution and the TCB
+            Download Timeline went 2026-10-09). */}
+        <div className="flex flex-col gap-4 min-h-0 overflow-auto">
+          <SystemStatusPanel status={systemStatus} checkedAt={systemStatusCheckedAt} />
 
-          {/* Growth Stage Pie (mock — no assessment endpoint match yet) */}
-          <div className="bg-card border border-border rounded-xl p-4 flex-1">
-            <div className="flex items-center gap-2 mb-2">
-              <TrendingUp size={14} className="text-[#ca8a04]" />
-              <span className="text-xs font-semibold">Growth Stage Distribution</span>
-            </div>
-            <ResponsiveContainer width="100%" height={130}>
-              <PieChart>
-                <Pie data={growthPieData} dataKey="value" cx="50%" cy="50%" innerRadius={30} outerRadius={55} paddingAngle={3}>
-                  {growthPieData.map((d, i) => <Cell key={i} fill={d.color} />)}
-                </Pie>
-                <RTooltip
-                  contentStyle={{ backgroundColor: darkMode ? "#111e11" : "#fff", border:"1px solid #ccc", borderRadius:6, fontSize:11 }}
-                  formatter={(v: number) => [`${v} farms`, ""]}
-                />
-              </PieChart>
-            </ResponsiveContainer>
-            <div className="flex flex-wrap gap-x-2 gap-y-1 mt-1">
-              {growthPieData.map(d => (
-                <span key={d.name} className="flex items-center gap-1 text-[10px]">
-                  <span className="w-2 h-2 rounded-sm" style={{ backgroundColor: d.color }} />
-                  {d.name} ({d.value})
-                </span>
-              ))}
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* Bottom Charts Row (mock — no assessment endpoint match yet) */}
-      <div className="grid grid-cols-2 gap-4">
-        <div className="bg-card border border-border rounded-xl p-4">
-          <div className="flex items-center gap-2 mb-3">
-            <BarChart2 size={14} className="text-[#1e3a5f]" />
-            <span className="text-xs font-semibold">Farms by Signal Number</span>
-          </div>
-          <ResponsiveContainer width="100%" height={150}>
-            <BarChart data={signalChartData} barSize={28}>
-              <CartesianGrid strokeDasharray="3 3" stroke={darkMode ? "#1c2e1c" : "#e5e7eb"} />
-              <XAxis dataKey="signal" tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
-              <RTooltip
-                contentStyle={{ backgroundColor: darkMode ? "#111e11" : "#fff", border:"1px solid #ccc", borderRadius:6, fontSize:11 }}
-              />
-              <Bar dataKey="farms"  name="Farms"       fill="#166534" radius={[4,4,0,0]} />
-              <Bar dataKey="area"   name="Area (ha)"   fill="#1e3a5f" radius={[4,4,0,0]} />
-              <Legend iconSize={10} iconType="square" wrapperStyle={{ fontSize: 10 }} />
-            </BarChart>
-          </ResponsiveContainer>
-        </div>
-
-        <div className="bg-card border border-border rounded-xl p-4">
-          <div className="flex items-center gap-2 mb-3">
-            <Activity size={14} className="text-[#ef4444]" />
-            <span className="text-xs font-semibold">TCB Download Timeline (01 Nov 2024)</span>
-          </div>
-          <ResponsiveContainer width="100%" height={150}>
-            <LineChart data={timelineData}>
-              <CartesianGrid strokeDasharray="3 3" stroke={darkMode ? "#1c2e1c" : "#e5e7eb"} />
-              <XAxis dataKey="time" tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
-              <YAxis tick={{ fontSize:10 }} axisLine={false} tickLine={false} />
-              <RTooltip
-                contentStyle={{ backgroundColor: darkMode ? "#111e11" : "#fff", border:"1px solid #ccc", borderRadius:6, fontSize:11 }}
-              />
-              <Line type="monotone" dataKey="bulletins" name="Bulletins"    stroke="#166534" strokeWidth={2} dot={{ r:3 }} />
-              <Line type="monotone" dataKey="farms"     name="Farms Logged" stroke="#ca8a04" strokeWidth={2} dot={{ r:3 }} strokeDasharray="5 3" />
-              <Legend iconSize={10} wrapperStyle={{ fontSize: 10 }} />
-            </LineChart>
-          </ResponsiveContainer>
+          {/* Directly below System Status (2026-10-22). */}
+          <DataImportPanel
+            csvUploadProgress={csvUploadProgress}
+            gpxUploadProgress={gpxUploadProgress}
+            onCsvFileSelected={onCsvFileSelected}
+            onGpxFilesSelected={onGpxFilesSelected}
+            lastImport={lastImport}
+            onViewDetails={onViewImportDetails}
+          />
         </div>
       </div>
 

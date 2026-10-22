@@ -17,6 +17,28 @@
   pointer-events: auto;
 }
 
+/* Hide hairline seams between 256px tiles at non-100% browser zoom / display
+   scaling (2026-10-13). Each tile draws one pixel larger so neighbours
+   overlap -- half a pixel still left one seam with Windows display scaling
+   and app-window zoom combined. Leaflet 1.9's own seam fix
+   (`mix-blend-mode: plus-lighter`) adds overlapping pixels together, which
+   turns that overlap into bright lines, so it's switched back to normal
+   blending here. Selector matches leaflet.css's specificity plus one class
+   so it wins regardless of order. */
+.leaflet-container .leaflet-tile-container img.leaflet-tile {
+  width: 257px !important;
+  height: 257px !important;
+  mix-blend-mode: normal;
+}
+
+/* Dark ground under the satellite tiles (Leaflet's default is light grey
+   #ddd), so a not-yet-loaded tile or any leftover gap reads as imagery
+   rather than a bright line. `div.` outranks leaflet.css's same rule, which
+   GISLeafletMap imports after this file. */
+div.leaflet-container {
+  background: #0d1f26;
+}
+
 /* Additional global styles */
 * {
   box-sizing: border-box;

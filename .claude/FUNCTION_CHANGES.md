@@ -4,6 +4,3807 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-22] - PSGC Lookup: Three More Barangay Spellings (Supersedes Two From the Entry Below)
+
+Second pass over the same legacy-system reconciliation as the
+"PSGC Lookup: Four Barangay Spellings" entry further down this file. Data only
+— no function, route, schema or API surface touched.
+
+### 1. File: `backend/app/data/psgc_nationwide_boundaries.csv`
+* `0203114030` Isabela / City of Ilagan — `Cabiseria 3` → `Cabisera 3`.
+  **Supersedes** the earlier `Cabeseria 3` → `Cabiseria 3`; the legacy spelling
+  drops the second `e` as well. Note this barangay is now the only `Cabisera`
+  in Ilagan — its siblings (`Cabeseria 19`, `23`, `25`, `6 & 24`) keep the
+  `Cabeseria` spelling, which is how the legacy data has it.
+* `0203125012` Isabela / Reina Mercedes — `Nappaccu Grande` → `Napaccu Grande`.
+* `0203125013` Isabela / Reina Mercedes — `Napaccu Pequeño` → `Nappaccu Pequeño`,
+  **reverting** the earlier change. The two edits above are one correction: the
+  single-`p` `Napaccu` spelling belongs to *Grande*, not *Pequeño*. The pair is
+  deliberately asymmetric in the legacy system — `Napaccu Grande` and
+  `Nappaccu Pequeño` — so this is not a typo to be "tidied up" later.
+
+Same rationale as the earlier entry: `_resolve_psgc_code` /
+`_municipality_alias_variants` in `backend/app/api/upload.py` only retry naming
+*conventions* (`X CITY` ↔ `CITY OF X`, `STA.` ↔ `SANTA`, trailing `(...)`), never
+letter-level spelling, so a mismatched CSV row is reported as a genuine
+missing-PSGC miss and the ingest row is rejected.
+
+### Status / Next Steps
+* PSGC codes unchanged — no foreign key moves.
+* Still needs the admin-boundary seed re-run to reach `tbl_admin_boundaries`;
+  fresh ingests use the CSV directly. This is now pending for **seven** rows
+  across the two entries, not four.
+* No automated test covers PSGC spelling; validation is an upload of a real
+  PABS export containing these barangays and confirming they no longer appear
+  in the rejected-rows report.
+
+---
+
+## [2026-10-22] - Archive & Clear Confirmed With the User's Password
+
+The Archive & Clear dialog asked the user to type `CLEAR`. It now asks for the signed-in user's own password, checked on the server, so an unattended signed-in session can't clear the live records.
+
+* **`backend/app/api/archives.py`**:
+  * `ArchiveRequest` takes `password` instead of `confirm`.
+  * `archive_and_clear()` checks it with `users._verify_password()` against `user.password_hash` before anything runs. A wrong or empty password returns 400 "Incorrect password." and logs an Activity Log entry.
+  * `GET /archives/eligibility` no longer returns `confirm_word`.
+* **`backend/app/services/archive_service.py`**: `CONFIRM_WORD` removed.
+* **`frontend/src/lib/api.ts`**: `archiveAndClear(password)` sends `{ password }`. `ArchiveEligibility` loses `confirm_word`.
+* **`frontend/src/app/components/ArchiveClearCard.tsx`**: the input is now a password field ("Enter your password to confirm"). Enter submits, and the field clears after a failed attempt.
+* **`backend/tests/test_archive_service.py`**: `test_wrong_password_is_rejected_before_anything_runs` (empty, `CLEAR`, and a near-miss) and `test_correct_password_runs_the_archive`.
+* **`.claude/API_CONTRACT.md`**: body and response updated.
+
+### 7-day wait removed
+With the password as the safeguard, Archive & Clear no longer waits 7 days after the last bulletin of every assessed typhoon. It is allowed as soon as there is live data and at least one typhoon has been assessed, locked or SAR-checked against it. That requirement is kept, so a fresh, never-assessed upload still can't be archived.
+
+* **`backend/app/services/archive_service.py`**:
+  * `CLEAR_AFTER_DAYS` removed.
+  * `_live_typhoons()` no longer returns `clear_after`.
+  * `eligibility()` loses its `now` parameter, the "too early" branch, and the `eligible_at` / `clear_after_days` fields.
+  * New archive batches' `typhoons` JSON no longer carries `clear_after`. Existing batches keep theirs, and nothing reads it.
+* **`frontend/src/lib/api.ts`**: `ArchiveTyphoon.clear_after`, `ArchiveEligibility.eligible_at` and `clear_after_days` removed.
+* **`frontend/src/app/components/ArchiveClearCard.tsx`**: the "Allowed 7 days after…", "→ clearable from …" and "Eligible after: …" text is gone. Each typhoon line still shows its last bulletin.
+* **`backend/tests/test_archive_service.py`**: the three timing tests are replaced by `test_assessed_typhoon_is_clearable_right_after_its_last_bulletin` and `test_label_names_every_assessed_typhoon`.
+
+---
+
+## [2026-10-22] - Assessment & Reporting Filter Lists
+
+* **`frontend/src/app/components/AssessmentModule.tsx`**:
+  * The **Wind Velocity** filter always lists All plus Signal 2, 3, 4 and 5 (new module constant `WIND_SIGNAL_OPTIONS`, the payout-eligible TCWS levels). It used to list only the signals present in the loaded rows, often just "Signal 2". The `signals` memo is removed.
+  * The **Municipality** filter lists only the selected typhoon's affected municipalities (every typhoon's when none is selected). Before, it listed towns from every typhoon's rows, e.g. OPONG's Surigao del Norte towns while ROSAL was selected.
+  * A new `useEffect` resets `filterMuni` to "All" when the picked town is no longer in the list, so switching typhoon can't leave the table empty under a hidden filter.
+* No backend change.
+
+---
+
+## [2026-10-22] - Signal 1 Left Out of Eligibility Counts; Explanatory Messages
+
+Payout and assessment already skipped Signal-1-only municipalities (`max_signal_level >= 2`). Signal 1 still leaked into the stored eligibility flag and the typhoon summary's farmer count. Fixed here, with the eligibility rule itself unchanged.
+
+* **`backend/app/services/exposure_calculator.py`**:
+  * `MIN_ELIGIBLE_SIGNAL` (2) and `MIN_ELIGIBLE_HOURS` (6) now live here. They moved from `assessment_service.py`, which imports this module, so defining them there would be circular.
+  * `compute_for_typhoon()` sets `is_eligible_6hr` only when `max_signal_level >= 2` **and** `payout_hours >= 6`. Before, a town with 6h or more of Signal 1 only was flagged eligible. That also inflated the "payout-eligible" count in the compute-exposure Activity Log entry.
+  * Existing rows keep the old flag until that typhoon's exposure is recomputed (the **Recompute** button). No migration.
+* **`backend/app/services/assessment_service.py`**: imports the two constants. Behaviour unchanged.
+* **`backend/app/api/bulletins.py`**: `get_typhoon_summary()`:
+  * `people_hit` now counts only farmers in TCWS 2+ municipalities.
+  * New `signal_1_only_people_hit` counts farmers whose municipality only reached Signal 1.
+  * `areas_hit`, max signal, start/end and duration are unchanged.
+* **`frontend/src/lib/api.ts`**: `TyphoonSummary` gains `signal_1_only_people_hit`.
+* **`frontend/src/app/components/AssessmentModule.tsx`**: when a typhoon has exposed areas but no farmers in Signal 2+ areas, the empty state says so, plus how many farmers were only under Signal 1. **Why:** ROSAL showed Areas Affected but an empty assessment table. Its 7 Signal 2 towns have no farms; every farm in its path was Signal 1 only.
+* **`frontend/src/app/components/GISLeafletMap.tsx`**: with an "Affected by" typhoon selected, the legend notes that affected means Signal 2+ in *any* bulletin, while the shading shows only the selected bulletin. **Why:** a town that went Signal 2 and back to Signal 1 (Calayan, ROSAL) is shaded Signal 1 but its farms are affected.
+* **`backend/app/api/upload.py`**: the GPX "No matching farmer/farm found" message adds that the farm may not be imported yet. **Why:** 378 of 1,677 GPX files failed because their CSV rows were never imported. The CSV import that ran processed 1,329 rows; the Oct 21 Region II CSV has 1,456.
+* **`backend/tests/test_exposure_calculator.py`**:
+  * New `test_signal_1_only_area_is_not_eligible_even_past_6_hours`.
+  * `SerializeSummaryTests._summary()` takes `max_signal_level`.
+
+---
+
+## [2026-10-22] - "TCWS 2+ Exposure (h)" Column in the Exposure Tables
+
+The exposure column of the Main Dashboard's Exposure Summary and Assessment & Reporting's Areas Affected (both render `ExposureTable`) is renamed from "Exposure" to **"TCWS 2+ Exposure (h)"**. It now counts only Signal 2–5 hours, so Signal 1 hours are left out. Display-only change.
+
+* **`backend/app/services/exposure_calculator.py`**: `serialize_summary()` returns a new `tcws2_plus_exposure_hours` (sum of `signal_2_hours`..`signal_5_hours`, rounded to 2 dp). The value is computed when the response is built; nothing new is stored.
+* **`frontend/src/lib/api.ts`**: `AreaExposureSummary` gains `tcws2_plus_exposure_hours`.
+* **`frontend/src/app/components/ExposureTable.tsx`**: the header reads "TCWS 2+ Exposure (h)" (header and cells centered), the cell shows `tcws2_plus_exposure_hours`, and the footnote reads "TCWS 2+ Exposure = Signal 2 + … + Signal 5 hours (Signal 1 not counted)".
+* **`backend/tests/test_exposure_calculator.py`**: new `SerializeSummaryTests`.
+
+### Not changed
+* `tbl_area_exposure_summary.total_exposure_hours` stays the Signal 1–5 sum (its CHECK constraint enforces it), as do the archive, the recompute script and the API field of the same name.
+* `payout_hours`, the payout and assessment logic, Start/End and the (ongoing)/(gap) tags are unchanged; they still reflect all signals.
+
+---
+
+## [2026-10-22] - Region III "List of Farms with GPX File" as the Official CSV Layout
+
+`docs/Region III List of Farms with GPX File_Corrected Format.csv` is now the official ingestion layout. Most of its columns were already mapped through the Region II aliases. Four gaps were closed. Decisions confirmed before implementation:
+1. **Stage labels resolve in code** through PCIC's legacy codes 0–7. No migration.
+2. **The last word of Farmer Name is the middle name** for CSV ingestion.
+3. **`StgeCode` is not read** (blank, numbering unknown).
+4. **Every row is ingested** regardless of Insurance Status.
+
+### 1. Crop stage
+* **`backend/app/services/crop_stage_resolver.py`**:
+  * New `_PCIC_STAGE_LABEL_CODES` and `pcic_label_to_code()` map PCIC's long stage names to their legacy "Stage No." code, e.g. `Mn. Tl. Stg. (EARLY VEGETATIVE)` → 1 and `Booting Stg. (REPRODUCTIVE)` → 4. An optional `N - ` prefix is accepted.
+  * `CropStageResolver.resolve()` tries this after the code and DB-label lookups. The code's own `tbl_crop_stage_mapping` row still decides `crop_stage_no` and `stage_group`.
+  * **Why:** none of the file's labels matched the table, so every row ingested with no stage. Booting, flowering and maturity policies would never have been assessed.
+  * HD/YR (8/9) are left out because their label hasn't appeared in any real file. They stay unmapped and logged.
+
+### 2. CSV row parsing
+* **`backend/app/api/upload.py`**:
+  * `prepare_row_payload()` accepts the `Amount Cover` header. Before, a filled value was silently replaced by the default rate.
+  * The combined Farmer Name is split with `full_middle_name=True`.
+  * New `_repair_enye()` is applied in `_normalize_value()` to every string cell. It turns a `�` (U+FFFD, left by re-saving the cp1252 file through a UTF-8 tool) back into **Ñ** at the start of a word or in uppercase context, otherwise **ñ**. **Why:** `SANTO NI�O` missed PSGC, and names were stored corrupted.
+  * `prepare_row_payload()` returns a `repaired_enye` flag. `_run_csv_ingestion()` counts the flagged rows and adds the count to the INGEST Activity Log remark.
+* **`backend/app/services/gpx_farmer_matcher.py`**:
+  * `parse_farmer_name()` gains keyword-only `full_middle_name` (default `False`, so GPX and GPKG behaviour is unchanged). When it is set, a trailing word that isn't an initial or a JR./SR./II–V extension becomes the middle name: `DIMALANTA, EDUARDO MENDOZA` → (`DIMALANTA`, `EDUARDO`, `MENDOZA`).
+  * Known limitation: two-word middle names such as `DELA CRUZ` split on the last word.
+
+### 3. Tests
+* `tests/test_csv_upload.py`: `RegionIIIOfficialLayoutTests` (real rows with the exact 31-column header, read as cp1252) and `RepairEnyeTests`.
+* `tests/test_crop_stage_resolver.py`: `PcicStageLabelTests`; the seed gains codes 0, 2 and 5.
+* `tests/test_gpx_farmer_matcher.py`: `ParseFullMiddleNameTests`.
+
+### Not changed
+* Mobile No., IR ID, Policy Date Issued, Commodity, planting dates, Insurance Status, Tenurial Status, Farm Name and the image/track-date columns are not stored, because storing them would need schema changes.
+* Farmers already on file are not renamed by a re-upload. Backfill fills blank fields only.
+
+---
+
+## [2026-10-22] - Per-Signal Exposure Hours, Assessment Progress, TCB Coverage, PCIC Import, Backup Verification
+
+Asked for as one batch of enhancements. Decisions confirmed before implementation:
+1. **Payout hours = hours accumulated under the Max Signal** (PCIC's `SN3_12`), not Total Exposure. Payouts change versus the old first-to-last-bulletin span.
+2. **Live-DB restore stays manual.** In-app "Verify" restores a backup into a separate verification database only.
+3. **"Portion of X" with no town list assigns nothing.** It is recorded as unresolved, never widened to the whole province.
+4. **The Google Drive copy is encrypted** (AES-256-GCM, `BACKUP_ENCRYPTION_KEY`).
+
+### 1. Exposure hours (shared backend service)
+* **`backend/app/services/exposure_calculator.py`**: rewritten.
+  * New pure `build_area_exposures()` builds per-municipality signal timelines from issuance times. The rules are in `METHODOLOGY_NOTE` and `.claude/MASTER_DEVELOPMENT_CONTEXT.md`.
+  * `compute_for_typhoon()` stores Signal 1–5 hours, `total_exposure_hours` (their sum), `payout_hours`, `island_group` and the `has_open_interval` / `has_long_gap` flags. It writes `tbl_exposure_intervals` for traceability, upserts on (typhoon, province, municipality), and loads signals in one query.
+  * Stale summaries are deleted, unless an assessment references them, in which case they are zeroed.
+  * New `serialize_summary()` is the single response shape for both exposure tables.
+* **`backend/app/services/assessment_service.py`**: eligibility and matrix lookup use `payout_hours`.
+* **`backend/app/api/bulletins.py`**:
+  * New `GET /bulletins/typhoon/{id}/exposure` returns rows plus methodology, unresolved clauses and bulletins without an issue time.
+  * `compute-exposure` and `typhoon/{id}/summary` use `serialize_summary`.
+  * Manual PDF upload recomputes exposure.
+* **Migrations**:
+  * `migrations/2026-10-22_exposure_signal_hours.sql` adds the new columns, CHECK constraints (non-negative; total = sum, `NOT VALID` for old rows) and unique constraints, plus `tbl_exposure_intervals` and `tbl_tcb_unresolved_clauses`. It stops, rather than deleting anything, if duplicates exist.
+  * `migrations/2026-10-22_archive_exposure_signal_hours.sql` is the archive DB companion; `archive_service.py` copies the new columns.
+* **`backend/scripts/recompute_exposure.py`**: recomputes every typhoon under the new rules. It is a dry run by default; `--reseed` rebuilds signal rows from the stored TCWS text and skips exported typhoons.
+
+### 2. PAGASA TCB coverage (`backend/app/services/bulletin_parser.py`)
+* `_resolve_clause`:
+  * Partial coverage without a list goes to `unresolved`, tagged `PARTIAL_COVERAGE_NOTE`.
+  * New parenthetical exclusions, e.g. `Cagayan (excluding Santa Ana)`.
+* `match_tcws_cell(..., sources=)` and the new `resolve_tcws_signals_detailed()` keep the clause each LGU came from, plus the unresolved clauses with a reason. `_seed_tcb_signals` stores `tbl_tcb_signals.source_clause` and `tbl_tcb_unresolved_clauses`.
+* `upsert_bulletin`:
+  * Stores `raw_text`, `tcws_hash` and `issued_at_parsed`.
+  * The same bulletin number with a different TCWS hash counts as a **corrected bulletin**: its signals are replaced and exposure is recomputed. Legacy rows with a NULL hash are left alone.
+* New `recompute_exposure()` runs after each new bulletin.
+* New `_run_final_bulletin_assessment()` tracks the final-bulletin auto-run as an assessment job.
+
+### 3. Assessment progress
+* New **`backend/app/core/assessment_jobs.py`**: an in-memory job registry.
+  * Stages run in order: Data Preparation → Exposure Calculation → Spatial Analysis → Indemnity Calculation → Completion. Only one is processing at a time; a failure stops the run and later stages stay pending.
+  * Percent comes from real done/total counts and reaches 100 only after the commit.
+  * One run per typhoon at a time.
+* `AssessmentService.calculate_for_bulletin(..., progress=)` reports each stage. The spatial (farm-matching) loop is split from the per-policy payout loop; the queries are unchanged.
+* **`backend/app/api/assessments.py`**:
+  * `POST /calculate` now starts a background job and returns `job_id`.
+  * New `GET /assessments/jobs/{id}` and `GET /assessments/jobs/active?typhoon_id=`.
+  * The outcome is logged as a new `ASSESS` Activity Log action.
+* **`backend/app/api/typhoons.py`**: `progress` includes `active_job`.
+* Frontend:
+  * New `AssessmentProgressBar.tsx`.
+  * `AssessmentModule.tsx` polls the job with one sequential loop and resumes a running job after a refresh.
+  * `MonitoringModule.tsx` `TyphoonProgressStrip` shows Pending / Processing / Completed / Failed strictly in order, so a later step never shows done before an earlier one. It polls only while a job runs.
+
+### 4. Exposure tables (frontend)
+* New `ExposureTable.tsx` with columns Max Signal, Signal 1–5 (hrs), Exposure (hrs), the methodology note and unresolved-clause warnings.
+* The Dashboard Exposure Summary modal and Assessment & Reporting's Areas Affected modal both read `getTyphoonExposure()`. The client-side max-signal merge was removed.
+* The dashboard modal gains a Recompute button.
+
+### 5. Formatting and renames
+* New `frontend/src/lib/format.ts` (`formatPeso`, `sumPesos`). TOTAL AC (SUM INSURED) shows e.g. ₱1,500,000.00 instead of ₱1500K. Also applied to the table footer, CSV preview footer, per-row AC and `ArchiveViewer`.
+* `Header.tsx`: "Spatial Analysis & Data Import" → **"Spatial Analysis"**. `MonitoringModule.tsx`: "PAGASA TCB Bulletins" → **"PAGASA TCB Lists"**. The `ui-prototype/` (James's) is unchanged.
+* New `DataImportPanel.tsx` on the Main Dashboard, directly below System Status. Upload CSV / Upload GPX moved there from `SpatialAnalysisModule.tsx`; the `App.tsx` handlers are unchanged, plus a `lastImport` summary.
+
+### 6. PCIC import (`backend/app/api/upload.py`, `gpx_farmer_matcher.py`, `gpx_parser.py`)
+* New CSV aliases for the real Region II export: `Province/Municipality/Barangay Address`, `Date Effectivity`, `Date Expiry`, `trackFileName`. Before this the file was rejected whole, and with the aliases alone the dates would have stayed NULL.
+* PSGC lookup:
+  * Accent-insensitive fallback (`SANTO NINO` → `SANTO NIÑO`).
+  * Bare component-city names (`ILAGAN` → `CITY OF ILAGAN`).
+  * Remaining genuine misspellings are reported per row, not guessed.
+* `.csv` is accepted when the browser reports `application/vnd.ms-excel`, `text/plain` or `octet-stream`. The result includes `rows_duplicate`.
+* New `tbl_farms.track_file_name` (`migrations/2026-10-22_farm_track_file_name.sql`). It is stored on import and backfilled on existing farms, along with `georef_id`.
+* `GpxFarmerMatcherService`:
+  * New `match_file()` matches on `track_file_name` first, then Georef ID, then the old filename parsing.
+  * The tail regex tolerates spaces and `MM-DD-YYYY` dates.
+  * Any uploader prefix is stripped (GE_, R02_, FAM02_ and so on, not just TAB_).
+  * `_pick_farm` no longer assigns a boundary to the farmer's only farm when the file's FarmID disagrees.
+* `GpxParserService` rejects out-of-range coordinates and tracks with fewer than 3 distinct points.
+
+### 7. Backups (`backend/app/services/backup_service.py`, new `app/core/backup_crypto.py`, `api/archives.py`)
+* Each dump runs inside an exported REPEATABLE READ snapshot, and per-table row counts are read from the same snapshot.
+* Each dump records its sha256 and must pass `pg_restore --list`.
+* The Drive copy is encrypted when a key is set, and Drive's md5 is compared with the local one.
+* Retention: `BACKUP_RETENTION_COUNT` local manual/scheduled files are kept.
+* New `verify_backup()` and `POST /api/backups/{id}/verify` (`source` local or gdrive, `confirm` required). They restore into `BACKUP_VERIFY_DATABASE_URL`, refuse the live DB, and compare row counts.
+* `migrations/2026-10-22_backup_verification.sql`; new `scripts/decrypt_backup.py`.
+* `DatabaseBackupModule.tsx` gains a Verified column and Verify / Verify Drive copy buttons with confirmation.
+* `BACKUP_VERIFY_DATABASE_URL` must be its own database: the live DB and the archive DB are both refused, because Verify's `pg_restore --clean` drops every table in the target.
+* `requirements.txt` pins `cryptography==50.0.1`, which was already installed transitively.
+
+### 8. Fixes found during verification
+* **`exposure_calculator.build_area_exposures`**: a signal still hoisted in the latest bulletin is now counted up to that bulletin's issue time and flagged `has_open_interval`. Before this, the whole open stretch was dropped. The `recompute_exposure.py` dry run showed ROSAL (no final bulletin yet) falling from 2,796h to 576h, and an ongoing town's Max-Signal payout hours came out 0. Nothing after the latest bulletin is counted; the next recompute extends it. `METHODOLOGY_NOTE`, `MASTER_DEVELOPMENT_CONTEXT.md` and the `ExposureTable.tsx` "(ongoing)" tooltip are updated to match.
+* **`DashboardLayout.tsx`**: the sidebar label "Spatial Analysis & Import" → "Spatial Analysis". The page header was renamed earlier, the sidebar was missed.
+* **`upload._resolve_psgc_code`**: Sta./Sto. ↔ Santa/Santo is now tried on barangays as well as municipalities, through the new shared `_saint_abbrev_variants()`. It recovers the Region II export's 11 Gattaran "SANTA ANA" rows (PSGC: "Sta. Ana"). The remaining 9 unmatched rows are real misspellings (Imurong/Imurung, Gen. Balao/Gen. Eulogio Balao, Cabisera 3/Cabeseria 3, Napaccu/Nappaccu Grande), and they are still reported per row, not guessed.
+* **Duplicate exposure rows in a different letter case.** `agrisure_db` held 17 pairs such as `Cagayan / Pamplona` + `CAGAYAN / PAMPLONA` (Pamplona, Piat, Quezon, Bayombong; typhoons 2, 3, 4, 5, 14 and 15). Recomputes updated one row and never touched the other, which kept old-rule hours. So these towns appeared twice, and every recompute reported 1–4 phantom areas. No assessment referenced either copy.
+  * **Cause:** the CSV import created missing barangays in the CSV's ALL CAPS, the old calculator stored a separate summary for that spelling, and `uq_exposure_typhoon_area` is case-sensitive.
+  * **`exposure_calculator.compute_for_typhoon`**: stored rows are now grouped case-insensitively by the new `_pick_one_per_area()`. It keeps the row an assessment references (else the oldest) and sends the rest to `_retire_stale_summaries`. The kept row is renamed to the boundary's spelling. New shared `_referenced_summary_ids()`.
+  * **`upload._ingest_row`**: a newly created boundary takes the PSGC reference file's spelling (new `_load_psgc_names()`), falling back to the CSV's ALL CAPS when the code is not in the file.
+  * **`migrations/2026-10-22_exposure_case_insensitive.sql`**: run after `recompute_exposure.py --apply`. It refuses to run while duplicates remain; it gives each municipality's boundaries the spelling of its oldest barangay; and it replaces `uq_exposure_typhoon_area` with the case-insensitive unique index `uq_exposure_typhoon_area_ci`. `init_schema.sql` is updated to match.
+
+### Tests
+* `test_exposure_calculator.py` was rewritten for the new rules, including the spec's 12 + 18 + 24 = 54h case, and an open signal counted up to the latest bulletin and later extended without double counting.
+* `test_exposure_calculator.py`: two tests for case-variant duplicate summaries.
+* `test_upload_csv_ingestion.py`: new `PsgcBarangayVariantTests`. A new boundary now takes the reference spelling (the old ALL-CAPS assertion was replaced) and keeps ALL CAPS without one. `_load_psgc_names` is patched alongside `_load_psgc_lookup`.
+* New `test_assessment_jobs.py` and `test_backup_crypto.py`.
+* `test_assessment_service.py`, `test_bulletin_parser.py`, `test_gpx_farmer_matcher.py` and `test_csv_upload.py` were extended or updated for the behaviour changes above (incl. a Region II row mapping test).
+
+---
+
+## [2026-10-22] - Archived Typhoons Readable in Assessment & Reporting
+
+Cristian asked for this as a follow-up to Archive & Clear. After a clear, the typhoon still appears in Assessment & Reporting's list (typhoons and bulletins stay live), but its rows had moved to the archive, so clicking it only said "No assessments computed yet". Now it shows those rows read-only, straight from the archive.
+
+### 1. File: `backend/app/services/archive_service.py`
+* **`archived_typhoons()`**: every archived typhoon, with the newest archive that holds it.
+* **`archived_typhoon_assessments(typhoon_id)`**: that typhoon's computed assessments from its newest archive, joined to policy, farm, farmer and boundary, plus the typhoon's max sustained winds from the archived bulletins.
+
+### 2. File: `backend/app/api/archives.py`
+* **`GET /api/archives/typhoons`** (any signed-in user): returns an empty list (not 503) when the archive isn't configured.
+* **`GET /api/archives/typhoon/{id}/pabs-rows`** (any signed-in user):
+  * Rows come back in the same shape as `GET /api/assessments/pabs-summary`.
+  * S and REMARKS are looked up live by `matrix_id` with the existing `_yield_loss_fraction` / `_pabs_remarks`; the PCIC matrices are never cleared.
+  * **404** if the typhoon was never archived.
+
+### 3. File: `frontend/src/app/components/AssessmentModule.tsx` / `frontend/src/lib/api.ts`
+* `getArchivedTyphoons()` and `getArchivedTyphoonRows()`.
+* Archived typhoons get a 🔒 **Archived** tag in the list.
+* Selecting one with no live rows loads the archived rows into the same table and totals, under a read-only banner. Live rows take priority if the typhoon was assessed again after a clear.
+* For an archived typhoon:
+  * Compute Assessments and the SAR Field Verification export are hidden.
+  * Review & Export CSV (PABS) is disabled, because that export locks policies as used.
+  * View Areas Affected works as before.
+
+### 4. File: `backend/tests/test_archive_service.py`
+* New tests: rows come back in the live PABS shape, a never-archived typhoon gives 404, and an unconfigured archive lists no archived typhoons.
+
+---
+
+## [2026-10-22] - Admin Panel & Database Backup Made Real; Archive & Clear
+
+An audit found admin controls that looked real but weren't:
+* Save All Settings only showed a toast.
+* The RSBSA coverage rate was never read by anything.
+* The Signal Damage Factor table was mock data unrelated to the real two-matrix payout engine.
+* Session Timeout and Auto-Save duplicated Account Settings.
+* The whole Database Backup tab was a mock.
+
+Cristian decided:
+* The coverage rate becomes a persisted **default** Amount of Cover.
+* The PCIC matrices are shown **read-only**.
+* The duplicate session controls are removed.
+* Backup becomes real `pg_dump` backups to Google Drive, plus **Archive & Clear**:
+  * Once every assessed typhoon is 7 days past its last bulletin, an Admin or GIS Specialist can move all uploaded PABS records and polygons into a separate **read-only archive database**.
+  * PCIC re-exports the data from PABS for the next typhoon.
+  * Archives are viewable as a table and a map, and are never restored.
+
+### 1. File: `backend/migrations/2026-10-22_system_settings_backup_log.sql` (new) / `backend/init_schema.sql`
+* `tbl_system_settings (setting_key PK, setting_value JSONB, updated_at, updated_by)`, seeded with `coverage_rate_per_ha = 25000` and `auto_backup_enabled = true`.
+* `tbl_backup_log`: one row per app-run `pg_dump` (`manual` / `scheduled` / `archive`). Holds the file, size, Drive file id and errors.
+
+### 2. File: `backend/archive_schema.sql` (new)
+* Schema for the separate `agrisure_archive` database.
+* Batch table: `tbl_archive_batch`.
+* Copied and then deleted from live: `arc_farmers`, `arc_farms` (with polygons), `arc_insurance_records`, `arc_risk_assessment`, `arc_insurance_usage`, `arc_planted_verification`, `arc_sar_planted_check`, `arc_sar_observation`.
+* Typhoon context, copied but kept live: `arc_typhoons`, `arc_tropical_cyclone_bulletins`, `arc_tcb_signals`, `arc_area_exposure_summary`, plus the referenced `arc_admin_boundaries` polygons.
+* Read-only is enforced in the database:
+  * role `agrisure_archive_reader`: SELECT only
+  * role `agrisure_archive_writer`: SELECT + INSERT only
+  * a statement trigger on every table rejects UPDATE, DELETE and TRUNCATE
+
+### 3. File: `backend/app/core/database.py`
+* `archive_reader_engine()` / `archive_writer_engine()` are built lazily from `ARCHIVE_DATABASE_URL` / `ARCHIVE_WRITER_DATABASE_URL`.
+* `ArchiveNotConfiguredError` is raised when a URL is unset, so the backend still starts without the archive.
+* `archive_configured()` reports whether both URLs are set.
+
+### 4. File: `backend/app/core/system_settings.py` (new) / `backend/app/models/models.py`
+* `get_setting()`, `set_setting()` and `get_coverage_rate()` read/write the settings, with `DEFAULTS` as the fallback.
+* New ORM models: `SystemSetting`, `BackupLog`.
+
+### 5. File: `backend/app/services/backup_service.py` (new)
+* **`run_backup(db, kind, user_id)`**:
+  * Runs `pg_dump -Fc` into `BACKUP_DIR` (default `backend/backups/`, gitignored). The password goes via `PGPASSWORD`, never on the command line.
+  * Uploads the dump to Google Drive when configured.
+  * Logs the run to `tbl_backup_log`.
+  * A failed Drive upload is recorded but never fails the backup.
+* **`upload_to_gdrive()`**: personal-Gmail OAuth refresh token, scope `drive.file`. Uses `googleapiclient`, which already ships with earthengine-api, so there is no new dependency.
+* **`backup_file_path()`**: resolves a dump on disk and refuses any path outside `BACKUP_DIR`.
+
+### 6. File: `backend/app/services/archive_service.py` (new)
+* **`eligibility(db)`**:
+  * Looks at every typhoon the live data was assessed, locked or SAR-checked against.
+  * Clearable only when there is live data, at least one such typhoon, and now ≥ each typhoon's last bulletin + `CLEAR_AFTER_DAYS` (7).
+* **`archive_and_clear(db, user)`** runs in this order:
+  1. Re-checks eligibility.
+  2. Takes a safety `pg_dump`.
+  3. In one REPEATABLE READ snapshot: counts rows, copies every table into the archive in one archive transaction, and verifies the counts.
+  4. Deletes from live, children before parents.
+  5. Commits the archive, then live.
+
+  If anything fails before the commit, nothing is deleted. A rows-uploaded-mid-archive case is neither archived nor deleted. A module lock stops two concurrent runs.
+* Read-only viewers, all using the reader login:
+  * `list_archives()`
+  * `archive_records()` and `archive_records_all()`: policy × assessment rows
+  * `archive_farms_geojson()`: farm polygons with total payout, bbox-scoped and capped at 5,000
+  * `archive_exposure_geojson()`: exposure municipality outlines plus the typhoon track
+
+### 7. File: `backend/app/api/settings.py` (new)
+* `GET /api/settings`
+* `PUT /api/settings/coverage-rate` (admin, ₱1,000–100,000)
+* `PUT /api/settings/auto-backup` (admin)
+* `GET /api/settings/matrices` (admin, read-only RECSAP and indemnity rows)
+
+### 8. File: `backend/app/api/archives.py` (new)
+* Any signed-in user:
+  * `GET /api/archives/eligibility`
+  * `POST /api/archives` (body `{"confirm": "CLEAR"}`)
+* Admin only:
+  * `GET /api/archives`
+  * `GET /api/archives/{id}/records`, `/farms`, `/exposure`, `/export` (CSV)
+  * `GET`/`POST /api/backups`
+  * `GET /api/backups/{id}/download`
+
+### 9. File: `backend/app/api/upload.py`
+* `_ingest_row()`: a blank or zero `AmountofCover` now becomes `coverage_rate_per_ha × farm.area_size` (it used to be ₱0, which made every payout for that policy ₱0). CSV values always win.
+* `_IngestCaches.coverage_rate_per_ha` reads the rate once per upload.
+* `_RowIngestResult.defaulted_ac` flags each defaulted row; the count goes into the Activity Log remarks and the job result as `rows_defaulted_ac`.
+
+### 10. File: `backend/app/core/scheduler.py`
+* **`run_scheduled_backup()`**: a cron job at 23:00 Asia/Manila (`BACKUP_JOB_ID`).
+* It reads `auto_backup_enabled` each night, so toggling it needs no reschedule.
+* Results go to the Activity Log as `SYSTEM`.
+
+### 11. File: `backend/app/main.py`
+* Registers the settings and archives routers.
+* The archive CSV export and backup downloads are now audited GETs (`_LOGGED_GET_PATTERN`).
+
+### 12. File: `backend/scripts/gdrive_authorize.py` (new)
+* A one-time OAuth loopback consent that prints `GDRIVE_REFRESH_TOKEN`. It uses only the standard library and httpx.
+
+### 13. Frontend
+* `lib/api.ts`: typed clients for every endpoint above.
+* `CalibrationModule.tsx`:
+  * The coverage rate loads from and saves to the API; Save All Settings does a real PUT.
+  * The two PCIC matrices are rendered read-only.
+  * The Session & Security section and the mock `DAMAGE_FACTORS` table are removed.
+* `App.tsx`: the dead `coverageRatePerHa` state and its props are removed.
+* `DatabaseBackupModule.tsx`:
+  * Rewritten with real last-backup/size/count, a Drive status card and a backup history with dump downloads.
+  * Run Backup Now and the 23:00 auto-backup toggle are real.
+  * Adds Archive & Clear, and an archive list with View/CSV.
+  * "Restore from Backup" is removed on purpose; restore stays a manual `pg_restore`.
+* `ArchiveClearCard.tsx` (new):
+  * Shows eligibility, live counts and per-typhoon clearable dates, and the caution text.
+  * Requires typing CLEAR to confirm, then shows the result.
+  * Used on the admin Backup tab, and at the bottom of Account Settings for GIS Specialists only. The Specialist page reloads after a clear so no screen keeps showing cleared farms.
+* `ArchiveViewer.tsx` (new):
+  * Read-only Table mode: search and pages.
+  * Map mode: Esri imagery; farm polygons coloured by payout, loaded per viewport; exposure outlines by TCWS; the typhoon track.
+  * CSV download.
+* Deleted the unused `SettingsModule.tsx`, `SpatialModule.tsx` and `Login.tsx` (imported nowhere).
+
+### 14. Tests
+* `tests/test_archive_service.py` (new) covers:
+  * the 6 vs 7 day boundary
+  * the latest typhoon setting the wait
+  * no data or no assessed typhoon is not clearable
+  * a copy mismatch aborts with no DELETE and no commit
+  * delete order
+  * a concurrent run is refused
+  * a wrong confirmation word is rejected
+* `tests/test_settings_api.py` (new) covers rate validation and persistence, and the admin-only guard.
+* `tests/test_upload_csv_ingestion.py`:
+  * The fake DB gains `tbl_system_settings`.
+  * New tests: a blank AC defaults to rate × area; a zero AC uses an admin-changed rate; a CSV AC always wins.
+
+---
+
+## [2026-10-22] - Closing the App Logs Out (Sprint 3)
+
+Explicit request: closing the app should log the user out. Before this, the
+session lived in `localStorage`, so it survived closing the tab, the installed
+PWA window, and even a browser restart. It now lives in `sessionStorage`,
+which the browser keeps across a refresh but discards when the tab or app
+window closes. Frontend only; no backend or schema change.
+
+### 1. File: `frontend/src/lib/authStorage.ts`
+* `loadPersistedUser()`, `persistUser()`, `clearPersistedUser()`,
+  `loadPersistedToken()` and `persistToken()` use `sessionStorage` instead of
+  `localStorage`. The storage keys are unchanged.
+* A one-time module-load cleanup removes the old `localStorage` copies of both
+  keys, so a session saved by an earlier build doesn't stay on disk.
+* Trade-offs, documented in the module comment:
+  * A second tab doesn't share the session and asks for login.
+  * Closing the app writes no `LOGOUT` to the Activity Log. The browser gives
+    no reliable signal that tells closing apart from refreshing, so a close
+    can't be told to the backend. The token is stateless and is simply
+    discarded with the storage.
+
+### 2. File: `frontend/src/app/App.tsx`
+* Comments only: storage references updated to `sessionStorage`.
+
+---
+
+## [2026-10-22] - Activity Log Remarks: Every Action Recorded in Detail (Sprint 3)
+
+Requested explicitly: every Activity Log entry should say exactly what was done,
+like the REMARKS column of the PABS export. Before this, an entry stored only
+action, endpoint and status, so the panel could say "Uploaded a CSV file" but
+not which file, how many records were accepted or rejected, or why a wrong
+CSV/GPX was rejected. New `remarks TEXT` column. The existing log is
+**cleared** by the migration, as requested, so the table starts in the new
+format. Also new: the two CSV export GETs, the background CSV ingestion's real
+outcome (`INGEST`), and the scheduled PAGASA TCB ingestion (`SYSTEM`) are now
+logged.
+
+### 1. File: `backend/migrations/2026-10-22_activity_log_remarks.sql` (new) / `backend/init_schema.sql`
+* `ALTER TABLE tbl_activity_log ADD COLUMN remarks TEXT`, then
+  `TRUNCATE tbl_activity_log RESTART IDENTITY` (deletes every existing entry).
+* `init_schema.sql` creates the column directly.
+
+### 2. File: `backend/app/models/models.py`
+* `ActivityLog.remarks` (`Text`, nullable).
+
+### 3. File: `backend/app/core/activity_log.py`
+* A per-request remarks holder in a `ContextVar`: **`start_request_remarks()`** /
+  **`end_request_remarks()`** (middleware), **`note_activity(text)`** (routes;
+  a no-op outside a request, so tests that call route functions directly are
+  unaffected, and no route needs a `Request` parameter), and
+  **`note_activity_error(detail)`** (exception handlers).
+* **`compose_request_remarks()`**: route remarks plus `Rejected: <error>`
+  (4xx) or `Failed: <error>` (5xx).
+* **`describe_new_bulletins()`**: one phrase per new TCB (typhoon, bulletin #,
+  category, max signal, winds, final). Shared by `/bulletins/parse`,
+  `/bulletins/upload` and the scheduler. It never raises: a lookup problem
+  falls back to the bulletin's title, so describing an ingestion can't fail
+  the route that saved it. Caught by `test_email_alert_service.py`'s
+  upload-route tests, whose mock session made the join raise.
+* **`plural()`** formatting helper.
+* **`record_activity()`** gains `remarks=None`, truncated at 2,000 characters.
+
+### 4. File: `backend/app/main.py`
+* `activity_log_middleware` opens the remarks holder, also logs
+  `_LOGGED_GET_PATHS` (the payout and SAR field-verify CSV exports), writes the
+  composed remarks, and logs an unhandled exception as a 500 before re-raising.
+  The write itself moves to the new `_log_request_activity()`.
+* New exception handlers for `HTTPException` and `RequestValidationError`.
+  They pass the error message to the log, then defer to FastAPI's default
+  handlers, so responses are unchanged.
+
+### 5. File: `backend/app/api/upload.py`
+* `upload_csv()`: new `current_user` dependency, so the uploader is passed to
+  the ingestion thread. Remarks name the file, row count and size, or why it was
+  rejected (wrong type, undecodable, missing PABS columns).
+* `_run_csv_ingestion()`: new `user_id` argument; when the job finishes it
+  writes an **`INGEST`** entry through the new **`_log_csv_outcome()`**, with
+  counts for accepted, skipped (already on file) and rejected rows, plus the
+  first 5 rejected rows and their reasons (**`_describe_failures()`**,
+  **`_csv_failure_label()`**). A rollback or crash is logged as a 500.
+* `upload_gpx()`: remarks name the farm, FARMID, farmer and barangay, the match
+  mode, and whether an existing boundary was replaced.
+* `upload_gpkg()`: counts for accepted, rejected and duplicate features, plus
+  the first rejected features and their reasons.
+
+### 6. File: `backend/app/api/bulletins.py`
+* `/parse`: number of PDFs listed and the new TCBs ingested.
+* `/upload`: the bulletin ingested, or that it was already on file.
+* `/{tcb_id}/compute-exposure`: municipalities exposed and the number with 6+
+  hours of exposure.
+* `/settings`: polling interval before → after.
+
+### 7. File: `backend/app/core/scheduler.py`
+* New **`_log_scheduled_run()`**: a **`SYSTEM`** entry when the automatic poll
+  ingests new TCBs, or when the scrape or the status sync *starts* failing. A
+  quiet poll is not logged, and an ongoing failure is not logged again on every
+  15-minute run. Wrapped in its own try/except so it can never break the job.
+
+### 8. File: `backend/app/api/users.py`
+* New **`_full_name()`** and **`_account_changes()`**: before → after phrases
+  for name, email, role, activation and session timeout. A password change is
+  named only, never logged.
+* Login records the reason for a failure (wrong password, or no account with
+  that email) and a blocked inactive account. Remarks added to register,
+  create, `/me` and `/{user_id}`, including the activation email being sent.
+
+### 9. File: `backend/app/api/assessments.py`
+* `/calculate`: policies assessed, the number with a payout, and total
+  indemnity.
+* `GET /export`: file name, rows and total.
+* `/export-pabs`: file name, rows, total, and policies newly locked (now reads
+  `finalize_exported_usage()`'s return value).
+
+### 10. File: `backend/app/api/sar.py`
+* New **`_activity_typhoon_label()`** and **`_activity_farm_label()`**.
+* Remarks for `/layer`, `/check` (planted, field-verify by reason, GEE vs
+  cache), verification set (verdict before → after, notes) and clear, and the
+  field-verify CSV export.
+
+### 11. File: `backend/app/api/activity_log.py`
+* The response includes `remarks`. `_ENDPOINT_SUMMARIES` gains `/upload/gpkg`,
+  `/sar/check`, both exports, `/export-pabs`, `INGEST` and `SYSTEM`.
+
+### 12. File: `frontend/src/lib/api.ts` / `frontend/src/app/components/ActivityLogModule.tsx`
+* `ActivityLogEntry.remarks`. New **Remarks** column (wrapping text, "—" when
+  empty), action badges for `GET` / `INGEST` / `SYSTEM`, "System" as the user
+  for scheduler entries, and the panel widened to `max-w-7xl`.
+
+### 13. File: `backend/tests/test_activity_log_remarks.py` (new)
+* Helper tests (combining remarks and errors, validation-error flattening,
+  `plural`, truncation). Middleware tests through `TestClient`: a sync route's
+  remarks reach the log along with the rejection reason; an unauthenticated
+  upload is logged as rejected; an unlogged GET writes nothing.
+
+### 14. User / Action filters and sorting (same day, explicit request)
+Filter the log to one user or one kind of action, and sort it. Filtering runs
+in the database, not the browser, so a narrowed view reaches past the newest
+rows.
+* `backend/app/api/activity_log.py`: `GET /api/activity-log/` gains
+  **`action_type`**, one summary label, translated to SQL by the new
+  **`_action_type_filter()`**. Endpoint labels use the same regex as
+  `_ENDPOINT_SUMMARIES`, through Postgres `~`. LOGIN/LOGOUT labels come from
+  **`_LOGIN_LABEL_FILTERS`** (action + status code). An unknown label returns
+  400. New **`ACTION_TYPES`** list. Entries now include `user_id`. New
+  **`GET /api/activity-log/filters`** (**`list_activity_log_filters()`**)
+  returns every account with at least one entry (admins included) plus
+  `ACTION_TYPES`.
+* `frontend/src/lib/api.ts`: `getActivityLog()` takes
+  `{ userId, actionType, limit }`; new `getActivityLogFilters()` and
+  `ActivityLogFilters`; `ActivityLogEntry.user_id`.
+* `frontend/src/app/components/ActivityLogModule.tsx`: User and Action
+  dropdowns, Clear filters, and an entry count. Clicking a user's name or a
+  summary in a row applies that filter. Timestamp, User, Summary and Status
+  headers are sortable (asc → desc → off), using the same `SortableTh` pattern
+  as User Management. Fetches 500 rows per view. A stale response for an older
+  filter is discarded.
+* `backend/tests/test_activity_log_filters.py` (new): every label is offered and
+  unique; the compiled SQL targets the right method and pattern or status;
+  unknown label → 400; no pattern shadows another's label.
+
+---
+
+## [2026-10-22] - User Management: GIS Specialists Only; Status Filter, Search, Sort (Sprint 3)
+
+Requested by Cristian. User Management is now for managing GIS Specialists
+only. System Administrator accounts are created by the superuser outside the
+app (`seed_system_users.py` / SQL), so admins can no longer see, create,
+promote to, or edit an admin account, and public registration can no longer
+request one. The rule is enforced in the API as well as the UI. The table also
+gets an All / Active / Inactive filter (default Active), name search, and
+sortable headers. These go beyond the UI prototype and were added on explicit
+request. No schema change.
+
+### 1. File: `backend/app/api/users.py`
+* `ALLOWED_ROLES` is replaced by **`MANAGED_ROLE = "GIS Specialist"`**;
+  **`_require_role()`** now rejects any other role with a 400.
+* **`RegisterRequest.role`** / **`CreateUserRequest.role`**: default to
+  `MANAGED_ROLE`, and are still validated.
+* **`list_users()`** (`GET /api/users/`): returns GIS Specialist accounts only.
+* **`update_user()`** (`PATCH /api/users/{user_id}`): a System Administrator
+  target returns 404, the same as a missing user. Promoting to admin is
+  rejected through `_require_role`.
+* `register_user()` / `create_user()`: unchanged code, but they now only
+  accept GIS Specialist via `_require_role`.
+
+### 2. File: `frontend/src/app/components/UserManagementModule.tsx`
+* Removed `USER_ROLES`, the Role dropdowns in the Add/Edit modals, and the Role
+  column. The edit payload no longer sends `role`. Add User notes that the
+  account is created as a GIS Specialist.
+* New **`SortKey` / `SortState`** types, the **`SORT_COMPARE`** map (name is
+  case-insensitive; for status, ascending puts active first), and the
+  **`SortableTh`** clickable header component.
+* New **`STATUS_FILTERS`** / **`StatusFilter`**: `All | Active | Inactive`.
+* **`UserManagementModule`**: new `search`, `sort` and `statusFilter`
+  (default `"Active"`) state; `toggleSort()` (click cycles ascending →
+  descending → off); `statusCount()` for the per-option counts; and a memoized
+  `visibleUsers` (status filter + name search, then sort). The search box and
+  segmented filter sit above the table. Name and Status are sortable.
+
+### 3. File: `frontend/src/app/components/LoginScreen.tsx`
+* **`RegistrationPanel`**: the two-option Access Role selector is replaced by
+  a fixed "GIS Specialist" badge. The `RegRole` type and the `Shield` import
+  are removed.
+
+### 4. File: `backend/tests/test_users_api.py` (new)
+* `ManagedRoleTests`: the list filters to GIS Specialist; editing an admin
+  returns 404; promoting, creating, or registering an admin returns 400; and
+  create defaults to GIS Specialist.
+
+---
+
+## [2026-10-22] - One Email per New TCB; Account Activated/Deactivated Email (Sprint 3)
+
+A new TCB arrived and the GIS Specialist got no alert. When an email did come,
+it listed every TCB the storm had. The cause: `scrape_and_save_all()` returned
+every PDF PAGASA still had posted, including bulletins already saved in earlier
+polls. The alert therefore re-listed all of them, and could re-send on every
+15-minute poll while the typhoon was active. Separately, the backend had no
+logging handler, so the INFO-level skip/send lines never reached the console.
+Per Fabio: one email per genuinely new TCB. A TCB is alerted only if its typhoon
+is active when it arrives, otherwise it is skipped (not retried later), and
+there is no schema change. Also new: the affected user (any role) is emailed
+when an admin activates or deactivates their account.
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* New **`upsert_bulletin(parsed_data, db) -> (bulletin, created)`**: the old
+  `save_bulletin_to_db` body, now also returning whether a row was inserted
+  (`True`) or an existing bulletin matched (`False`).
+* **`save_bulletin_to_db()`**: thin wrapper returning just the bulletin, so
+  existing callers (simulation scripts, tests) are unchanged.
+* **`scrape_and_save_all()`**: only returns newly inserted bulletins. Also
+  fixes Monitoring's "Parsed N new bulletin(s)" count, which counted re-seen
+  ones. The final-bulletin assessment step is unchanged.
+
+### 2. File: `backend/app/services/email_alert_service.py`
+* **`send_new_bulletin_alerts()`**: one email per new bulletin. The subject is
+  `AgriSureGIS: New PAGASA Tropical Cyclone Bulletin #<n> for <TYPHOON>`, all
+  sent over one SMTP login. The `is_active` gate and BCC-style recipients are
+  unchanged.
+* New **`send_account_status_email(email, name, activated)`**: tells that one
+  user their account was activated/deactivated. Same no-op-if-unconfigured and
+  never-raises rules.
+* New helpers **`_compose()`** / **`_send()`**, shared by both.
+
+### 3. File: `backend/app/api/bulletins.py`
+* **`upload_bulletin_pdf()`**: uses `upsert_bulletin` and only alerts when the
+  upload created a new bulletin. Re-uploading a saved PDF no longer emails.
+
+### 4. File: `backend/app/api/users.py`
+* **`update_user()`** (`PATCH /api/users/{user_id}`): when `is_active` actually
+  changes, queues `send_account_status_email` as a FastAPI background task, so
+  the admin's save doesn't wait on Brevo. Other edits send nothing.
+
+### 5. File: `backend/app/main.py`
+* Adds a console handler at INFO for the `agrisuregis.*` and `app.*` loggers
+  only (not the root logger, so httpx/apscheduler stay quiet). Lines like "No
+  newly-parsed bulletins belong to a currently-active typhoon" and "Sent N
+  bulletin alert email(s)" now show in the uvicorn console.
+
+### 6. Tests
+* `tests/test_bulletin_parser.py`: scrape tests patch `upsert_bulletin`. New
+  tests: `upsert_bulletin` reports created/not-created, and
+  `scrape_and_save_all` drops already-saved bulletins.
+* `tests/test_email_alert_service.py`: the digest test is replaced by
+  `test_one_email_per_new_bulletin`. The upload wiring test now covers
+  "re-upload sends no alert". New `AccountStatusEmailTests` and
+  `UpdateUserRouteWiringTests`.
+
+---
+
+## [2026-10-22] - PSGC Lookup: Four Barangay Spellings Aligned to the Legacy System, Plus Two Source Papers
+
+Per Fabio's working list ("updated the PSGC brgy and areas so that it would
+match the legacy system"). Data and documents only — no function, route, schema
+or API surface touched.
+
+### 1. File: `backend/app/data/psgc_nationwide_boundaries.csv`
+Four barangay names re-spelled to the form the legacy PABS exports actually
+carry, keyed by unchanged PSGC codes:
+* `0201506025` Cagayan / Baggao — `Imurung` → `Imurong`
+* `0201527041` Cagayan / Solana — `Gen. Eulogio Balao` → `Gen. Balao`
+* `0203114030` Isabela / City of Ilagan — `Cabeseria 3` → `Cabiseria 3`
+* `0203125013` Isabela / Reina Mercedes — `Nappaccu Pequeño` → `Napaccu Pequeño`
+
+**Why the CSV and not an alias rule.** `_resolve_psgc_code` /
+`_municipality_alias_variants` in `backend/app/api/upload.py` only retry
+*convention* differences — `X CITY` ↔ `CITY OF X`, `STA.` ↔ `SANTA`, a trailing
+`(...)` qualifier. All four of these are letter-level spelling differences, so
+no fallback could ever reach them; a CSV row that disagrees with the upload file
+is reported as a genuine missing-PSGC miss and the row is rejected. Correcting
+the lookup data is the only fix that does not mean inventing a per-barangay
+exception table.
+
+**Consumers that read this file** (behaviour unchanged, but they re-read it):
+`backend/app/api/upload.py` (ingestion PSGC resolution),
+`backend/seed_admin_boundaries.py` and `backend/seed_database.py` (seeding
+`tbl_admin_boundaries`), `backend/scripts/benchmark_csv_ingestion.py`. Rows
+already seeded keep the old spelling until the boundary seed is re-run — the
+PSGC codes are untouched, so no foreign key moves.
+
+### 2. Files: `docs/SEPARABILITY_OF_TRANSPLANTED_AND_DIRECT_SEEDED_RIC.pdf`,
+`docs/THE_RICE_PLANTING_WINDOW_IN_THE_PHILIPPINES_AN_ANA.pdf` (new)
+The two source papers behind the SAR planted-check reasoning, committed so the
+claims in `docs/SAR_ISPLANTED_METHOD.md` and `docs/SAR_PHASE1_VS_PHASE2.md` §7
+can be checked against the literature instead of taken on trust. Reference
+material only — nothing reads them at runtime.
+
+### Status / Next Steps
+* Re-run the admin-boundary seed to propagate the four spellings into
+  `tbl_admin_boundaries`; until then only fresh ingests benefit.
+* No automated test covers PSGC spelling. Validation is an upload of a real
+  PABS export containing one of these four barangays, confirming it no longer
+  lands in the rejected-rows report.
+* `backend/app/__pycache__/*.pyc` remains tracked from an earlier commit despite
+  `__pycache__/` being in `.gitignore`; its churn is deliberately left out of
+  this commit. Worth a `git rm --cached` in a future housekeeping pass.
+
+---
+
+## [2026-10-18] - Docs: SAR Phase 1 vs Phase 2 Explainer for the Documenter
+
+Per Fabio: a standalone document for Albritch (Documenter & System Analyst) so
+the SAR feature can be written about correctly without reading the backend.
+Documentation only — no code, schema or API surface touched.
+
+### 1. File: `docs/SAR_PHASE1_VS_PHASE2.md` (new)
+* Explicitly **non-normative**: it names `docs/SAR_ISPLANTED_METHOD.md` as the
+  spec that wins on any disagreement, so the two cannot drift into rival
+  sources of truth.
+* **Phase 1 vs Phase 2 comparison table** plus a plain-language walkthrough of
+  each: Phase 1's 24-day `VV − VH` composite read by eye (`POST /api/sar/layer`,
+  manual verdict in `tbl_planted_verification`), and Phase 2's 150-day VH /
+  VV-VH-ratio time series scored by the five conditions (`POST /api/sar/check`,
+  `tbl_sar_observation` / `tbl_sar_fetch_coverage` / `tbl_sar_planted_check`).
+* **Why Phase 2 superseded Phase 1**, stated as four defects rather than
+  preferences: a 24-day median cannot express a temporal signature; one orbit
+  for all farms left farms silently uncoloured; Earth Engine cost; and operator
+  load. Records that Phase 1 survives as an optional overlay and that
+  `/api/sar/verifications` is retired-but-readable (no frontend caller).
+* **§5 "Why not NDVI"** — written because NDVI appears in
+  `ui-prototype/.../AOISARPanel.tsx` as mock data and is easy to mistake for a
+  built feature. Notes the category error (NDVI is Sentinel-2 optical, not SAR),
+  the cloud-cover problem in the pre-event window, and that NDVI cannot express
+  C1/C3/C4 because standing water and bare soil both read low. The one
+  legitimate future use (corroborating a yellow farm) is named as unplanned.
+* **§6 "Known gaps — do not document these as finished"**: the §3.2 percentage
+  (what FR 3.4 literally asks for) is unimplemented; `RISE_VH_DB` /
+  `DROP_RATIO_DB` are still uncalibrated literature values against §6's
+  prohibition; the §7 sparkline is missing; Sentinel-1 revisit is unverified;
+  `tbl_planted_verification` is absent from the ERD.
+* **§7 verification pointers** to the method doc, `API_CONTRACT.md` §4c, the
+  classifier, the Earth Engine service, the routes and the panel, plus the two
+  source papers — so claims can be checked rather than taken on trust.
+* **§8** points at `CLAUDE.md` / `TEAM.md` for the same session's team-role
+  change instead of restating it.
+
+### Status / Next Steps
+* Nothing to test. Accurate as of commit `20c3d5e`.
+* `docs/README.md` left alone — it describes categories, not a file index.
+
+---
+
+## [2026-10-18] - Team Roles: Two Core Developers, Design and Documentation Split Out
+
+Per Fabio: the team docs described a five-person split that no longer matches
+who actually builds the system. Fabio and Cristian are the only two writing
+code; James contributes frontend *design* rather than frontend development;
+Albritch becomes the documenter of the system on top of his analyst work;
+Karylle is removed. No application code changed — `.claude/` governance only.
+
+### 1. File: `.claude/TEAM.md` (rewritten)
+* Split into **Core Developers** and **Supporting Roles**, with an explicit
+  statement that only the two core developers implement the system.
+* **Fabio** — Core Developer, Database & Backend. Keeps the DB ownership
+  (Postgres + PostGIS schema, spatial indexing, query optimization, backup and
+  recovery, the local PostgreSQL service and provisioning) and gains the
+  backend over that schema: models, migrations, ingestion, and the API routes
+  reading and writing them. Branches `fabio/db/*`, `fabio/backend/*`.
+* **Cristian** — Core Developer, Backend Logic & Frontend. Keeps FastAPI
+  architecture and API design, the PAGASA scraping pipeline and the Python GIS
+  libraries, named as owner of the assessment / exposure / SAR / payout
+  computational core, and gains frontend implementation (React components,
+  Leaflet integration, wiring screens to the API). Branches
+  `cristian/backend/*`, `cristian/frontend/*`.
+* **James** — changed from *Frontend Developer* to **Frontend Design**: the
+  `ui-prototype/` layouts, dashboard and visualization screen design, and map
+  UI presentation. A design-to-implementation boundary is stated: James
+  authors the design, the core developers implement it. Branches
+  `james/design/*` (was `james/frontend/*`).
+* **Albritch** — changed from *System Analyst* to **Documenter & System
+  Analyst**. Documentation is now his primary role and absorbs what was
+  Karylle's (architecture docs, API contract, setup/workflow guides,
+  development plan, environment guide, project context, user guides); the
+  analyst duties (payout/export requirements, use-case and workflow analysis)
+  are retained. Branches `albritch/docs/*` (was `albritch/analysis/*`).
+* **Karylle Anne Maagad** removed.
+* **Ownership is equal and undivided** (Fabio, 2026-10-18): Fabio and Cristian
+  own the whole system jointly, with no per-area owner. The listed areas are
+  labelled **Focus**, not *Owns* — where each carries the deeper context —
+  and either works anywhere in the codebase as the task requires. This also
+  keeps the existing `fabio/frontend/*` branches consistent with the doc.
+
+### 2. File: `.claude/TEAM_RESPONSIBILITIES.md` (rewritten)
+* Same split in short form, each entry carrying its branch prefixes.
+* New **design-to-implementation boundary** paragraph: `ui-prototype/` is the
+  design source of truth, and a change in appearance starts as a prototype
+  change rather than a frontend commit — making explicit whose authority
+  `CLAUDE.md`'s existing Scope Guard is enforcing.
+* `FUNCTION_CHANGES.md` is called out as the exception to Albritch's
+  documentation ownership: the developer making a change writes its entry in
+  the same commit, since it records detail only the author has.
+* States that the two hold equal ownership of the whole system and that the
+  area descriptions are focus areas, not ownership boundaries; either reviews
+  the other's PR.
+* Review workflow: the existing "DB changes go to Fabio" rule kept (he holds
+  the `sudo` and DB superuser access, which is operational, not an ownership
+  claim); a parallel rule added for appearance changes going to James; the
+  one-reviewer PR rule now says plainly that with two core developers it means
+  Fabio and Cristian review each other. The `main`/`develop` freeze rule is
+  unchanged.
+
+### 3. File: `.claude/GITHUB_WORKFLOW.md`
+* Branch-name examples updated: `james/frontend/*` and `karylle/docs/*` out;
+  `fabio/backend/*`, `cristian/frontend/*`, `james/design/*` and
+  `albritch/docs/*` in. Added a note that the prefix is the owner's and that
+  only `fabio/*` and `cristian/*` branches carry system code.
+
+### 4. File: `.claude/CLAUDE.md`
+* The opening profile lines now say Fabio is a **Core Developer (Database
+  Administrator and Backend)** and name Cristian as the other core developer.
+* **Developer Profile** role changed from "Database Admin" to "Core Developer
+  — Database Administrator & Backend".
+* New **Team at a Glance** section between Developer Profile and Current
+  Status: the two core developers named as equal owners of the whole system
+  with their focus areas, the two supporting roles, and pointers to `TEAM.md`
+  / `TEAM_RESPONSIBILITIES.md`.
+* The `sudo`/`psql` execution rule still refers to Fabio as DB Admin, which
+  remains accurate — he administers the database regardless of the wider
+  developer title.
+
+### Status / Next Steps
+* Documentation only; nothing to test. No application code, schema or API
+  surface touched.
+* Historical credits in this changelog and the existing
+  `gayla/frontend/admin-user-management` remote branch are left as they are —
+  they record what happened, not the current team. The documented prefix for
+  James stays `james/*`.
+
+---
+
+## [2026-10-18] - `.claude/` Docs Reconciled Against the Codebase (docs only, branch: develop)
+
+Fabio's ask: bring every applicable `.claude/` file back in sync with the code as
+it actually stands, starting with `API_CONTRACT.md`. **No code, schema, endpoint or
+workflow was changed** — this entry documents documentation edits only. Status was
+derived by reading `backend/app/api/`, `backend/app/core/`, `backend/app/services/`,
+`models.py`, `init_schema.sql`, `migrations/`, `frontend/src/`, and this changelog,
+at commit `a47517c` (2026-10-13).
+
+### 1. File: `.claude/API_CONTRACT.md` (rewritten)
+The worst-drifted file. It still claimed *"Authentication: not implemented in code
+yet"* and documented a planned `/api/auth/login/` with a JWT blacklist, roughly two
+months after real auth shipped.
+* **Corrected conventions:** authentication **is** implemented — router-level
+  `Depends(get_current_user)` on every protected router, `require_admin` on the
+  admin surfaces, stateless HS256 JWT with no server-side blocklist, `is_active`
+  re-checked per request, and the exact 401/403 messages. Documented the public
+  endpoints (`/users/register`, `/users/login`, `/`, `/api/test-db`), the activity-log
+  middleware, and the `Content-Disposition` CORS requirement.
+* **Corrected "Pagination: not implemented on any list endpoint yet"** — keyset
+  pagination (`limit`/`after_id`) has existed on `GET /farms/` since 2026-08-17.
+* **Documented ~20 endpoints that existed with no contract entry at all:** the whole
+  `/api/users` router (register/login/logout/list/create/`PATCH /me`/`PATCH /{id}`),
+  `GET /activity-log/`, `GET`+`PUT /bulletins/settings`, `POST /bulletins/upload`,
+  `POST /bulletins/{tcb_id}/compute-exposure`, `GET /bulletins/{tcb_id}/signals`,
+  `GET /bulletins/typhoon/{id}/summary`, `GET /typhoons/active`,
+  `GET /assessments/summary`, `GET /farms/municipalities`, `GET /farms/farmers`,
+  `GET /sar/field-verify`, `GET /sar/field-verify/export`,
+  `GET /upload/csv/status/{job_id}`, `GET /` and `GET /api/test-db`.
+* **Fixed `POST /api/upload/csv`**, which was documented with its pre-2026-08-16
+  synchronous response (`rows_processed`/`failures`). It has been an async job since:
+  it returns `{status: "processing", job_id, total_rows}` and the old fields now
+  arrive in the status endpoint's `result`. Added the 2026-10-13 wrong-file column
+  check and the cp1252 decode fallback.
+* **Filled in query params and response shapes** for `GET /farms/` (incl.
+  `has_geometry` being a boolean, not a GeoJSON blob), `GET /farms/geometry`,
+  `GET /assessments/`, `GET /assessments/export` and `GET /insurance/usage`.
+* **New §12 "Not implemented"**, recording that `DatabaseBackupModule.tsx` makes no
+  API calls (backup/restore is `pg_dump`/`pg_restore` outside the app), that nothing
+  persists a global Amount of Cover, and that GeoServer layers bypass FastAPI.
+* Noted the `/bulletins/settings` caveat: the interval is persisted and
+  reschedulable, but startup uses `scheduler.FIXED_POLL_INTERVAL_MINUTES`.
+
+### 2. Files: `.claude/DEVELOPMENT_PLAN.md` (merged) and `.claude/DEVELOPMENT_PHASE.md` (deleted)
+Per Fabio: merge into one. These two were ~95% duplicates that **disagreed with each
+other on the indemnity formula**, which is the exact failure mode a duplicate invites.
+* `DEVELOPMENT_PLAN.md` is now the single plan file (it is #2 in `CLAUDE.md`'s
+  required reading order; `DEVELOPMENT_PHASE.md` was referenced by nothing).
+* Every Sprint 1-3 task is marked **[Done]** against the file that implements it;
+  Sprint 4 is **[Mostly done]** — the payout engine and both CSV exports shipped,
+  but end-to-end manual validation against real PCIC figures has not been done.
+* **Removed the `I = (AC / 1000) * IF * Area` formula** from the old Phase 4. Area is
+  not a factor (`indemnity_calc.py:39-49`; corrected with Fabio 2026-07-23).
+* New **"Beyond the original plan — shipped, unplanned"** table, so nobody reads a
+  sprint list and concludes auth, user management, the activity log, SAR/Earth
+  Engine, email alerts, async ingestion, the PWA or the Tailscale deployment don't
+  exist.
+* New **"Known gaps"** section: no backup endpoint, `panicle initiation/booting`
+  deliberately unmapped pending PCIC, dead `PAGASA_SCRAPE_URL`, the polling-interval
+  caveat, inconsistent response envelopes.
+* **Sprint pointer deliberately left unasserted** — per Fabio, "we don't know what
+  sprint we are." The file says so explicitly and tells the reader to ask rather
+  than inferring one from a stale marker.
+
+### 3. File: `.claude/BACKEND_DATABASE_WORKFLOW.md`
+* **§2 schema list** went from 11 tables to all 21 plus the materialized view,
+  grouped into core data / reference / typhoon-bulletin / usage-audit-SAR / views.
+  Previously missing entirely: `tbl_indemnity_factor_matrix`,
+  `tbl_crop_stage_mapping`, `tbl_insurance_usage`, `tbl_parser_settings`,
+  `tbl_activity_log`, `tbl_planted_verification`, `tbl_sar_observation`,
+  `tbl_sar_fetch_coverage`, `tbl_sar_planted_check`, `mv_farm_latest_insurance`.
+  Pointed at `init_schema.sql`/`models.py`/the ERD as authoritative, and documented
+  `backend/migrations/` (14 dated files, each since folded into `init_schema.sql`).
+* Fixed the `tbl_insurance_record` → `tbl_insurance_records` typo.
+* **§3** no longer labels Sprint 1 "(Current)"; added a status note pointing at
+  `DEVELOPMENT_PLAN.md`.
+* **§4 payout formula**: dropped `\times \text{Area}`, and corrected the claim that
+  `IF` comes from `tbl_recsap_matrix` — it is a two-step lookup through
+  `tbl_indemnity_factor_matrix`, with exposure hours bucketed down to 6/12/24.
+* **Reset section** now leads with `seed_all.py`, adds the three seeders it was
+  missing (`seed_system_users.py` — **nothing can log in without it**,
+  `seed_active_insurance.py`, `prepare_ingestion_demo.py`/`reset-demo-data.bat`), and
+  mentions applying `migrations/` as the non-destructive alternative to re-running
+  `init_schema.sql`.
+
+### 4. File: `.claude/PROJECT_CONTEXT.md`
+* **Stack** gained what is actually installed and used: PyJWT + bcrypt, APScheduler,
+  `earthengine-api`, Redis, SMTP, gpxpy, httpx, the TypeScript/Radix/MUI/Recharts
+  frontend reality, the PWA, and the Tailscale Funnel + Caddy deployment. Marked
+  GeoServer, Redis, SMTP and Earth Engine as genuinely optional.
+* **Corrected `AC`**: it is read per policy from `tbl_insurance_records.amount_cover`,
+  **not** "configured in Settings" — no endpoint persists a global value. Added the
+  eligibility gate and the separate `estimated_damage` formula.
+* **Roles** now note that the two role strings are the only ones the backend accepts
+  (`ALLOWED_ROLES`), that enforcement is server-side rather than a UI convention,
+  and that backup/restore happens outside the app.
+* **Features** gained per-typhoon insurance usage locking, the advisory-only SAR
+  check, access control/activity logging, and the two export shapes.
+
+### 5. File: `.claude/MASTER_DEVELOPMENT_CONTEXT.md`
+* §2 architecture gained the scheduler, Earth Engine, auth/activity-log enforcement,
+  viewport-based geometry fetching, Redis and the materialized view.
+* **New explicit note that exposure is not a geometric footprint intersection** — it
+  is a `(province, municipality)` text join against `tbl_tcb_signals`, so it is
+  municipality-granular. Both this file and the old phase doc implied otherwise.
+* §3 now distinguishes the two crop-stage taxonomies (3-value `crop_stage_no` vs
+  PCIC's 5 groups) and why they are resolved independently.
+
+### 6. File: `.claude/GEOSERVER_SETUP.md` (rewritten host-agnostic)
+Per Fabio: "make a general setup of it." The file was written against one specific
+box (Docker on `192.168.1.41`, with Windows-console and `host.docker.internal`
+particulars) and contradicted `LOCAL_SERVER_SETUP.md`, which describes a native
+install on a different machine. It also cited *"`PROJECT_CONTEXT.md`'s remote-server
+notes"*, which do not exist in that file.
+* Now a placeholder-based runbook (`<GEOSERVER_HOST>`, `<DB_HOST>`) covering **both**
+  native and Docker installs, explicitly deferring machine-specific particulars to
+  `LOCAL_SERVER_SETUP.md`.
+* Added a `<DB_HOST>` decision table — the most common setup mistake — and noted that
+  the `agrisuregis` workspace name is load-bearing for `GISLeafletMap.tsx`.
+* States up front that GeoServer is optional and what the map falls back to.
+* Kept what remains true: the datastore/layer publishing steps, the
+  `/geoserver-proxy` CORS approach and why GeoServer's own CORS filter stays off, the
+  verification URLs, and the scope notes. Dropped the dangling cross-reference.
+
+### 7. File: `.claude/ENV_GUIDE.md`
+* `PAGASA_SCRAPE_URL` is now marked a **dead variable** — nothing reads it; the index
+  URL is hardcoded as `PAGASA_INDEX_URL` in `bulletin_parser.py`. Left in the table
+  rather than deleted because it is still in `backend/.env.example`, which is outside
+  the `.claude/`-only scope Fabio set for this pass; flagged to either wire up or drop.
+
+### 8. File: `.claude/CLAUDE.md`
+* **Current Status** replaced. It had said "Sprint 3 … Build the GPX boundary parser,
+  GeoJSON mapping, geoprocessing of storm trajectories, and exposure calculations" —
+  all four of which shipped. Now: an explicit "sprint pointer unknown, ask Fabio",
+  a summary of what is built, the known gaps, and a statement that the current-task
+  line is not a reliable source.
+
+### 9. Files: `.claude/TEAM.md`, `.claude/TEAM_RESPONSIBILITIES.md`
+Realigned with the roster `CLAUDE.md` gained during this session (which now names
+them as the authority): two **core developers who own the system equally** (Fabio —
+DB/backend; Cristian — backend logic/frontend), with focus areas explicitly "not
+boundaries"; James as frontend **design** (`ui-prototype/` as design source of
+truth); Albritch as documenter **and** system analyst. Branch-name examples updated
+to match. Karylle's entry was **kept and flagged** rather than removed, since
+`CLAUDE.md`'s roster omits her — an open question for Fabio, not a decision to make
+unilaterally. Added a practice note that history contains explicitly-authorized
+direct pushes to `develop`, so the PR rule reads as the default rather than as
+violated.
+
+### 10. Files deleted: three resolved handoff docs
+Per Fabio. All three described branches long since merged into `develop`
+(`fabio/backend/farmer-name-backfill` → `cdca63c`,
+`fabio/backend/csv-crop-stage-mapping` → the 2026-10-09 entry below,
+`fabio/frontend/affected-only-sar-filter` → `538a22d`):
+* `HANDOFF_2026-10-09_CSV_CROP_STAGE.md`
+* `HANDOFF_2026-10-09_FARMER_NAME_BACKFILL.md`
+* `HANDOFF_2026-10-12_AFFECTED_FILTER_SAR.md`
+
+`LOCAL_SERVER_SETUP.md` §8 referenced the first of these for the
+`crop_stage_no = NULL` explanation; that reasoning (Table 11 Note 1, no PCIC
+days-after-transplanting threshold, day 66 rejected as a guess, the one-statement
+`UPDATE` that enables it) was **inlined there** before deletion so nothing was lost.
+
+### 11. Also in this commit, from a parallel session (not part of the doc-sync pass)
+Fabio made these edits in another Claude Code instance while the above was in
+progress; they are committed together because they touch the same files. Items 8
+and 9 above were written to agree with them rather than overwrite them.
+* **`.claude/CLAUDE.md`** — new roster framing: Fabio restyled from "Database Admin"
+  to **Core Developer (Database Administrator & Backend)**, Cristian Aton named as
+  the other core developer (backend logic + frontend), with both stated to **own the
+  system equally — "no part of it is mine rather than his."** New "Team at a Glance"
+  section separating the two implementers from the supporting roles (James —
+  frontend design, `ui-prototype/` as design source of truth; Albritch — documenter
+  and system analyst).
+* **`.claude/GITHUB_WORKFLOW.md`** — branch-prefix examples reworked to match that
+  roster: added `fabio/backend/*`, moved `frontend/leaflet-integration` from `james/`
+  to `cristian/`, James moved to `james/design/*`, docs moved from `karylle/docs/*`
+  to `albritch/docs/*`, and a new note that the prefix is the owner's and that
+  **only `fabio/*` and `cristian/*` branches carry system code.**
+
+### Not changed
+`LOCAL_SERVER_SETUP.md` (beyond the inline above), `Initial Documentations.md`
+(interview notes — historical record), `settings.json`, and everything outside
+`.claude/` (`docs/WINDOWS_SETUP.md` also mentions the dead `PAGASA_SCRAPE_URL`;
+`backend/.env.example` still carries it) — Fabio scoped this pass to `.claude/` only.
+
+Deliberately left out of this commit: `backend/app/__pycache__/__init__.cpython-314.pyc`
+(a tracked bytecode artifact that keeps showing dirty — `__pycache__/` is gitignored
+but this file predates that, so it needs `git rm --cached` sometime), and the two
+cited SAR reference PDFs sitting untracked in `docs/` (Fabio's call, 2026-10-18:
+leave them untracked, consistent with the gitignored `USTP CAPSTONE/` copies).
+
+---
+
+## [2026-10-13] - Assessment & Reporting: Export the SAR Field Verification List (Sprint 3)
+
+Per Cristian: a way to export the farmers the automatic SAR planted check
+marked YELLOW ("field_verify") for a typhoon, so they can be sent for field
+verification. Read-only: unlike the PABS export it locks no policy, and
+AssessmentService / the PABS export still never read the SAR result.
+
+### 1. File: `backend/app/api/sar.py`
+* New **`FIELD_VERIFY_CSV_HEADERS`** and **`_field_verify_list(db, typhoon_id)`**:
+  the typhoon's `field_verify` rows from `tbl_sar_planted_check`, limited to
+  farms eligible for insurance on that typhoon, meaning a computed
+  `RiskAssessment` (`matrix_id` set, same as the PABS rows) under one of its
+  exposure summaries. The SAR check alone covers every affected farm insured
+  at the event, which is wider (no signal/exposure/crop-stage/matrix rule).
+  Joined to farm, admin boundary, the assessed policy (CIC NO) and farmer (the
+  policy's, else the farm's). Returns `checked` (0 = check never run),
+  `assessed` (0 = Compute Assessments not run), `checked_at` and the rows.
+* New **`GET /sar/field-verify?typhoon_id=`** (JSON, for the preview) and
+  **`GET /sar/field-verify/export?typhoon_id=`** (CSV named via
+  `assessments._export_filename(..., "SAR_Field_Verification")`, AREA to 2
+  decimals; 422 if the check was never run).
+
+### 2. File: `frontend/src/lib/api.ts`
+* New **`FieldVerifyRow`**, **`FieldVerifyList`**, **`getFieldVerifyList()`**,
+  **`downloadFieldVerifyCsv()`**.
+
+### 3. File: `frontend/src/app/components/AssessmentModule.tsx`
+* New **`FieldVerifyModal`**: preview of the list (FARMER NAME, FARMERSID,
+  FARMID, CIC NO, PROVINCE, MUNICIPALITY, BARANGAY, AREA, TYPHOON_NAME, SAR
+  REASON) with farm count, eligible-farm count and total area, then Download CSV.
+* **`AssessmentModule`**: loads the list whenever the selected typhoon
+  changes; new "Export SAR Field Verification List" button with the yellow
+  count in the selected typhoon's bar. Disabled with a hint when the check
+  hasn't been run, assessments haven't been computed, or no eligible farm
+  is yellow.
+
+---
+
+## [2026-10-13] - CSV Upload: Reject a Wrong File Up Front (Sprint 3)
+
+A wrong CSV was uploaded and the system went through every row before
+reporting it as wrong. Cause: `upload_csv()` checked only the extension and
+MIME type, and a missing column never raises in `prepare_row_payload()`
+(`get()` returns `None`). So each row failed on its own in `_ingest_row()`,
+and the problem only showed up as a failure count once the job finished.
+
+### 1. File: `backend/app/api/upload.py`
+* New **`_REQUIRED_CSV_COLUMNS`**: the columns a row can't be ingested
+  without (Province, Municipality, Barangay, `Policy No.`/`CIC NO`,
+  `FARMID`/`Farm ID`). Aliases match the ones `prepare_row_payload()` already
+  accepts, so both the legacy and the newer PABS layout pass.
+* New **`_missing_csv_columns(columns)`**: compares the CSV header against
+  those groups, using the same `_normalize_header()` as row parsing.
+* **`upload_csv()`**: after `pd.read_csv` and before
+  `upload_jobs.create_job()`, it returns a 400 that lists the missing columns
+  ("No rows were imported."). No background job starts. The existing frontend
+  `catch` in `App.tsx` `handleCsvFileSelected` shows the message as an error
+  toast and a notification, so the frontend is unchanged.
+
+---
+
+## [2026-10-13] - From-Scratch Demo: Empty-DB Reset, 100 / All Active Records, One-Shot Presentation Setup (Keeps SAR) (Sprint 3)
+
+Fabio wanted the demo to start from an empty database, like a fresh
+deployment, then walk the real flow (upload CSV + GPKG → OPONG bulletins →
+alert → exposure → assessment) with the client's real Typhoon Tino export,
+and with 100 -- then optionally all -- ingested insurance records active.
+Setup data stays: users, admin boundaries, RECSAP/indemnity matrices,
+crop-stage mapping and parser settings, since nothing logs in, matches
+signals or computes indemnity without them.
+
+### 1. File: `backend/prepare_ingestion_demo.py`
+* New **`--empty`** flag (mutually exclusive with `--split-only`) and new
+  **`empty_database(confirmed)`**: skips the split and pre-ingest, asks for
+  `YES` (unless `--yes`), and truncates `CLEARED_TABLES` plus the new
+  **`EMPTY_EXTRA_TABLES`** -- SAR planted check/observation/fetch coverage,
+  TCB signals, bulletins, typhoons, activity log.
+* **`clear_farmer_data()`** now takes the table list as a parameter
+  (default unchanged: `CLEARED_TABLES`), so both modes share one TRUNCATE.
+* `--empty` deletes `simulation/opong_test_original_dates.json`
+  (**`OPONG_BACKUP_FILE`**). `RESTART IDENTITY` reuses insurance-record ids, so
+  a stale backup would make the OPONG seeder's `restore_records()` write old
+  dates onto newly uploaded, unrelated records.
+
+### 2. File: `backend/simulation/seed_opong_assessment_test.py`
+* **`TARGET_ACTIVE_RECORDS`** 20 → 100 (docstring and `--reset` message
+  follow it).
+* New **`--all`** flag (in the `--reset`/`--restore` exclusive group):
+  **`select_records(..., activate_all=True)`** drops the Surigao del Norte
+  filter, outer-joins the boundary so farms without one are included, and
+  returns every ranked record instead of the top 100. Same coverage window and
+  same backup file, so `--restore` undoes it. Rows without a boundary rank as
+  signal 0 / 0h and print `no boundary`.
+* Checked before changing: on an empty DB the ranking still has crop stages to
+  work with -- CSV ingestion creates each record's seed `RiskAssessment` row
+  (`app/api/upload.py`), which is the `prior` the ranking reads.
+
+### 3. Files: `reset-demo-data.bat`, `simulate.bat`, `backend/simulation/README.md`
+Header/usage text for `--empty`, `opong --all` and the 100-record count.
+
+### 4. File: `backend/simulation/prepare_presentation.py` (new) -- `simulate.bat ready`
+Fabio: resetting and setting up by hand (reset results, upload CSV, upload
+GPKG, seed OPONG, activate) was too slow; he wanted one command that leaves
+the data and OPONG ready, with how ingestion is shown in the presentation
+decided later. Then: keep the SAR data, delete nothing. SAR rows cascade from
+`tbl_farms` (readings, fetch coverage) and from `tbl_typhoons` (planted
+checks, field verifications), so the script deletes no farms and not OPONG.
+* **`clear_results()`**: OPONG's computed results via the seeder's existing
+  `reset_assessment()` (= `opong --reset`: computed `tbl_risk_assessment`
+  rows, OPONG's `tbl_insurance_usage` rows including export locks, the
+  used-for-OPONG mirror; crop-stage seed rows kept), skipped when there is no
+  OPONG yet; then `TRUNCATE tbl_activity_log` (Fabio's choice).
+* **`main()`**: confirm (`YES`, or `--yes`) → `clear_results()` →
+  `ingest_csv()` / `ingest_gpkg()` on the full Tino export (existing rows
+  skipped, so it only adds what's missing) → `seed_opong_assessment_test.main()`
+  with `--all`. **`--skip-ingest`** leaves out the ingestion.
+* Reuses `prepare_ingestion_demo`'s ingest functions and the OPONG seeder
+  as-is; source paths come from the seeder's `_find_ustp_dir()`.
+* `opong_test_original_dates.json` is kept: ids are stable when nothing is
+  deleted, and the seeder restores the originals from it before re-activating.
+* `simulate.bat`: new `ready` target; README: Recipe 0.
+
+---
+
+## [2026-10-13] - `backend/simulation/`: Real-Data Simulations Gathered, Fictional Ones Deleted (Sprint 3)
+
+Fabio asked for one folder holding everything needed to simulate an actual
+typhoon, then: delete the obsolete simulations, "we need the real data", and
+move OPONG out of the client export but leave the USTP CAPSTONE files alone
+because they are sensitive. Decided with him: `backend/`, not the repo root --
+these scripts import the `app` package and the venv is `backend/.venv`, so they
+need `backend/` as the working directory (the existing `reset-demo-data.bat`
+already pushd's there for the same reason); root convenience comes from a thin
+launcher instead.
+
+### 1. New folder: `backend/simulation/`
+Moved in with `git mv` (history preserved): `seed_opong_assessment_test.py`,
+`reparse_opong_bulletins.py`, `backfill_tcb_track_radius.py`, and
+`simulate_new_bulletin_alert.py` (new earlier the same day, so plain `mv`).
+* Each moved file gained a `sys.path.insert(0, <backend/>)` bootstrap, per
+  Fabio's choice of run style: `python simulation/<name>.py` from `backend/`
+  puts only `backend/simulation/` on `sys.path`, so bare `from app...` and the
+  sibling `from seed_opong_assessment_test import ...` would both fail. The
+  documented commands therefore just gain a `simulation/` prefix.
+* Documented invocations inside all four docstrings were re-prefixed. Paths
+  passed as *arguments* (e.g. `backfill --dir "../docs"`) were deliberately
+  left alone -- they resolve against the working directory, which is still
+  `backend/`.
+
+### 2. File: `backend/simulation/tcb_opong/` (new, committed on purpose)
+OPONG's 23 real PAGASA bulletin PDFs (~12 MB), moved out of the gitignored
+`USTP CAPSTONE-*/USTP CAPSTONE/TCB/`. Fabio's explicit decision not to ignore
+them: they are public PAGASA documents and the simulation set should not depend
+on a gitignored folder whose name changes per download.
+* The export's `TC Opong (Bagui)_track per TCB.csv` and `TY TINO TCB MINDA.xlsx`
+  stayed -- nothing reads them.
+* **The PCIC insurance-records CSV stayed in the gitignored export** -- real
+  farmer PII, per Fabio. `USTP_CSV` still reads it in place; only bulletins
+  moved into version control, and the constant now carries a comment saying so.
+
+### 3. File: `backend/simulation/seed_opong_assessment_test.py`
+* New **`_find_ustp_dir()`** replaces the hardcoded export folder name.
+  `USTP_DIR` was pinned to `USTP CAPSTONE-20261009T021551Z-1-001`, but that
+  name carries the Google Drive download timestamp and was **already stale on
+  Fabio's laptop** (`...-20261008T140025Z-...`) -- and a stale name fails
+  *quietly*: the TCB glob simply finds no PDFs and the script reports "no
+  bulletins" rather than a bad path. Now globs `USTP CAPSTONE-*/USTP CAPSTONE`,
+  newest first, falling back to the original literal only so the downstream
+  error message still names a concrete path. Pre-existing bug, surfaced by the
+  move; verified against the real filesystem (23 PDFs found).
+* `_REPO_ROOT` is `parent.parent.parent`, not `parent.parent` -- the file is one
+  level deeper now. The same quiet-failure mode applied here.
+* **`TCB_DIR`** prefers the committed `simulation/tcb_opong/` and falls back to
+  the export's `TCB/` for anyone who still has the PDFs only there.
+
+### 4. Deleted (Fabio's call -- obsolete now that the real exports are the test material)
+* `backend/mock_data/seed_mock_typhoon.py` (fictional "MARISOL", 2 invented
+  bulletins) and `seed_mock_typhoon_albritch.py` (fictional "ALBRITCH", 10
+  invented bulletins that bypassed the parser entirely -- "no PDFs involved").
+* `backend/mock_data/mock_farmers_talakag_claveria.csv`,
+  `mock_farmers_albritch_bukidnon.csv` and the 12 `gpx/MOCK_*.gpx` files
+  (fictional farms 900001-900012). No test or script read them -- checked.
+* `backend/cleanup_typhoon_names.py` (one-off fix for a name-parsing bug fixed
+  long ago) and `backend/seed_100k_farms.py` (synthetic scale-test seeder).
+  I recommended keeping the latter as a performance tool; Fabio chose to
+  remove it, so it is in the delete list.
+* All recoverable from git history. Rows these scripts already created in a
+  live database are untouched -- removing those is a separate psql job.
+
+### 5. File: `backend/seed_all.py`
+* `STEPS` drops `("mock_data.seed_mock_typhoon", "run_seed")` and
+  `("seed_100k_farms", "run")`, leaving 5 steps. The docstring's numbered list
+  was renumbered and now points at `simulation/README.md` for typhoon data
+  instead of carrying a mock-typhoon step.
+
+### 6. File: `backend/simulation/README.md` (new)
+The folder's entry point: what each script does, the three recipes (load OPONG
+end to end -> compute exposure/assessments in the app; simulate a new TCB
+arriving -> email alert; re-parse/backfill an already-loaded typhoon), and an
+explicit "what is deliberately not here" section on the PII CSV. Also records
+*why* the alert needs a script rather than waiting for the real path.
+
+### 7. File: `simulate.bat` (new, repo root)
+Thin launcher mirroring `reset-demo-data.bat`: `pushd backend`, then runs
+`simulation\<script>` with `backend\.venv\Scripts\python.exe`. Subcommands
+`opong` / `alert` / `reparse` / `track`, usage text when called bare, up to 9
+arguments forwarded (`shift` makes `%*` unusable, hence `%1..%9`).
+
+### 8. Files: `.claude/BACKEND_DATABASE_WORKFLOW.md`, `backend/app/api/farms.py`
+* The workflow doc's `python mock_data/seed_mock_typhoon.py` bullet now points
+  at `backend/simulation/README.md` and notes the deletion.
+* `search_farmers()`'s docstring no longer cites `seed_100k_farms.py` as the
+  reason `tbl_farmers_profile` scales with farm count; the reason itself is
+  unchanged.
+
+### Status / Next Steps
+* **The deletions in section 4 have not happened yet** -- `git rm` was refused
+  by the permission layer, so the files are still on disk and tracked while
+  sections 5 and 8 already describe them as gone. Fabio runs the removal
+  himself; until then `seed_all.py` is correct (it no longer calls them) but
+  the dead files linger.
+* Nothing in this entry has been executed against a database or the venv. The
+  `_find_ustp_dir()` glob and the new `TCB_DIR` were verified against the real
+  filesystem only (23 PDFs resolved), not by running the scripts.
+* `git mv` preserved history for the three tracked scripts; `tcb_opong/`,
+  `README.md`, `simulate.bat`, `simulate_new_bulletin_alert.py` and
+  `tests/test_email_alert_service.py` are new and still untracked.
+
+---
+
+## [2026-10-13] - Activate the New-TCB Email Alert: Upload Route Wired, One Simulation Entry Point, First Tests (Sprint 3)
+
+Fabio asked how the system informs a GIS Specialist that a new TCB has arrived,
+and for the email side to be activated so it can be tested.
+
+Two channels already existed. The in-app one is live and needed nothing: the
+15-minute scheduler parses new bulletins, `App.tsx` polls `GET /api/bulletins`
+every 60s and raises a toast + notification-bell entry ("New TCB Parsed", plus
+"Final TCB -- Ready for Assessment" for an `is_final` bulletin). The email one
+(`send_new_bulletin_alerts`, 2026-08-16) had **never run once** -- it is a no-op
+until `SMTP_HOST`/`SMTP_USER`/`SMTP_PASSWORD` are set in `backend/.env`.
+
+Tracing it surfaced that the real arrival path cannot email off-season at all:
+`/parse` raises 404 before reaching the alert step when PAGASA has nothing
+posted, and the scheduler's `sync_active_typhoons([])` sets `is_active = False`
+on every typhoon *before* the alert step -- so hand-setting `is_active = true`
+in psql and waiting for the poll is wiped in the same tick. Hence the
+simulation entry point below rather than a psql-and-wait procedure.
+
+### 1. File: `backend/app/api/bulletins.py`
+* **`upload_bulletin_pdf()`** (`POST /api/bulletins/upload`) now calls
+  `send_new_bulletin_alerts()` with the just-saved bulletin, in the same
+  `[{"tcb_id", "title", "bulletin_count", "is_final"}]` shape
+  `scrape_and_save_all()` returns. Per Fabio's explicit go-ahead -- this was
+  the one ingestion path that saved a bulletin and notified nobody, while
+  `/parse` (line 138) and the scheduler (`core/scheduler.py:72`) both alerted.
+* Deliberately **not** preceded by a `PagasaStatusService` sync, unlike
+  `/parse`: this route exists for when the PAGASA portal is unreachable, so a
+  status fetch here would either fail or -- worse -- succeed with an empty list
+  and deactivate every typhoon immediately before the `is_active` gate is
+  checked. `Typhoon.is_active` therefore reflects the last successful
+  scheduled sync.
+* Wrapped in its own `try`/`except` so a mail failure can't be reported as the
+  route's "Failed to parse PDF" 500, matching `/parse`'s treatment.
+
+### 2. File: `backend/simulate_new_bulletin_alert.py` (new)
+Single entry point for activating/exercising every call site, per Fabio's
+"make a single file to activate them all". Dry run by default -- it swaps the
+service module's own `smtplib` reference (not the global module) for
+`_RecordingSMTP` and prints the composed subject, real recipient list and body,
+so the config read, `is_active` gate, recipient query and message body all run
+for real and only the socket is faked. `--send` performs real delivery.
+* **`_preflight(db)`**: SMTP configured or which keys are missing; every
+  `is_active` user with role; the newest bulletin and its typhoon's
+  `is_active`; and an `inspect.getsource()` check that each of the three
+  ingestion paths still contains the alert call (so a removed call site shows
+  as `MISSING` rather than a stale hardcoded claim).
+* **`_mode_service()`** (default): the exact call `scheduler.py:72` makes, built
+  from a bulletin already in the database (`--tcb-id`, default newest). Writes
+  no rows and touches no network.
+* **`_mode_upload()`**: drives the real `upload_bulletin_pdf()` route function
+  with `--pdf`, proving the wiring in file 1. **Inserts a real bulletin row**.
+* **`_mode_parse()`** / **`_mode_scheduler()`**: the real `/parse` route
+  function and one real `run_scheduled_scrape()` tick. Both insert rows and
+  re-sync `is_active`; `parse` exits with a plain explanation when PAGASA
+  returns its 404.
+* **`_temporarily_active()`**: holds the typhoon active for the alert call and
+  restores the original value in a `finally` (Fabio approved the temporary
+  flip on condition of auto-revert) -- an interrupted run can't leave a storm
+  falsely active and skew the Monitoring status panel.
+* **`_dry_run_smtp()`**, **`--preview-without-smtp`**: injects a placeholder
+  SMTP config so the body can still be previewed on a machine with no
+  credentials; refused together with `--send`.
+* `--confirm-db-write` is required by `upload`/`parse`/`scheduler`, the three
+  modes that insert real bulletin rows.
+* The call-site check's import is guarded: `app.api.bulletins` pulls in
+  `app.core.security`, which raises at import time without `JWT_SECRET_KEY`.
+  That is unrelated to email alerts, so the preflight reports it in one line
+  and carries on instead of dying with a confusing traceback.
+
+### 3. File: `backend/tests/test_email_alert_service.py` (new)
+First tests for this service (it had none). Same convention as
+`test_parser_settings_api.py` -- functions called directly, no `TestClient`,
+`smtplib` patched so no socket opens. `_FakeSession`/`_FakeQuery` route
+`query(TropicalCycloneBulletin)` and `query(SystemUser)` to separate row sets,
+honouring `filter(tcb_id == ...)` so the multi-bulletin cases are real.
+* No-op paths: empty `created`; unconfigured SMTP; **partial** config (host
+  only); inactive typhoon; a `tcb_id` that no longer resolves; no active users.
+* Send paths: `SMTP(host, port, timeout=10)` + `starttls` + `login`; envelope
+  recipients are every active user; recipients stay out of the `To:` header
+  (BCC-style); `SMTP_PORT` defaults to 587; subject pluralizes and the body
+  lists each bulletin; a mixed batch lists only the active typhoon's; an
+  `OSError` from `SMTP()` never propagates.
+* `RecipientTests`: the `SystemUser` query carries exactly one criterion and it
+  mentions `is_active`.
+* `SmtpConfiguredTests`: `smtp_configured()` both ways (the Monitoring
+  "Email Alerts" row reads it).
+* `UploadRouteWiringTests`: the upload route calls the alert with the
+  just-saved bulletin, with no real PDF or database. Its `setUpClass` imports
+  `app.api.bulletins` under a throwaway `JWT_SECRET_KEY` -- Fabio's first run
+  failed here (`RuntimeError: JWT_SECRET_KEY is not set`) because the dev
+  laptop has no `backend/.env`; the test never signs a token, so requiring a
+  configured secret was wrong. The other 15 tests passed on that first run.
+
+### 4. File: `.claude/ENV_GUIDE.md`
+* New "Activating Email Alerts (new-TCB notification)" section: all three SMTP
+  keys are required; the Gmail App Password specifics (2-Step Verification
+  needed, a normal password is rejected); recipients are every active user,
+  Specialists and Administrators alike; restart the backend after editing
+  `.env`; verify with `simulate_new_bulletin_alert.py`.
+
+### Status / Next Steps
+* **Nothing here has been run** -- no `pytest`, no live database, no SMTP. Per
+  project rules the venv/DB/test commands are Fabio's to run. Needed, in order:
+  1. SMTP keys in `backend/.env` on the server machine, then a backend restart.
+  2. `python -m pytest tests/test_email_alert_service.py` from `backend/`.
+  3. `python simulate_new_bulletin_alert.py` (dry run), then `--send`.
+* Email recipients stay **every active user**, not role-filtered to GIS
+  Specialists -- Fabio's explicit choice, so Administrators keep email
+  visibility of new TCBs.
+* Still absent by design: no web push. `frontend/public/sw.js` has no `push`
+  handler, so a specialist with the PWA closed learns of a new TCB only by
+  email, never in-app until they reopen it. The bell list is also in-memory
+  React state (cleared on refresh) and `seenMaxTcbId` rebaselines per login, so
+  a TCB parsed while nobody was logged in is never announced in-app at all.
+  Flagged, not changed.
+* `frontend/src/app/components/SettingsModule.tsx` has an "Email Notifications"
+  switch that controls nothing -- the component is not mounted anywhere
+  (`App.tsx` uses `AccountSettingsModule`). Dead code; left alone.
+
+---
+
+## [2026-10-13] - Header Menus No Longer Hidden Under the Map Overlays (Sprint 3)
+
+Per Cristian. On Spatial Analysis & Data Import, the open profile (and
+notifications) menu drew under the map's overlay toggles.
+
+### 1. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* The map's outer wrapper gets Tailwind `isolate`, so Leaflet's `z-[1000]`
+  overlays stack only inside the map and the header's `z-50` menus open over
+  them. Raising the header's z-index was avoided: it would put the header
+  above the `z-50` modal backdrops used across the app.
+
+---
+
+## [2026-10-13] - Farm Details Overlap Fix, Province/Barangay Columns, Login Text (Sprint 3)
+
+Per Cristian. No schema change; the PABS CSV export is unchanged.
+
+### 1. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* Farm Details and the bottom-left legends (Farm Boundary, Signal) now share
+  one left-hand flex column, like the right-hand toggles. The panel
+  (`min-h-0 overflow-y-auto`) scrolls inside itself instead of running down
+  over the legends, which the SAR rows had made it do on short maps.
+
+### 2. Assessment & Reporting table
+* `backend/app/api/assessments.py` (`_build_pabs_rows`): rows carry the
+  farm's `barangay` (on-screen only, not in `PABS_CSV_HEADERS`).
+* `frontend/src/lib/api.ts`: `PabsAssessmentRow.barangay`.
+* `frontend/src/app/components/AssessmentModule.tsx`: new sortable
+  **Province** (before Municipality) and **Barangay** (after it) columns,
+  centered like the rest (Farmer stays left). **Typhoon** is no longer
+  sortable (removed from `SortField`; `sortableCols` entries with `f: null`
+  render a plain header). TOTAL row's first span is now 5 columns.
+* `.claude/API_CONTRACT.md`: pabs-summary lists the on-screen
+  `province`/`municipality`/`barangay` keys.
+
+### 3. File: `frontend/src/app/components/LoginScreen.tsx`
+* Card header ("Sign in to your account" + subtitle) is centered.
+* "Request system access (new staff)" link now reads "Request System Access".
+
+---
+
+## [2026-10-12] - SAR Checks Only Farms Insured When the Typhoon Hit (Sprint 3)
+
+Per Cristian: the planted check (and its colour layer) must not send every
+affected farm to Google Earth Engine. Only farms insured when the typhoon
+hit are checked, which saves Earth Engine quota on the 100K+ records with no
+usable cover. Branch: `cristian/backend/sar-insured-only`.
+
+Decision: "insured" is dated to the typhoon, not today. That differs from
+the **Active Insurance Only** button, which would drop the farms already
+exported for this typhoon and every past typhoon's expired policies. The
+table and map filter is unchanged (SAR-only scope).
+
+### 1. File: `backend/app/api/sar.py`
+* New **`_insured_at_event_farm_ids(typhoon_id, event_date)`**: farms with an
+  `InsuranceRecord` in force on the first-bulletin date
+  (`effectivity_date <= event <= expiry_date`) whose policy isn't locked as
+  used (`InsuranceUsage` final) for a **different** typhoon. A policy spent
+  on this same typhoon still counts.
+* New **`_sar_farm_filter()`**: the affected set AND the insured set.
+* `_load_affected_polygons()` and `_load_affected_farms()` take `event_date`
+  and use that filter, so uninsured farms are never sent to Earth Engine and
+  get no stored result. The 422 messages now mention insurance.
+
+### 2. Frontend
+* `SarAnalysisPanel.tsx`: the Area of Interest text says uninsured farms are
+  skipped.
+* `SpatialAnalysisModule.tsx` (SAR Reason cell) and `GISLeafletMap.tsx` (Farm
+  Details): a farm with no result reads "Not checked (not insured at the
+  typhoon)".
+
+### 3. Tests and docs
+* `test_sar_api.py` / `test_sar_planted_check.py`: the loaders are called with
+  `(typhoon_id, event_date)`. New `InsuredAtEventTests` covers the
+  event-dated window and the spent-on-another-typhoon exclusion.
+* `docs/SAR_ISPLANTED_METHOD.md`, `.claude/API_CONTRACT.md`: scope updated.
+
+### Status
+* Stored OPONG results from earlier runs still include uninsured farms until
+  the check is re-run. Re-running replaces them, and every reading comes
+  from saved data, so no Earth Engine calls are made.
+
+---
+
+## [2026-10-12] - Spatial Module: "Farm Polygon" Legend Label, Province Column (Sprint 3)
+
+Per Cristian. Frontend only; `Farm.province` was already returned by the API.
+
+### 1. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* The map legend's "Farm Boundary" entry is now labelled "Farm Polygon"
+  instead of "Surveyed (GPX)". The heading is unchanged.
+
+### 2. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* Farm Records table: added a sortable **Province** column between Farmer
+  and Municipality. `SortField` now includes `"province"`.
+* The colgroup gained a 140px column. The table width went from 1990 to
+  2130px (2330 to 2470px with the SAR columns). `tableColumnCount` went from
+  15/17 to 16/18, so the virtualization spacer rows still span the full table.
+
+---
+
+## [2026-10-12] - Registration Accepts Any Email; Optional SMTP_FROM for Brevo (Sprint 3)
+
+Per Fabio: the bulletin email alerts must be testable with real inboxes, and
+the alerts will be sent through Brevo instead of Gmail. Gmail app passwords
+are sometimes blocked.
+
+### 1. File: `frontend/src/app/components/LoginScreen.tsx`
+* `RegistrationPanel.handleSubmit()`: removed the `@pcic.gov.ph`-only check.
+  Any valid email can register now. Fabio chose "any valid email" over
+  "PCIC + Gmail only". The backend already accepted any `EmailStr`, so this
+  check only existed in the frontend.
+* The Registration email field's label changed from "Institutional Email" to
+  "Email", its placeholder to `yourname@gmail.com`, and the required-fields
+  error now says "email". The Login panel was left unchanged; it never had a
+  domain check.
+
+### 2. File: `backend/app/services/email_alert_service.py`
+* `_smtp_config()`: new `sender` key, read from optional `SMTP_FROM` and
+  falling back to `SMTP_USER`.
+* `send_new_bulletin_alerts()`: the `From:`/`To:` headers and the
+  `sendmail()` envelope sender now use `sender` instead of `user`. Brevo's
+  SMTP login is a generated ID, not a mailbox, so mail must come from a
+  verified sender. Existing Gmail setups (`SMTP_FROM` unset) behave the same
+  as before.
+
+### 3. Files: `backend/.env.example` / `.claude/ENV_GUIDE.md`
+* Documented `SMTP_FROM` and the Brevo settings
+  (`SMTP_HOST=smtp-relay.brevo.com`, port 587).
+
+### Status / Next Steps
+* Not tested end to end. It needs a Brevo account, a verified sender, and
+  the SMTP login/key in Fabio's `backend/.env`, then a backend restart and a
+  manual parse against an active typhoon.
+
+---
+
+## [2026-10-12] - Automatic SAR Planted Check, Green / Yellow, with a Sentinel-1 Cache (Sprint 3)
+
+Per Cristian: SAR now checks **every farm affected by a typhoon** (e.g.
+OPONG) on its own. Each farm comes back **green** (planted, no field visit)
+or **yellow** (needs field verification). The rule is grounded in the two
+studies in `USTP CAPSTONE/`: Gutierrez et al. 2019 (rice planting window)
+and Villano et al. 2019 (TP/DS separability). The Earth Engine imagery
+values are stored so the same farm and dates are never queried twice. This
+is Phase 2 of `docs/SAR_ISPLANTED_METHOD.md`. Branch:
+`cristian/backend/sar-planted-check`.
+
+Decisions (Cristian, 2026-10-12):
+* Green/yellow only. SAR never says "not planted".
+* Nothing further happens in-app after field verification, so the manual
+  Planted / Not planted buttons are removed from the UI.
+* The check runs from a button in the SAR panel.
+* The Phase 1 colour layer stays as an optional overlay.
+
+### 0. Per typhoon, not per bulletin (Cristian, same day)
+"Affected" now means signal 2+ in **any** of the typhoon's bulletins, and it
+is picked from a typhoon dropdown in Spatial Analysis. Before, it was the
+bulletin selected in Monitoring.
+* `backend/app/api/farms.py`:
+  * **`_affected_farm_ids(db, typhoon_id)`** matches `tbl_tcb_signals` of
+    every bulletin of the typhoon, through a `select()` on
+    `TropicalCycloneBulletin`.
+  * The `affected_bulletin_id` query parameter on `GET /farms/` and
+    `/farms/geometry` is renamed **`affected_typhoon_id`**.
+* `backend/app/core/farms_cache.py`: the cache key slot is labelled
+  `affected_t=`, so a cached per-bulletin page can't be served for a
+  same-numbered typhoon.
+* `backend/app/api/sar.py`:
+  * `LayerRequest` / `CheckRequest` take `typhoon_id`.
+  * `_event_date(db, typhoon_id)` returns 404 when the typhoon has no
+    bulletins.
+  * The layer response returns `typhoon_id` instead of `bulletin_id`.
+* `tbl_sar_planted_check.bulletin_id` is dropped from the model, the
+  migration and `init_schema.sql`. Its migration had only been applied on
+  Cristian's local DB.
+* Frontend:
+  * `App.tsx`: `affectedOnly` + derived id becomes an
+    `affectedTyphoonId` state.
+  * `SpatialAnalysisModule.tsx`: the **"Affected by" dropdown** replaces
+    the toggle. Its options are built from `getBulletins()`, newest typhoon
+    first.
+  * `SarAnalysisPanel.tsx` takes `typhoonLabel` instead of `bulletin`.
+  * `api.ts`: `getSarLayer` / `runPlantedCheck` take a typhoon id.
+  * `useFarmsData.ts` / `GISLeafletMap.tsx`: the prop is renamed.
+* Tests: `test_farms_api.py` asserts the subquery goes through
+  `tbl_tropical_cyclone_bulletins` with `typhoon_id = 42`, and
+  `test_sar_api.py` / `test_sar_planted_check.py` send `typhoon_id`.
+
+### 1. New file: `backend/app/services/sar_planted_classifier.py`
+* Pure-Python method-doc §3 rule. It needs no Earth Engine, so it can be
+  unit-tested.
+* **`classify(observations, event_date)`** returns a `CheckResult`. Status is
+  `planted` only if C1–C5 all pass; otherwise `field_verify` with the first
+  failed condition as `reason_code`. It also returns `t0_date`, `tp_date`,
+  `vh_rise_db`, `ratio_drop_db` and `scene_count`.
+* **`observation_window()`**: the 150 days before the first bulletin.
+* **`in_planting_window()`**: [A]'s Region X window, padded by 23 days.
+* **`pick_orbit_series()`**: one relative orbit per farm (the most scenes;
+  ties go to the lowest orbit).
+* **`REASON_LABELS`**: plain labels for each reason code.
+* Thresholds are named constants read from [B]'s boxplots: `RISE_VH_DB` 2.0,
+  `DROP_RATIO_DB` 1.5, `VV_VH_MAX_GAP_DAYS` 24, `MIN_OBSERVATIONS` 6. None of
+  them is a published cut-off, so they still need §6 calibration.
+
+### 2. File: `backend/app/services/gee_sar_service.py`
+* New **`fetch_backscatter_series(farms, start, end)`** returns polygon-mean
+  VV/VH (dB) per farm per scene.
+  * It keeps every descending relative orbit, with the same 20 m inward
+    buffer and 30 m focal median as the layer.
+  * Farms are chunked so no `getInfo()` returns more than
+    `MAX_ROWS_PER_REQUEST` (4000) rows.
+* New **`_descending_scenes()`** holds the shared S1 GRD filter.
+  `build_planted_layer()` now uses it, with no behaviour change.
+
+### 3. Files: `backend/app/models/models.py`, `backend/init_schema.sql`, new `backend/migrations/2026-10-12_sar_planted_check.sql`
+* **`SarObservation`** / `tbl_sar_observation`: the cached per-scene VV/VH,
+  unique per (farm, scene_date, relative_orbit).
+* **`SarFetchCoverage`** / `tbl_sar_fetch_coverage`: the date range cached
+  per farm, plus the md5 of `location_geom` it was measured on. A
+  re-uploaded GPX boundary refetches.
+* **`SarPlantedCheck`** / `tbl_sar_planted_check`: the result per farm per
+  typhoon (unique).
+* None of the three is read by the assessment or the PABS export.
+* The ERD (`docs/ERD.drawio.png`) does not have them yet.
+
+### 4. File: `backend/app/api/sar.py`
+* New **`POST /sar/check`** (`run_planted_check`):
+  * Loads the affected farms.
+  * Marks `no_boundary` and `too_small` farms yellow in PostGIS, before any
+    Earth Engine call.
+  * Fetches only the farms whose window isn't cached
+    (**`_needs_fetch()`**), stores them (**`_store_fetched()`**) and commits
+    that first.
+  * Then classifies from the cache (**`_load_observations()`**) and replaces
+    the typhoon's stored results.
+  * A fully cached re-run works with Earth Engine unconfigured.
+  * Coverage never claims the last `SCENE_INGEST_LAG_DAYS` (3), so late
+    scenes are picked up on the next run.
+* New **`GET /sar/checks?typhoon_id=`** (`list_planted_checks`) returns the
+  stored result. Helpers: `_check_to_dict()`, `_summary()`.
+* The `/verifications` endpoints and `tbl_planted_verification` are
+  unchanged and still work. They are just no longer called by the
+  frontend, so recorded verdicts stay readable.
+
+### 5. Frontend
+* `frontend/src/lib/api.ts`:
+  * New `runPlantedCheck()`, `getPlantedChecks()`, and the
+    `PlantedCheck*` types.
+  * Removed the now-unused `getPlantedVerifications` /
+    `setPlantedVerification` / `clearPlantedVerification` and the
+    `PlantedVerification` type.
+* `SarAnalysisPanel.tsx`:
+  * **Run Planted Check** is the main action.
+  * Results show checked/green/yellow counts, "Why yellow" with counts per
+    reason, and how many farms came from Earth Engine vs. saved data.
+  * Has a re-run button.
+  * The colour layer is an optional checkbox, fetched the first time it's
+    ticked.
+* `SpatialAnalysisModule.tsx`:
+  * Loads the stored check for the selected typhoon.
+  * Replaces the verdict state and handlers with `plantedCheck` /
+    `runCheck`.
+  * Adds "Planted (SAR)" and "SAR Reason" table columns.
+  * The `toast` import is removed because it is no longer used.
+* `GISLeafletMap.tsx`:
+  * `plantedVerdicts` / `onSetPlantedVerdict` / `verdictSaving` are replaced
+    by `plantedResults`.
+  * Outlines and the legend are green/yellow, using the new exported
+    `PLANTED_CHECK_COLORS` / `PLANTED_CHECK_LABELS`.
+  * Farm Details shows the result and reason read-only, with no buttons.
+
+### 6. Tests and docs
+* New `backend/tests/test_sar_planted_check.py`:
+  * Classifier tests, using a synthetic OPONG-like wet-season series for
+    each reason.
+  * `_needs_fetch` tests.
+  * `run_planted_check` tests: cached run never calls Earth Engine, 503,
+    fetch-and-store, 502.
+  * `list_planted_checks` tests.
+* `docs/SAR_ISPLANTED_METHOD.md`:
+  * The status block describes Phase 2.
+  * C4 is now "argmin(VV) within 24d of t0" ([A]'s SoS agreement), not
+    "VV rises".
+  * Correction: [B] Table 4 compares TP vs. DS rice, not growth stages.
+* `.claude/API_CONTRACT.md`: new endpoints.
+* `.claude/HANDOFF_2026-10-12_AFFECTED_FILTER_SAR.md`: stale "not built"
+  note flagged.
+
+---
+
+## [2026-10-12] - PABS REMARKS Follow PCIC's Per-Signal Remark Tables (Sprint 3)
+
+Per Cristian, from `USTP CAPSTONE/Remarks/Signal no2.png`, `no3.png` and
+`no4.png` ("Remarks on the Effect of Typhoon-Induced Strong Winds (Rice)").
+REMARKS is no longer one fixed sentence on every row.
+
+### 1. File: `backend/app/api/assessments.py`
+* `PABS_REMARKS` is replaced by **`PABS_REMARKS_BY_MATRIX`**: 27 remarks
+  keyed `(wind_signal_tcws, crop_stage_no, exposure_hours)`, the same key as
+  `tbl_recsap_matrix`. The tables' rows match the seeded matrix's 6/12/24h
+  yield-loss cells exactly; for example, signal 2 Booting is 10/15/20%.
+  * The text is copied as PCIC wrote it, including their inconsistent final
+    periods.
+  * The bottom edge of `Signal no2.png` cuts off the signal-2 24h Booting and
+    Maturity remarks. Their ending ("reduction") follows the visible signal-2
+    24h Flowering remark.
+* New **`_pabs_remarks()`** looks up the assessment's RECSAP matrix row.
+  Signal 5 (>184 kph) uses the signal-4 table, whose header covers "118-184 KPH
+  AND MORE THAN 184 KPH". It returns `None` (a blank cell) when there is no
+  matrix row or no matching remark.
+* `_build_pabs_rows()`: `REMARKS` now comes from `_pabs_remarks(a)`.
+
+### 2. Files: `frontend/src/lib/api.ts`, `frontend/src/app/components/AssessmentModule.tsx`
+* `PabsAssessmentRow.REMARKS` is now `string | null`.
+* The blue explanatory notice at the top of "Review CSV Before Downloading"
+  is removed (per Cristian). The modal goes straight from its title bar to the
+  table. `AlertCircle` stays imported because it is still used elsewhere in
+  the module.
+
+### 3. File: `.claude/API_CONTRACT.md`
+* REMARKS description updated.
+
+---
+
+## [2026-10-12] - Farm ID Shows PCIC's FARMID Everywhere; Farmer Names Left-Aligned (Sprint 3)
+
+Per Fabio: every on-screen Farm ID now follows the PABS-given FARMID
+(`csv_farm_reference`, e.g. `1347041`), never the database `farm_id`. The
+`#` prefix is dropped. `farm_id` stays the internal key for selection, map
+lookups and API calls.
+
+### 1. File: `frontend/src/app/components/AssessmentModule.tsx`
+* The table's Farm ID cell shows `r.FARMID` (PCIC's), the same value as the CSV.
+* Farmer names are left-aligned (header and cells) in both the assessment table
+  and the CSV preview. Every other column stays centered.
+
+### 2. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* The pinned Farm ID column shows `f.csv_farm_reference`, or "—" when absent.
+  It sorts on that field: `SortField` `"farm_id"` becomes
+  `"csv_farm_reference"`, and that is also the default sort.
+* The table sort now uses `localeCompare(..., { numeric: true })`, so digit
+  strings order numerically.
+
+### 3. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* The map's Farm Details card shows "Farm ID <PCIC FARMID>" instead of
+  "Farm #<db id>".
+
+### 4. Files: `backend/app/api/assessments.py`, `frontend/src/lib/api.ts`, `.claude/API_CONTRACT.md`
+* The non-exported `farm_id` key added earlier today is removed from the PABS
+  rows, since nothing reads it any more.
+
+---
+
+## [2026-10-12] - PABS CSV Uses PCIC's Exact Headers + PCIC FARMID; Assessment Table Centered + Crop Stage (Sprint 3)
+
+Per Fabio. The header source is PCIC's "The final Output" image
+(`USTP CAPSTONE/INSURANCE RECORDS/722244805_…_n.png`). The folder's PPT,
+`RECSAP-From-IRR.pptx`, only holds RECSAP matrices and has no column names.
+
+### 1. File: `backend/app/api/assessments.py`
+* New **`PABS_CSV_HEADERS`**: maps each row key to its exact CSV header, in
+  export order: `FARMER NAME, FARMERSID, FARMID, IRID, CIC NO, AREA,
+  TYPHOON_NAME, PERIOD_OF_EXPOSURE, WIND_VELOCITY, AC, FINAL_INDEMNITY_PAYMENT,
+  P, S, REMARKS`.
+  * `FARMER NAME` (with a space) and `FARMERSID` follow PCIC's reference.
+  * `CIC NO` matches PCIC's own CSV column.
+  * `FINAL_INDEMNITY_PAYMENT` follows the reference's underscore style.
+* **`export_assessments_pabs_csv()`** builds the frame from those keys and
+  renames them to the headers. It replaces the `pabs_columns` list. The
+  JSON/preview row keys are unchanged.
+* **`_build_pabs_rows()`**:
+  * `FARMID` is now PCIC's farm ID (`farm.csv_farm_reference`, e.g.
+    `1979999`), not the internal `farm.farm_id`. It is a string, so
+    `float_format` leaves it alone.
+  * New non-exported `farm_id` (internal, for the table's `#416` link) and
+    `crop_stage` (`RiskAssessment.crop_stage`).
+
+### 2. File: `frontend/src/lib/api.ts`
+* `PabsAssessmentRow`:
+  * `FARMID: string | null`;
+  * new `farm_id` and `crop_stage` fields.
+
+### 3. File: `frontend/src/app/components/AssessmentModule.tsx`
+* **`PABS_HEADERS`**: the preview labels are now the exact CSV headers.
+* **Assessment table**:
+  * every header, cell and the TOTAL row is centered;
+  * the unused `right` flags are dropped from `sortableCols`.
+* **New sortable "Crop Stage" column** right after Wind (`SortField` gains
+  `crop_stage`). The TOTAL row's spacer widens to `colSpan={3}`.
+* The Farm ID cell reads `farm_id`, so the on-screen `#416` stays internal.
+
+### 4. File: `.claude/API_CONTRACT.md`
+* The PABS entry lists the row keys, the CSV headers, and the new FARMID
+  meaning.
+
+---
+
+## [2026-10-12] - Main Dashboard Rename; Active Insurance Excludes Used Policies (Sprint 3)
+
+Per Fabio.
+
+### 1. File: `frontend/src/app/components/Header.tsx`
+* In `SPECIALIST_MODULES`, the "Monitoring & Extraction" tab is now **"Main
+  Dashboard"** (short label "Dashboard"). The module id (`monitoring`) and the
+  `MonitoringModule` component are unchanged. `DashboardLayout.tsx` still has
+  the old label, but nothing imports it, so it was left alone.
+
+### 2. File: `backend/app/api/insurance.py`
+* **`get_insurance_summary()`**: `active_count` now also requires
+  `InsuranceRecord.is_used = false`. A policy drops out as soon as an
+  assessment gives it a payout (`AssessmentService` sets `is_used`), even
+  before the PABS export locks it. `total_count` is unchanged (every policy).
+  Note that Farm Records' "Active Insurance Only" view still excludes only
+  export-locked policies, so the two can differ between calculation and export.
+
+### 3. File: `frontend/src/app/components/MonitoringModule.tsx`
+* The Active Insurance card's subtitle is now "In coverage · not yet used".
+
+### 4. File: `.claude/API_CONTRACT.md`
+* `GET /api/insurance/summary` description updated.
+
+---
+
+## [2026-10-12] - PABS Export: PCIC's Final Column Order, Real Payout, km/h Wind (Sprint 3)
+
+Per Fabio. The CSV and the "Review CSV" preview now use this column order:
+`FARMER_NAME, FARMERID, FARMID, IRID, CIC_NO, AREA, TYPHOON_NAME,
+PERIOD_OF_EXPOSURE, WIND_VELOCITY, AC, FINAL_INDEMNITY_PAYMENT, P, S, REMARKS`.
+Decisions:
+* `DATE_FILED` and `DATE_OF_OCCURRENCE` are removed.
+* IRID is back as a **blank** column. It has no source in the uploaded CSVs or
+  the DB.
+* WIND_VELOCITY is now **km/h**: the typhoon's highest PAGASA "maximum
+  sustained winds" across its bulletins. That is one storm-wide value, because
+  per-farm wind speed isn't stored. It replaces the TCWS signal number.
+* FINAL_INDEMNITY_PAYMENT is filled from the stored
+  `RiskAssessment.final_indemnity_payment`, with the formula unchanged. It was
+  blank before.
+
+### 1. File: `backend/app/api/assessments.py`
+* New **`_typhoon_max_winds()`**: one grouped query,
+  `MAX(max_sustained_winds)` per `typhoon_id` over `TropicalCycloneBulletin`.
+  Typhoons whose bulletins state no winds are left out, so their rows export
+  blank.
+* **`_build_pabs_rows()`**:
+  * adds `IRID` (None) and `CIC_NO` (`insurance.policy_no`);
+  * `WIND_VELOCITY` comes from `_typhoon_max_winds()`;
+  * `FINAL_INDEMNITY_PAYMENT` is filled in;
+  * the two date keys are dropped;
+  * keys are in the new order;
+  * new non-exported `wind_signal` (the TCWS signal from `a.wind_velocity`)
+    keeps the on-screen table's signal column and filter working.
+* **`export_assessments_pabs_csv()`**: `pabs_columns` uses the new order.
+  `float_format="%.2f"` now also formats the payout.
+* Imports `func` and `TropicalCycloneBulletin`.
+
+### 2. File: `frontend/src/lib/api.ts`
+* `PabsAssessmentRow`:
+  * adds `IRID`, `CIC_NO` and `wind_signal`;
+  * removes `DATE_FILED` and `DATE_OF_OCCURRENCE`;
+  * keys are in the new order.
+
+### 3. File: `frontend/src/app/components/AssessmentModule.tsx`
+* **`PABS_HEADERS`** follows the new order. It adds IRID and CIC No. and drops
+  the dates. "Wind Velocity" is now "Wind Velocity (km/h)".
+* **`formatPabsCell()`** formats Final Indemnity Payment to 2 decimals, like the
+  CSV.
+* Every header and cell in the preview table is now centered. Numeric cells
+  keep `tabular-nums` (via the `right` flag), so their digits stay
+  fixed-width.
+* The preview notice explains the km/h wind and the blank IRID. It no longer
+  says the payout is blank.
+* The main assessment table's Wind column, sort and signal filter read
+  `wind_signal` instead of `WIND_VELOCITY` (`SortField` updated), so they still
+  show "Signal N".
+
+### 4. File: `.claude/API_CONTRACT.md`
+* PABS column list and field meanings updated.
+
+---
+
+## [2026-10-12] - Login screen branding: AgriSureGIS + PCIC logos (Sprint 3)
+
+UI design change on the login screen only. The login flow itself is
+unchanged. The only behaviour removed is the demo Auto-fill shortcut.
+
+### 1. Modified file: `frontend/src/app/components/LoginScreen.tsx`
+* **Top bar:** the lucide `Leaf` icon tile is replaced by the PCIC logo. A
+  stack of four 1px white `drop-shadow` filters traces a white outline around
+  the logo's shape, so the dark-green mark stays visible on the green
+  gradient. The "Bicol Regional Office — GIS Risk Assessment Division"
+  subtitle under "Philippine Crop Insurance Corporation" is removed. `Leaf` is
+  dropped from the lucide import because nothing else uses it.
+* **App title:** the AgriSureGIS logo sits centered above the "AgriSureGIS"
+  heading. Its height is `clamp(3rem, 8vh, 4rem)`, so the card still fits
+  without scrolling on short viewports.
+* **Submit button:** the label is now "Sign In" instead of "Sign In to Dashboard".
+* **Demo credentials removed:** the amber "Demo Credentials" box with its
+  Auto-fill buttons is gone, along with the `DEMO_ACCOUNTS` constant and the
+  `fillDemo()` handler that only fed it. The seeded accounts
+  (`backend/seed_system_users.py`) still exist and still sign in when typed.
+* **Readability:** the subtitle ("Automated Disaster Risk Assessment System")
+  and tagline ("Parametric Indemnification · …") are one size larger and less
+  transparent, and so is the footer note ("Authorized Personnel Only · …").
+  The "Request system access (new staff)" link is bigger (`text-xs`), semibold
+  and brand green (`#166534`), and underlines on hover, so it reads as an
+  action. It also has more space above it now that the demo box is gone.
+
+### 2. New files
+* **`frontend/src/assets/agrisuregis-logo.png`** (256×211, 58 KB) comes from
+  `docs/AgriSureGIS LOGO.png`, with the transparent padding trimmed and the
+  image downscaled from 2000px.
+* **`frontend/src/assets/pcic-logo.webp`** (92×128, 8 KB, lossless) is a
+  downscaled copy of
+  `docs/Philippine_Crop_Insurance_Corporation_(PCIC)LOGO.svg.webp`. The
+  sources in `docs/` are unchanged.
+* **`frontend/src/app/components/BrandLogo.tsx`**: `BrandLogo` now renders
+  the official AgriSureGIS logo (`@/assets/agrisuregis-logo.png`) as an
+  `<img>` instead of the inline-SVG shield and rice-stalk mark. `size` sets
+  the height and the width follows the logo's aspect ratio. The props are
+  unchanged, so the header badge (`Header.tsx`) and `InstallAppPrompt.tsx`
+  pick it up with no edits.
+* **`frontend/src/vite-env.d.ts`** adds `/// <reference types="vite/client" />`
+  so TypeScript accepts `.png`/`.webp` imports. Before this, the project had
+  no Vite client types.
+
+---
+
+## [2026-10-12] - Self-naming CSV export filenames (Sprint 3)
+
+Both CSV exports used a fixed filename (`pabs_indemnity_export.csv`,
+`pcic_payout_export.csv`), so every download landed as the same name and a
+second one became `... (1).csv`. A saved file now says which typhoon it covers
+and when it was pulled: `{TYPHOON}_{YYYYMMDD-HHMM}_{Purpose}.csv`, e.g.
+`PEPITO_20261012-1435_Final_Indemnity_Payout.csv`. Content is unchanged — same
+columns, same rows, same export-locking behaviour.
+
+### 1. `backend/app/api/assessments.py`
+* **New `_export_filename(typhoon_names, purpose)`** builds the name. The
+  timestamp is `Asia/Manila` (`EXPORT_TIMEZONE`), since a UTC server clock would
+  stamp an early-morning PHT export with the previous day's date, and the
+  compact `YYYYMMDD-HHMM` form avoids the slashes/colons Windows rejects while
+  still sorting chronologically in Explorer. The typhoon token is the name
+  uppercased with non-alphanumerics collapsed to `_`; an export spanning several
+  typhoons gets `MULTI-<n>-TYPHOONS` instead of one typhoon's name, because
+  `/export-pabs` combines every typhoon (see `_build_pabs_rows`) and a combined
+  file named after a single typhoon would be a misfiled PCIC submission. No
+  typhoon at all yields `NO-TYPHOON`.
+* **New `_typhoon_names_for_summaries(summary_ids, db)`** returns the distinct
+  typhoon names behind a set of exposure summaries — what the PCIC detail export
+  needs, since its rows don't already carry the name.
+* **`export_assessments_csv`** and **`export_assessments_pabs_csv`** now build
+  their `Content-Disposition` from `_export_filename` (purposes `PCIC_Payout`
+  and `Final_Indemnity_Payout`), with the filename quoted. The PABS endpoint
+  reads the names straight off the rows it already built.
+
+### 2. `backend/app/main.py`
+* `CORSMiddleware` gained **`expose_headers=["Content-Disposition"]`**. It is not
+  a CORS-safelisted response header, so without this the browser hides it from
+  the frontend and every file would still save under the fallback name.
+
+### 3. `frontend/src/lib/api.ts`
+* **New `filenameFromResponse(response, fallback)`** parses the filename out of
+  `Content-Disposition`, falling back to the caller's name when the header is
+  absent.
+* **`downloadCsv`** uses it for `anchor.download`; its second parameter is
+  renamed `fallbackFilename` to reflect that the server's name now wins. The
+  hardcoded names in `downloadAssessmentsCsv`/`downloadAssessmentsPabsCsv` are
+  kept as fallbacks.
+
+---
+
+## [2026-10-12] - Installable PWA + post-login install prompt (Sprint 3)
+
+The app can now be installed from the browser as **AgriSureGIS**: its own
+window and a home-screen/desktop icon. It is install-only. The
+service worker caches nothing, because `.claude/Initial Documentations.md`
+rules out mobile-offline capability, and cached `/api`/GeoServer responses
+would show stale data.
+
+### 1. New file: `frontend/src/lib/pwaInstall.ts`
+* **`initPwaInstall()`** captures Chrome/Edge's one-time `beforeinstallprompt`
+  event at startup (it fires before login) and registers `/sw.js` in
+  production builds only.
+* **`promptInstall()`**, **`canPromptInstall()`** and **`subscribePwaInstall()`**
+  hand the captured event to the UI. **`isStandalone()`** detects the installed
+  app and **`isIos()`** detects iPhone/iPad (including iPadOS reporting as Mac).
+
+### 2. New file: `frontend/src/app/components/InstallAppPrompt.tsx`
+* A soft gate: an AlertDialog (same pattern as `LoggedOutNotice`) shown after
+  login whenever the app runs in a browser tab. It has an **Install** button
+  where the browser supports it, Share → Add to Home Screen steps on iOS, and
+  browser-menu steps elsewhere. "Continue in browser" hides it for that tab
+  session, so it returns on the next login. It is not a hard block, because
+  Firefox cannot install PWAs and Chrome withholds its prompt after a dismissal.
+
+### 3. Modified files
+* **`frontend/src/main.tsx`** calls `initPwaInstall()` before render.
+* **`frontend/src/app/App.tsx`** renders `<InstallAppPrompt />` in the
+  logged-in branch only.
+* **`frontend/index.html`**: the title and description replace the Figma
+  placeholders ("Desktop App Development"). It adds the manifest link, theme
+  colour, favicon, apple-touch-icon and iOS web-app meta tags.
+* **`deploy/Caddyfile`** sends `Cache-Control: no-cache` on every frontend
+  path except Vite's content-hashed `/assets/*`. That covers `index.html` (and
+  SPA routes falling back to it), `sw.js` and the manifest, so a redeploy
+  reaches the installed app on its next launch, with no reinstall.
+
+### 4. New static files (`frontend/public/`)
+* **`manifest.webmanifest`**: name/short_name AgriSureGIS, standalone, theme `#166534`.
+* **`sw.js`**: only install/activate handlers. No fetch handler, no caching.
+* **`icons/`** holds `icon-192.png`, `icon-512.png`, `icon-maskable-512.png`
+  (white background, art inside the 80% safe zone) and `apple-touch-icon.png`
+  (180px, white background). They are generated from `docs/AgriSureGIS LOGO.png`
+  (the 2000px source, kept so the icons can be regenerated).
+
+---
+
+## [2026-10-12] - One-click ingestion demo reset (Sprint 3)
+
+Demo support only, no app code changed. Resets the DB to a "half already
+ingested, half still to upload" starting state from the client's real Typhoon
+Tino export (`PCIC10 ... AFFECTED BY TY.csv` + `PCICX GPX_EXISTING IC ...
+TINO_11-05-2025.gpkg`), so the CSV → GeoPackage ingestion can be shown live
+against a database that already holds data.
+
+### 1. New file: `backend/prepare_ingestion_demo.py`
+* **`split_source_files()`** writes both files' halves to
+  `USTP CAPSTONE/DEMO/{already_ingested,to_ingest}/`, keeping the original file
+  names (gitignored with the rest of that folder, since it holds real farmer
+  names). Result: 557/557 CSV rows, 556/557 GPKG features. The split is
+  **per farmer**, not per row. A **`_UnionFind`** links FARMERSID, FARMID and
+  normalized FARMER NAME across both files. This is needed because
+  `GpxFarmerMatcherService` falls back to "farmer's only farm" and to name
+  matches, so a farmer split across halves could have a `to_ingest` polygon
+  overwrite an `already_ingested` farm. CSV rows are written back
+  byte-identical (same encoding, no added BOM). Each GPKG half is a copy of
+  the source with the other half's features deleted. The rtree and
+  feature-count triggers stay consistent, and the layer extent is recomputed.
+* **`clear_farmer_data()`** runs `TRUNCATE ... RESTART IDENTITY CASCADE` on
+  `tbl_planted_verification`, `tbl_insurance_usage`, `tbl_risk_assessment`,
+  `tbl_insurance_records`, `tbl_farms`, `tbl_farmers_profile` and
+  `tbl_area_exposure_summary`, then refreshes `mv_farm_latest_insurance` and
+  the farms cache. Users, boundaries, matrices, crop-stage mapping, typhoons,
+  bulletins, parser settings and the activity log are kept.
+* **`ingest_csv()`** / **`ingest_gpkg()`** pre-ingest the `already_ingested`
+  half through the same code as the upload endpoints:
+  `upload._run_csv_ingestion()` inline, and `upload.upload_gpkg()` with the
+  file wrapped in an `UploadFile`.
+* There is a confirmation prompt (type `YES`), plus `--yes` and `--split-only`
+  flags.
+
+### 2. New file: `reset-demo-data.bat`
+* A one-click wrapper next to `start-servers.bat`. It runs the script with
+  `backend\.venv\Scripts\python.exe` and passes its arguments through.
+
+---
+
+## [2026-10-12] - Verify Farm Planted: SAR via Google Earth Engine, Phase 1 (Sprint 3, branch: develop)
+
+The Use Case Diagram's **Verify Farm Planted** (an `<<include>>` of Conduct
+Parametric Damage Assessment, against Google Earth Engine) had no
+implementation; the mocked SAR UI was removed in `1355f5f`. Phase 1 of
+`docs/SAR_ISPLANTED_METHOD.md`, per the decisions agreed this session: a
+pre-event Sentinel-1 VV/VH colour layer over the "Affected Only" farms that the
+GIS Specialist reads by eye, plus a recorded Planted / Not planted verdict.
+**The verdict is recorded and shown only** — `AssessmentService` and the
+PABS/PCIC export never read it. Planted area only (no flood extent, no NDVI).
+The per-farm rule, percentage and calibration are Phase 2.
+
+### 1. New table `tbl_planted_verification` — **not in the ERD yet**
+* `backend/migrations/2026-10-12_planted_verification.sql` (re-runnable),
+  `backend/init_schema.sql`, and model **`PlantedVerification`** in
+  `backend/app/models/models.py` (`Text` added to its imports). One row per
+  (farm, typhoon) — planting is per season — with `is_planted`,
+  `verified_by` → `tbl_system_users`, `verified_at`, `notes`.
+* `docs/ERD.drawio.png` still needs the table added (Fabio).
+
+### 2. New file: `backend/app/services/gee_sar_service.py`
+* **`gee_configured()`**, **`gee_status()`**, lazy **`_ensure_initialized()`**
+  (service-account credentials from `GEE_SERVICE_ACCOUNT_KEY_PATH`; `ee` is
+  imported lazily so a backend without `earthengine-api` still starts). A
+  failed sign-in is retried at most every 5 minutes, since
+  `GET /api/system/status` is polled. Only the key's `client_email` and
+  `project_id` are ever read out for display.
+* **`pre_event_window()`** — the 24 days before the event, end exclusive
+  (method doc §8: post-event imagery confuses "never planted" with
+  "flattened").
+* **`pick_relative_orbit()`** — most frequent orbit, ties to the lowest
+  number (method doc §5.1).
+* **`build_planted_layer()`** — `COPERNICUS/S1_GRD`, IW, VV+VH, descending,
+  one orbit; per-scene focal median then temporal median; `VV − VH` in dB;
+  clipped to the polygons after a 20 m inward buffer (§5.2); 4.5–7.5 dB
+  green→brown stretch (§7); `getMapId()` tile URL, cached for 1 hour.
+
+### 3. New file: `backend/app/api/sar.py` (registered in `app/main.py`)
+* **`POST /api/sar/layer`** — loads the affected polygons via
+  **`_load_affected_polygons()`**, which reuses `_affected_farm_ids()` from
+  `app/api/farms.py` (GPX farms only, capped at `MAX_LAYER_FARMS` = 5,000 and
+  reported when hit); event date from **`_event_date()`** (the typhoon's first
+  bulletin). 404 / 503 / 422 / 502 for unknown bulletin, not configured,
+  nothing to draw or no scenes, and Earth Engine failure.
+* **`GET` / `PUT` / `DELETE /api/sar/verifications`** — list per typhoon,
+  upsert per farm + typhoon (stamps `verified_by`/`verified_at`), clear.
+
+### 4. Files: `backend/app/api/system.py`, `backend/app/api/activity_log.py`
+* `GET /api/system/status` gains a read-only `gee` block.
+* Activity-log summaries for the three SAR write routes.
+
+### 5. Config + dependency
+* `backend/requirements.txt`: `earthengine-api==1.7.45`.
+* `backend/.env.example`, `.claude/ENV_GUIDE.md`: `GEE_SERVICE_ACCOUNT_KEY_PATH`.
+
+### 6. Frontend
+* `frontend/src/lib/api.ts`: `getSarLayer`, `getPlantedVerifications`,
+  `setPlantedVerification`, `clearPlantedVerification`; `gee` on `SystemStatus`.
+* New `frontend/src/app/components/SarAnalysisPanel.tsx`: the prototype
+  `AOISARPanel` shell (form → processing → results), trimmed: AOI fixed to the
+  affected farms, window and analysis type read-only, a real spinner instead
+  of simulated progress, results show scenes/orbit/farm count, the colour
+  legend, a layer toggle and an opacity slider.
+* `SpatialAnalysisModule.tsx`: **SAR / GEE Analysis** button beside Affected
+  Only (the prototype's map toolbar was removed 2026-08-18), enabled only
+  while Affected Only is in effect; the panel opens over the map; verdicts
+  loaded per typhoon, separate from `useFarmsData` (so the Redis farms cache
+  is untouched); a **Planted (SAR)** column while Affected Only is on.
+* `GISLeafletMap.tsx`: `sarTileUrl`/`sarOpacity` → a `TileLayer` above the
+  Esri basemap; while it's on, farm polygons drop their fill so the colour
+  shows. Outlines are tinted by verdict (green planted / red not planted),
+  with a legend entry, and Farm Details gets Planted / Not planted / Clear
+  buttons. Polygon keys include the verdict, since react-leaflet's `GeoJSON`
+  doesn't re-style on prop change.
+* `CalibrationModule.tsx`: read-only **Google Earth Engine** section
+  (status, project, service account, last error) where the prototype's
+  editable credentials card was. Deliberately not editable: the key is a live
+  private key and stays in `backend/.env`.
+
+### 7. Tests
+* New `backend/tests/test_gee_sar_service.py` (fake `ee` module): orbit
+  choice, pre-event window, unconfigured no-op, init back-off, filter chain,
+  layer cache.
+* New `backend/tests/test_sar_api.py`: 404/503/422/502 paths, first-bulletin
+  event date, polygon cap, verdict insert/update/clear/list.
+
+### 8. Docs
+* `.claude/API_CONTRACT.md` §4c and the `gee` status block;
+  `docs/SAR_ISPLANTED_METHOD.md` status updated, with the Phase 1 deviations
+  (a 24-day median rather than the §3 series; one orbit across all affected
+  farms, so farms outside its footprint get no colour).
+
+## [2026-10-12] - Public Deployment via Tailscale Funnel (Sprint 3, branch: develop)
+
+By Cristian. The app is hosted on Cristian's PC, which PLDT puts behind CGNAT,
+so router port forwarding cannot make it public. Tailscale Funnel provides the
+public HTTPS address instead, and Caddy on 127.0.0.1:8090 serves the built
+frontend and forwards API/GeoServer requests on the same origin. No backend or
+frontend source code changed.
+
+### 1. File: `deploy/Caddyfile` (new)
+* Listens on `127.0.0.1:8090` (Funnel's target). Routes `/api/*` to uvicorn
+  (8000), `/geoserver-proxy/agrisuregis/*` to the GeoServer workspace (8080),
+  and everything else to `frontend/dist` with an `index.html` fallback.
+* Replaces Vite's dev-only `/geoserver-proxy` (`vite.config.ts`), which does
+  not exist in a production build. Only the `agrisuregis` workspace is
+  forwarded, so the GeoServer admin UI is not public; FastAPI `/docs` and
+  `/openapi.json` are not routed either.
+* Same origin for page, API and GeoServer, so `CORSMiddleware` in
+  `backend/app/main.py` is unchanged.
+
+### 2. File: `frontend/.env.production` (new)
+* Read by `npm run build` only. `VITE_API_BASE_URL` is empty, so `api.ts`
+  calls relative `/api/...` paths (an empty string does not trigger its
+  `?? 'http://localhost:8000'` fallback). `VITE_GEOSERVER_URL` is set only so
+  the GeoServer overlay stays enabled. No secrets; committed.
+
+### 3. File: `start-servers.bat`
+* New `prod` argument (`start-servers.bat prod`): starts the backend without
+  `--reload`. With no argument the backend keeps `--reload` (dev).
+* Starts Caddy from the repo root **in both modes** (dev too, for
+  convenience), skipped if port 8090 is already listening, `caddy` is not
+  found, or `frontend\dist` has not been built. In dev, Caddy serves the
+  last build, not live source -- Vite on `:5173` is still where you develop.
+* If `caddy` is not on PATH (terminals opened before the winget install,
+  e.g. VS Code's until it restarts), falls back to winget's package folder
+  under `%LOCALAPPDATA%\Microsoft\WinGet\Packages\`.
+* Line endings normalised to CRLF (cmd `goto` labels are unreliable in
+  LF-only batch files).
+
+### 4. File: `.claude/LOCAL_SERVER_SETUP.md`
+* New section 9: Funnel architecture, one-time setup (Caddy install, tailnet
+  HTTPS + `funnel` attribute, pre-launch security checks), build, start and
+  publish steps.
+
+---
+
+## [2026-10-12] - Spatial Analysis: "Affected Only" Filter + SAR isPlanted Method Spec (Sprint 3, branch: develop)
+
+Per Fabio. The GIS Specialist needs to narrow Spatial Analysis to just the
+insured farms a typhoon actually hit, so those polygons — and only those —
+can be checked visually on SAR imagery to confirm the parcel was planted.
+Two pieces: the filter (built here, real backend) and the SAR detection
+method it will feed (specified, not yet implemented).
+
+Definition decision: "affected" = the farm's municipality is inside the
+selected bulletin's TCWS signal >= 2 areas, **not** "has a completed
+RiskAssessment". The planted-check is validation *before* payout, so the
+filter has to work the moment a bulletin is parsed, before Calculate
+Assessment has run.
+
+### 1. New file: `docs/SAR_ISPLANTED_METHOD.md`
+* Specification for `isPlanted`, grounded in two peer-reviewed Philippine
+  studies Fabio supplied (PhilGEOS x GeoAdvances 2019, IRRI/PhilRice):
+  Gutierrez et al. on the rice planting window, Villano et al. on TP/DS
+  separability. Both are Philippine rice with Philippine ground truth, and
+  Gutierrez names Misamis Oriental (Claveria) and Northern Mindanao
+  directly, so Region X results apply without extrapolation.
+* Defines a 5-condition multi-temporal rule (flood minimum → biomass rise →
+  canopy closure via VV/VH drop → dual-pol agreement → timing plausibility
+  against the Region X planting calendar and the policy's crop stage).
+  Deliberately **not** a single-date VH threshold: Villano's field means
+  show only ~2–3 dB of VH dynamic range across the whole season, too tight
+  to threshold reliably against speckle. The VV/VH ratio is the stronger
+  discriminator (significant at every growth stage bar harvest).
+* Records the deviations from the published method honestly: MAPscape-RICE®
+  is proprietary so its temporal smoothing must be reimplemented on GEE;
+  10 m vs 20 m resolution; S-1B's 2021 failure changes the revisit
+  assumption; incidence angle requires holding to one relative orbit.
+* All thresholds are named constants requiring local calibration (§6) —
+  no literature value ships as-is. SAR corroborates the declared crop stage,
+  never overrides it (Gutierrez's SoS carries ±23 days, about one growth
+  stage). `isPlanted` does not enter `I = (AC / 1000) * IF`.
+
+### 2. File: `backend/app/api/farms.py`
+* New **`_affected_farm_ids(db, tcb_id, min_signal_level=2)`**: farms whose
+  AdminBoundary `(province, municipality)` matches a `tbl_tcb_signals` row
+  for that bulletin at signal 2+. Same text-matching join
+  `ExposureCalculatorService.compute_for_typhoon` already uses — PAGASA
+  publishes TCWS areas as named municipality lists, not radii, so there is
+  no wind-footprint polygon to intersect. Province-qualified to avoid
+  same-named municipalities in other provinces; signals with a NULL
+  `province` (pre-2026-08-20 rows) are skipped rather than matched on
+  municipality alone. Returns a scalar subquery, not a join, so it composes
+  with the existing `municipality` filter's own AdminBoundary join instead
+  of colliding with it.
+* New module constant `MIN_AFFECTED_SIGNAL_LEVEL = 2`, matching the
+  assessment engine's eligibility floor (signal >= 2, not == 2).
+* New `affected_bulletin_id` query param on **`list_farms`** and
+  **`get_farms_geometry`**. AND's with `active_only`/`municipality`/
+  `farmer_id` rather than overriding them — unlike `typhoon_id`, "affected"
+  and "active" are independent questions, since a hit farm can still hold
+  usable cover. On the geometry endpoint it applies only to the normal
+  bbox-scoped query; the `farm_id` and bbox-less `farmer_id` fly-to
+  bypasses keep ignoring every filter, as before.
+
+### 3. File: `backend/app/core/farms_cache.py`
+* `affected_bulletin_id` added to `_cache_key`, `get_cached_farms_page` and
+  `cache_farms_page`. Without this, a filtered and an unfiltered page would
+  share a Redis key and serve each other's rows.
+
+### 4. File: `frontend/src/app/App.tsx`
+* New `affectedOnly` state plus derived `affectedBulletinId`
+  (`affectedOnly && selectedBulletin ? selectedBulletin.tcb_id : null`), so
+  the filter can never scope to a storm that isn't the one selected in the
+  header. A toggle rather than a second dropdown: the bulletin is already
+  chosen, and it's the same storm whose signals the map draws.
+* The unbounded-combination guard now counts an affected scope alongside
+  municipality/farmer/typhoon before forcing Active Insurance Only back on.
+
+### 5. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* New "Affected Only" toolbar button (`Satellite` icon, orange `#c2410c` to
+  distinguish it from the green Active Insurance toggle and the amber
+  typhoon dropdown). Disabled with an explanatory tooltip when no bulletin
+  is selected; when enabled the tooltip names the typhoon and bulletin
+  number. Active styling keys off `affectedBulletinId`, not `affectedOnly`,
+  so the button can't look on while the filter is inert.
+
+### 6. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* New `affectedBulletinId` prop, threaded into the viewport geometry fetch
+  and into both its dependency arrays plus the geomCache reset, so map
+  polygons always match the Farm Records table's set. Added to the
+  "unbounded combination" skip-check as a real scope.
+
+### 7. Files: `frontend/src/lib/api.ts`, `frontend/src/lib/useFarmsData.ts`
+* `affected_bulletin_id` added to `getFarms()` and `getFarmsGeometry()`.
+* `useFarmsData` takes `affectedBulletinId`, sends it with each page, and
+  counts it as a bounding scope in both the `start()` no-op guard and the
+  effect guard (one storm's signal areas is a bounded set, so it permits
+  Active Insurance Only off), with it added to the restart deps.
+
+### 8. File: `backend/tests/test_farms_api.py`
+* New `ListFarmsAffectedOnlyTests`: the filter compiles to a TCWS-signal
+  subquery scoped to the given bulletin at signal 2+ with the province
+  guard; it AND's with `active_only` instead of replacing it; and omitting
+  it adds no filter.
+* **Fixed pre-existing drift from `ef9265e`:** all 12 direct `list_farms()`
+  calls now pass `typhoon_id=None` explicitly. Calling the endpoint as a
+  plain function leaves an unpassed param bound to the raw
+  `fastapi.params.Query` marker object, which is *not* `None` — so every one
+  of these tests was taking the `typhoon_id is not None` branch and
+  asserting against filters it never expected. This is the same convention
+  `test_active_only_false_no_regression` already documents for
+  `active_only`; the typhoon filter just didn't follow it.
+* `_build_mock_db`'s query fallback now forwards every queried entity
+  (`SAQuery([entity, *rest])`), not just the first — `_affected_farm_ids`
+  builds a two-column subquery and reads both columns back off it.
+* **Fixed a second harness gap the drift fix exposed:** `_build_mock_db`
+  routed *every* `db.query(InsuranceUsage.insurance_records_id, ...)` to the
+  fake `usage_chain`, including `_locked_insurance_ids()`'s single-column
+  query (added `19c2bc4`), which `_active_farm_ids()` embeds via
+  `.not_in()`. That raised `sqlalchemy.exc.ArgumentError` in the three
+  `active_only=True` tests. It was latent until now because the drifted
+  `typhoon_id` marker always took the `typhoon_id` branch and never reached
+  `elif active_only:`. Now only the multi-column "Used For Typhoon" lookup
+  gets `usage_chain`; the single-column one falls through to a real unbound
+  `SAQuery`. Test-only -- no production change.
+
+### 9. File: `.claude/API_CONTRACT.md`
+* Documented `affected_bulletin_id` under Farms, including that matching is
+  municipality-granular text matching rather than a geometric intersection.
+
+### 10. File: `backend/app/api/farms.py` (docstring only)
+* `_affected_farm_ids` docstring said "barangay-granular at best";
+  corrected to "municipality-granular" to match the API contract and the
+  actual join.
+
+## [2026-10-12] - Spatial Analysis: Hide/Show Farm Records (Sprint 3, branch: develop)
+
+By Cristian. The Farm Records panel can be hidden so the map fills the
+page, for viewing the full imagery (e.g. a typhoon track). Decisions: hide
+everything (toolbar and table); done with the existing resize handle, not a
+separate button: click it to hide/show, press-and-move to resize. (Earlier
+same-day versions, a toolbar button and then drag-to-hide, were replaced.)
+
+### 1. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* New `recordsHidden` state and `CLICK_MOVE_TOLERANCE_PX` (4). On the resize
+  handle, a press that moves under 4px before release toggles Farm Records;
+  more movement is a resize drag (30–70%, unchanged) that never hides.
+  Dragging while hidden reopens the panel at the dragged height.
+* Handle enlarged for easier grabbing: 6px → 12px tall, grip 32×2px →
+  48×4px.
+* While hidden, the map panel is `flex-1` (full height) and the handle stays
+  at the bottom, with a "Click to show" tooltip. The panel is hidden with
+  CSS, not unmounted, because the table's ResizeObserver/sentinel refs and
+  the hidden upload inputs attach once on mount.
+
+### 2. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* New **`MapResizeWatcher`**: calls `map.invalidateSize()` whenever the map
+  container resizes. Without it the newly exposed area stayed grey until the
+  map was panned (also affected dragging the resize handle).
+
+---
+
+## [2026-10-12] - Spatial Analysis: Typhoon Track Overlay (Sprint 3, branch: develop)
+
+By Cristian. A new "Typhoon track overlay" toggle (next to "GeoServer farm
+overlay") lets the GIS specialist follow a typhoon's path and see whether it
+is inside or outside PAR. Decisions:
+* With the Farm Records typhoon filter on "All", the overlay shows the live
+  typhoon(s) (`Typhoon.is_active`). With a typhoon picked, it shows that
+  typhoon's archived track.
+* Track = one point per TCB center, in issue order. Forecast = the latest
+  TCB's Track and Intensity Outlook only.
+* Wind circulation radius drawn around every center: strong winds (≥ 39
+  km/h) always when stated, storm-force (≥ 89 km/h) only when the bulletin
+  states it.
+* Inside/outside PAR = the latest center checked against the PAR polygon,
+  not `is_active`.
+* Category colors orange (Low Pressure Area) → red (Super Typhoon), opacity
+  rising with intensity; legend follows PAGASA's TCB track-map legend.
+
+### 1. File: `backend/migrations/2026-10-12_tcb_track_radius.sql` (new), `backend/init_schema.sql`, `backend/app/models/models.py`
+* `tbl_tropical_cyclone_bulletins` gains `wind_radius_km`,
+  `storm_force_radius_km` (INT) and `forecast_track` (JSONB). NULL for
+  bulletins saved before this, until their PDF is re-scraped/re-uploaded.
+
+### 2. File: `backend/app/services/bulletin_parser.py`
+* New `_WIND_RADIUS_RE` / `_STORM_FORCE_RADIUS_RE` and **`_radius_km()`**:
+  read "Strong to gale-force winds extend outwards up to N km" and
+  "storm-force winds extend outwards up to N km". "Strong to storm-force" /
+  "Strong to typhoon-force" (OPONG TCB#13-14, 22-23) count as the
+  strong-wind radius only. Checked against all 23 OPONG PDFs: none states a
+  separate storm-force radius, so OPONG draws the outer circle only.
+* New **`_forecast_track()`**: "<N>-Hour Forecast" rows of the outlook table
+  → `[{label, lat, lon, location}]`; other tables never contribute.
+* **`parse_bulletin_text()`** step 7 returns `wind_radius_km`,
+  `storm_force_radius_km`, `forecast_track`.
+* **`save_bulletin_to_db()`** stores them on insert and backfills only NULL
+  columns on a re-parse.
+
+### 3. File: `backend/app/api/typhoons.py`
+* New `PAR_CORNERS`, **`inside_par()`** (Shapely `covers`, so on the line
+  counts as inside), **`_track_point()`** (skips a missing center and the
+  parser's 0.0/0.0 fallback), **`build_track()`**.
+* New **`GET /api/typhoons/{typhoon_id}/track`** (**`get_typhoon_track()`**).
+
+### 4. File: `frontend/src/lib/api.ts`
+* New `TyphoonTrackPoint`, `TyphoonForecastPoint`, `TyphoonTrack` types and
+  `getTyphoonTrack()`.
+
+### 5. File: `frontend/src/app/components/TyphoonTrackLayer.tsx` (new)
+* **`TyphoonTrackLayer`**: PAR outline, radius circles, observed track
+  segments colored by category, dotted forecast, PAGASA-symbol markers (live
+  latest center pulses). Radius circles are fill only, no outline; clicking
+  a center gives its circles a denser fill. Fits the map when the set of
+  typhoons shown changes.
+* **`TyphoonTrackLegend`**: typhoon name, live/archived, TCB count,
+  INSIDE/OUTSIDE PAR badge, category symbols, both radius entries, line types.
+
+### 6. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* New `showTyphoonTrack` toggle (always shown; the GeoServer toggle still
+  needs `VITE_GEOSERVER_URL`), tracks loaded from the filter's `typhoonId`
+  or `getActiveTyphoons()`. Layer drawn before farm polygons so farms stay
+  clickable.
+* Toggles and legend share one right-hand column, so the legend sits under
+  the toggles instead of covering them. Each toggle keeps the original
+  GeoServer pill styling with `text-[10px]` on the `<label>` itself
+  (`theme.css` sets every label to `text-base`, which had enlarged them).
+* Track markers reduced to 14px (18px for the live center); 22px symbols
+  piled on top of each other along the track.
+
+### 8. File: `backend/backfill_tcb_track_radius.py` (new)
+* Fills the three track columns for one typhoon (default OPONG) from its
+  original PDFs, only where NULL. Signals, summaries and assessments are not
+  touched. Dry run by default; prints the PDF's "extend" lines when no
+  radius is found, to check the parser's wording.
+
+### 7. Tests
+* `backend/tests/test_bulletin_parser.py`: forecast table, wind radius,
+  "strong to storm-force", not-stated, insert and NULL-only backfill.
+* `backend/tests/test_typhoons_track_api.py` (new): `inside_par`,
+  `build_track`, 404 and response shape.
+
+---
+
+## [2026-10-12] - Docs Cleanup: Remove DFDs, Duplicate Flowchart, and Implemented Proposals (Sprint 3, branch: develop)
+
+By Fabio. `docs/` had accumulated diagrams and schema proposals that no longer
+describe the system. Each candidate was checked against the live schema before
+deletion rather than trusted from its own header — two proposals turned out to
+be fully implemented, one only half, and two flowchart exports turned out to be
+byte-identical. No backend or frontend behaviour changes in this entry.
+
+### 1. Deleted: data-flow diagrams (7 files)
+* `docs/DFD_Level1.drawio.png`, `docs/DFD_Level2_P1.drawio.png`,
+  `docs/DFD_Level2_P2_1-2_2.drawio.png`, `docs/DFD_Level2_P2_3-2_4.drawio.png`,
+  `docs/DFD_Level2_P3.drawio.png`, `docs/DFD_Level2_P4.drawio.png`,
+  `docs/ContextDiagram.drawio.png` (DFD Level 0 — removed with the rest per Fabio).
+* Nothing in the codebase referenced any of them, and `CLAUDE.md`'s documentation
+  priority order (Use Case → UI Prototype → ERD → Manuscript → Development Plan)
+  never cites DFDs, so the decision hierarchy is unaffected.
+
+### 2. Deleted: `docs/Flowchart.drawio.png` (duplicate)
+* Byte-identical to `docs/Parametric_Indemnity_Process_Flowchart.drawio.png`
+  (both md5 `3dba69191ca0010a825457381216e9c4`), despite this file's own earlier
+  changelog entry describing the latter as an *updated* export added alongside it.
+* The descriptively-named copy is kept; this generic one is removed.
+
+### 3. Deleted: `docs/PROPOSAL_farmers_id_column.md` (implemented)
+* `farmers_id VARCHAR(20) UNIQUE` is live in `backend/init_schema.sql`, and the
+  rationale that justified it (100% coverage in real PABS exports vs `rsbsa_no`'s
+  ~71%) is preserved in the column's own schema comment.
+
+### 4. Deleted: `docs/PROPOSAL_parser_settings_table.md` (implemented + stale)
+* `tbl_parser_settings` is live. The document had also gone factually wrong: it
+  specifies `polling_interval_hours`, but the column was renamed to
+  `polling_interval_minutes` by `backend/migrations/2026-08-10_polling_interval_minutes.sql`.
+
+### 5. Deleted: `docs/pending buhatonon sa agrisuregis system.txt`
+* Informal to-do note. Contents preserved verbatim here so the list is not lost:
+  * documentation sa mga passwords sa agrisuregis.
+  * indicator nga nigawas naba sa par ang typhoon.
+  * create and testing actual mock data.
+  * improving the frontend.
+
+### 6. File: `docs/PROPOSAL_boundary_geometry.md` (kept, header corrected)
+* **Not deleted** — unlike the other two proposals, only half of this one shipped,
+  so it remains the written record of an open item.
+  * Part 1 applied: `tbl_admin_boundaries.boundary_geom GEOMETRY(MultiPolygon, 4326)`
+    exists, though added to back GeoServer's WFS layer and explicitly *not* used in
+    any exposure calculation.
+  * Part 2 still open: the proposed `tbl_tcb_signals.boundary_id` FK was never added.
+    A `province VARCHAR(100)` column (`2026-08-20_tcb_signal_province.sql`) mitigates
+    municipality-name collisions instead, but `bulletin_parser.py` and
+    `exposure_calculator.py` still match on free text.
+* Replaced the **Status** header, which claimed nothing in the document had been
+  applied — untrue since part 1 shipped, and misleading to anyone reading it as a
+  pending proposal.
+
+### 7. File: `backend/init_schema.sql`
+* Reworded the `tbl_farmers_profile.farmers_id` comment to drop its
+  `(see docs/PROPOSAL_farmers_id_column.md)` pointer, which would otherwise dangle
+  at a deleted file. The empirical rationale in the comment is unchanged. This was
+  the only live code reference to any deleted file; remaining mentions elsewhere in
+  this changelog are historical record and are intentionally left as-is.
+
+### 8. Deleted: three PDFs Fabio removed manually
+* `docs/Revised AgriSureGIS Manuscript.pdf`, `docs/TCB#11_kiyapo.pdf`,
+  `docs/bulletin_francisco.pdf`. Removed from the working tree outside this
+  cleanup and folded into this commit at Fabio's instruction.
+* The manuscript and `bulletin_francisco.pdf` have no code references.
+  `TCB#11_kiyapo.pdf` did — see below.
+
+### 9. File: `backend/tests/test_bulletin_parser.py`
+* **`REAL_SAMPLE_PDF`** now resolves through `AGRISURE_SAMPLE_TCB_PDF` before
+  falling back to the (now deleted) `docs/TCB#11_kiyapo.pdf` path, so a local copy
+  can be pointed at without editing the test.
+* **`test_parse_bulletin_text_against_real_sample_pdf()`** gained a
+  `@unittest.skipUnless(os.path.exists(REAL_SAMPLE_PDF), ...)` guard. It opened the
+  PDF directly with no mock, so deleting the fixture would otherwise have left a test
+  that cannot pass. It now skips, and re-enables itself if the file returns.
+* The assertions are specific to KIYAPO Bulletin NR. 11 (name, international name,
+  bulletin number, winds, coordinates), so substituting a different PAGASA PDF makes
+  the test run and fail. Real bulletins are available locally in the gitignored
+  `USTP CAPSTONE-*/TCB/` folder (23 OPONG bulletins); using one means rewriting the
+  assertions to that bulletin's real values. Documented inline above `REAL_SAMPLE_PDF`.
+
+### 10. File: `.claude/CLAUDE.md`
+* Priority-order item 4 linked the deleted manuscript. Replaced the dead link with a
+  note that the PDF is kept outside the repo and must be requested from Fabio.
+* Also flags `ui-prototype/src/imports/Revised_AgriSureGIS_Manuscript.pdf` as a trap:
+  it is still tracked and looks like the same document, but it is an older, shorter
+  revision (3,722 vs 4,520 lines of extracted text) that predates the indemnity-formula
+  section, so it must not be cited as authoritative.
+
+---
+
+## [2026-10-12] - Farm Records: Hide Used Policies; Filter by Typhoon Used (Sprint 3, branch: develop)
+
+By Cristian. Once a final PABS export locks a policy as used, that farm should
+drop out of the Active Insurance view. A new filter lists the farms used for
+one typhoon. Decisions:
+* The typhoon filter means "locked as used for that typhoon".
+* With Active Insurance Only OFF (needs a municipality or farmer search),
+  used farms still show, with their Used For Typhoon label.
+
+### 1. File: `backend/app/api/farms.py`
+* New helpers:
+  * **`_locked_insurance_ids()`**: policies locked by a final export
+    (`is_used` + `finalized_at`).
+  * **`_active_farm_ids()`**: within coverage dates **and** not locked.
+    Replaces the dates-only subquery that was duplicated in both routes.
+  * **`_typhoon_used_farm_ids()`**: farms locked as used for one typhoon.
+* **`list_farms()`** and **`get_farms_geometry()`**:
+  * `active_only` now uses `_active_farm_ids`;
+  * new `typhoon_id` parameter, which overrides `active_only` (used farms are
+    never active).
+* New **`GET /api/farms/used-typhoons`** (**`list_used_typhoons()`**):
+  typhoons with locked policies and a distinct farm count each, newest year
+  first. Feeds the filter dropdown.
+
+### 2. File: `backend/app/core/farms_cache.py`
+* `typhoon_id` added to `_cache_key()`, `get_cached_farms_page()` and
+  `cache_farms_page()`. The `invalidate_farms_cache()` docstring now mentions
+  the export.
+
+### 3. File: `backend/app/api/assessments.py`
+* **`export_assessments_pabs_csv()`** calls `invalidate_farms_cache()` after
+  `finalize_exported_usage`. Before this, the export never cleared cached
+  Farm Records pages, so just-locked farms could keep showing as active.
+
+### 4. File: `frontend/src/lib/api.ts`
+* `getFarms()` / `getFarmsGeometry()` accept `typhoon_id`.
+* New `UsedTyphoon` type and `getUsedTyphoons()`.
+
+### 5. File: `frontend/src/lib/useFarmsData.ts`
+* New `typhoonId` parameter. It is a bounded scope like municipality/farmer,
+  so it is included in the unbounded-combination guards and the restart
+  dependencies.
+* New **`replaceOnNextPageRef`**: the first page after `start()` (a filter
+  change or `refresh()`) now **replaces** `farms` instead of merging into
+  them. Merging kept rows that had left the result set, e.g. a just-locked
+  farm with stale "not used" data. Later pages still merge. Pages are 1,000
+  rows, so the active view normally fits in page 1.
+
+### 6. File: `frontend/src/app/App.tsx`
+* New `filterTyphoonId` state, passed to `useFarmsData` and
+  `SpatialAnalysisModule`.
+* The Active-Insurance guard now also counts the typhoon filter as a scope.
+* Farms are re-fetched (`farmsData.refresh()`) every time the Spatial tab
+  opens, so an export done on the Assessment tab shows up immediately.
+
+### 7. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* New props `filterTyphoonId` / `onFilterTyphoonIdChange`.
+* New **"Used for typhoon"** dropdown, e.g. "OPONG 2026 (20 farms)", in the
+  Farm Records toolbar. Options come from `getUsedTyphoons()` on mount.
+* `filteredFarms`: the active check also needs `!f.used_for_typhoon`. It is
+  skipped while a typhoon is picked.
+* The Active Insurance Only toggle is disabled while a typhoon is picked,
+  with a tooltip explaining why.
+
+### 8. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* New `typhoonId` prop, passed to `getFarmsGeometry`. The geometry cache
+  resets when it changes, and the guard treats it as a scope.
+
+### 9. File: `.claude/API_CONTRACT.md`
+* Documented `typhoon_id`, the new active definition, and
+  `GET /api/farms/used-typhoons`.
+
+---
+
+## [2026-10-12] - PABS Export: Blank FINAL_INDEMNITY_PAYMENT Column (Sprint 3, branch: develop)
+
+By Cristian. The payout calculation is being revised at the client's
+request; Fabio will change the logic. Until then the column is a blank
+placeholder.
+
+### 1. File: `backend/app/api/assessments.py`
+* **`_build_pabs_rows()`**: new `"FINAL_INDEMNITY_PAYMENT": None` key, right
+  after `AC`.
+  * The lowercase `final_indemnity_payment` field is unchanged. It is not
+    exported and still decides which policies the export locks as used
+    (payout > 0).
+* **`export_assessments_pabs_csv()`**: `FINAL_INDEMNITY_PAYMENT` added to
+  `pabs_columns` between `AC` and `REMARKS`. The CSV now has 14 columns.
+
+### 2. File: `frontend/src/lib/api.ts`
+* `PabsAssessmentRow`: added `FINAL_INDEMNITY_PAYMENT: number | null`.
+
+### 3. File: `frontend/src/app/components/AssessmentModule.tsx`
+* **`PABS_HEADERS`**: "Final Indemnity Payment" column after AC,
+  right-aligned. It shows "—" while blank.
+* The preview notice says the column is blank until the revised calculation
+  is in place.
+
+### 4. File: `.claude/API_CONTRACT.md`
+* PABS column list updated.
+
+---
+
+## [2026-10-12] - PABS Export: Drop IRID, Fill P / S / Remarks, Align Preview (Sprint 3, branch: develop)
+
+By Cristian, based on PCIC's final-output reference. Decisions:
+* IRID is removed (PCIC's reference still has the column).
+* Our column layout is kept, Date Filed / Date of Occurrence included.
+* REMARKS is the same sentence on every row.
+* WIND_VELOCITY stays the TCWS signal number for now. PCIC's reference uses
+  km/h; converting is a separate task.
+
+### 1. File: `backend/app/api/assessments.py`
+* New constants:
+  * **`PABS_PREVALENCE`** = `"1.0"`: PCIC's fixed P, 100% prevalence.
+  * **`PABS_REMARKS`** = PCIC's fixed remark: "Prolonged destructive winds
+    caused severe crop damage with critical production loss."
+* New **`_yield_loss_fraction()`**: builds S from the assessment's RECSAP
+  step-1 `estimated_yield_loss` (via `RiskAssessment.matrix`) ÷ 100, with
+  trailing zeros trimmed (30% → `"0.3"`, 25% → `"0.25"`, 5% → `"0.05"`).
+  Returns `None` if the assessment has no matrix row.
+* **`_build_pabs_rows()`**:
+  * IRID key removed;
+  * P, S and REMARKS filled from the above;
+  * docstring updated.
+  * P and S are strings, so the CSV's `float_format="%.2f"` doesn't turn them
+    into `1.00` / `0.30`.
+* **`export_assessments_pabs_csv()`**: IRID removed from `pabs_columns`. The
+  CSV now has 13 columns.
+
+### 2. File: `frontend/src/lib/api.ts`
+* `PabsAssessmentRow`:
+  * `IRID` removed;
+  * `P: string`, `S: string | null`, `REMARKS: string`.
+
+### 3. File: `frontend/src/app/components/AssessmentModule.tsx`
+* **`PABS_HEADERS`** (CSV preview):
+  * IRID removed;
+  * new `right` flag on Area, Exposure (h), Wind Velocity, P, S and AC.
+    Those headers and cells are right-aligned (cells `tabular-nums`). The
+    text and date columns stay left-aligned.
+* The preview's notice now explains P / S / Remarks instead of saying they
+  are blank.
+
+### 4. File: `.claude/API_CONTRACT.md`
+* Noted the PABS column changes under `GET /api/assessments/export`.
+
+---
+
+## [2026-10-11] - Assessment & Reporting: Remove AC by Municipality; Readable Typhoons List (Sprint 3, branch: develop)
+
+By Cristian.
+
+### 1. File: `frontend/src/app/components/AssessmentModule.tsx`
+* **AC by Municipality removed** (right-hand panel; Cristian: not needed).
+  * The assessment table now takes the full width.
+  * Removed `muniChartData` and the `recharts` import.
+  * `darkMode` was the chart's only use, so it is no longer destructured
+    (`_props`). It stays in `AssessmentModuleProps`, so `App.tsx` is
+    unchanged.
+* **Typhoons list readability:**
+  * panel `w-56` → `w-60`;
+  * title 11px → 14px;
+  * hint 9px → 11px;
+  * typhoon name 10px → 13px;
+  * bulletin count 9px → 12px;
+  * secondary text `text-muted-foreground` → `text-foreground/70`, for
+    contrast.
+* **Bars re-aligned.** The larger hint wraps to two lines, which made the
+  Typhoons header about 69px, taller than the 56px top bar beside it.
+  * Both bars are now `min-h-16` (64px).
+  * The Typhoons header uses `py-1.5` and `leading-tight`, so its two-line
+    hint (about 59px total) fits inside 64px and the bottom borders line up.
+
+---
+
+## [2026-10-11] - Fix: Assessment Table Column Alignment & Wind Label (Sprint 3, branch: develop)
+
+By Cristian. Display-only; the PABS CSV export is unchanged.
+
+### 1. File: `frontend/src/app/components/AssessmentModule.tsx`
+* **`sortableCols`**: new optional `right` flag on Area, Exp (h), Wind and
+  AC.
+  * Those headers are now right-aligned (`text-right` + `justify-end`) to sit
+    over their right-aligned values.
+  * Before, every header was left-aligned while those four columns' values
+    were right-aligned, so the headers looked shifted.
+* **Wind column and Wind Velocity filter**: now show "Signal 2" instead of
+  "2 km/h". `WIND_VELOCITY` holds the TCWS signal number, not a speed.
+* **AC and Farm ID text**: `dark:text-emerald-400`. The `#166534` green was
+  hard to read on the dark background. Light mode is unchanged.
+
+---
+
+## [2026-10-11] - Fix: Typhoons / Assessment & Reporting Bars Misaligned (Sprint 3, branch: develop)
+
+By Cristian.
+
+### 1. File: `frontend/src/app/components/AssessmentModule.tsx`
+* The left "Typhoons" header (about 52px) and the "Assessment & Reporting"
+  top bar (about 45px) each took their natural height, so their bottom
+  borders sat a few pixels apart.
+* Both now have `min-h-14` (56px) with vertically centered content, so the
+  titles and borders line up.
+* It's a minimum, not a fixed height, so the top bar can still wrap its
+  controls on narrow screens.
+
+---
+
+## [2026-10-11] - Fix: Header Pushed Up on Assessment & Reporting (Sprint 3, branch: develop)
+
+By Cristian. On Assessment & Reporting, the header (brand badge, module
+tabs) slid up and was half hidden behind the page.
+
+### 1. File: `frontend/src/app/App.tsx`
+* **Outer app frame:** changed from `overflow: hidden` to `overflow: clip`.
+  * Cause: a `hidden` box can still be scrolled by the browser itself, for
+    example when an element gets focus or a chart tooltip pokes out. That
+    scrolled the whole frame and pushed the header up.
+  * A `clip` box clips the same way but can't be scrolled, so the header now
+    stays in place on every page.
+* **`<main>`:** changed from `overflow-hidden` to `min-h-0 overflow-clip`, for
+  the same reason. `min-h-0` keeps it at exactly the height left under the
+  header, since `clip` (unlike `hidden`) doesn't zero a flex item's minimum
+  height. Each module still scrolls its own tables and lists.
+
+---
+
+## [2026-10-11] - Monitoring Dashboard: Typhoon Progress Strip & System Status (Sprint 3, branch: develop)
+
+By Cristian. Two of the four dashboard suggestions from the HTML mockup were
+accepted: (1) the typhoon progress strip and (3) System Status, without the
+GEE row. Decisions:
+* the PAR badge shows Inside/Exited only, with no exit time (no schema
+  change);
+* no Database Backup row, because nothing records backups;
+* Calibration keeps its own System Status (Backend API row) unchanged.
+
+### 1. File: `backend/app/core/scheduler.py`
+* New module-level **`last_run`** dict (`finished_at`, `scrape_ok`,
+  `status_sync_ok`). It is kept in memory, so it is `None` until the first
+  scheduled run after a restart.
+* **`run_scheduled_scrape()`** fills `last_run` after the scrape and the
+  active-typhoon sync. A failed step is recorded as `False`; the steps still
+  never raise.
+
+### 2. File: `backend/app/services/email_alert_service.py`
+* New **`smtp_configured()`**: a public wrapper around `_smtp_config()`. It
+  only checks that the settings exist and does not test the mail server.
+
+### 3. File: `backend/app/api/system.py` (new) + `backend/app/main.py`
+* New **`GET /api/system/status`** (**`get_system_status()`**), which returns:
+  * the parser's interval, last run and result (from `last_run`);
+  * the parser's next run, read from the live APScheduler job;
+  * the newest bulletin;
+  * whether email alerts are configured.
+* Registered under `/api` in `main.py`.
+
+### 4. File: `backend/app/api/typhoons.py`
+* New **`GET /api/typhoons/{typhoon_id}/progress`**
+  (**`get_typhoon_progress()`**). Read-only counts for one typhoon:
+  * TCBs downloaded, and the final TCB;
+  * exposure-summary municipalities;
+  * distinct farms assessed. Only `RiskAssessment` rows whose `summary_id`
+    belongs to the typhoon are counted, so CSV-seeded rows are left out.
+  * policies locked by a final PABS export (`InsuranceUsage.finalized_at`).
+* `in_par` = `Typhoon.is_active`. PAGASA's status page only lists cyclones
+  inside PAR.
+
+### 5. File: `frontend/src/lib/api.ts`
+* Added the `TyphoonProgress` and `SystemStatus` types, plus
+  `getTyphoonProgress()` and `getSystemStatus()`.
+
+### 6. File: `frontend/src/app/components/MonitoringModule.tsx`
+* New **`TyphoonProgressStrip`**, shown under the stat cards. Five steps:
+  Bulletins collected → Final TCB issued → Exposure computed → Assessment
+  calculated → Exported to PABS.
+  * The current step is the first step not done yet.
+  * An Inside/Exited PAR badge sits in the header.
+  * A "Go to Assessment & Reporting →" link shows when the current step is
+    Assessment or Export.
+  * It follows the same typhoon as the TCBs Downloaded card. It refetches
+    when that typhoon's bulletin count or PAR status changes.
+* New **`SystemStatusPanel`**, to the right of the bulletin list (grid back
+  to 3 columns; the bulletin list is `col-span-2` again). Rows: PAGASA Parser,
+  Last bulletin parsed, Email Alerts.
+  * Refreshes every 60s (**`SYSTEM_STATUS_REFRESH_MS`**) and after "Parse
+    Latest Bulletin".
+* New **`formatClock()`** helper: time only, Asia/Manila.
+* New optional prop **`onNavigateToAssessment`**.
+
+### 7. File: `frontend/src/app/App.tsx`
+* Passes `onNavigateToAssessment={() => setActiveModule("assessment")}` to
+  `MonitoringModule`.
+
+### 8. File: `.claude/API_CONTRACT.md`
+* Documented the two new routes.
+
+---
+
+## [2026-10-11] - Farm Details: Amount of Cover & Readability; Remove Farms by Signal Chart (Sprint 3, branch: develop)
+
+By Cristian. Minor UI changes; no backend or schema changes.
+
+### 1. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* **Selected Farm Info Panel** (Spatial Analysis & Data Import map):
+  * The **Payment** row (`assessment.final_indemnity_payment`) was replaced
+    with **Amount of Cover** (`Farm.amount_cover`, from the farm's latest
+    policy). It now shows for every farm, assessed or not, and shows "—"
+    when the farm has no policy.
+  * Readability changes:
+    * body text 10px → 12px, farmer name 12px → 14px, header 11px → 12px;
+    * labels use `text-foreground/70` instead of `text-muted-foreground`;
+    * label column is `grid-cols-[auto_1fr]`;
+    * panel is `min-w-[270px]` (was 230px).
+
+### 2. File: `frontend/src/app/components/MonitoringModule.tsx`
+* **Farms by Signal Number** bar chart removed (Cristian: no longer needed).
+  The bulletin list now takes the full width (`grid-cols-1`, dropped
+  `col-span-2`).
+* Removed `signalChartData`, `SIGNAL_BAR_COLOR`, the `recharts` import, and
+  the `BarChart2` icon import.
+* `darkMode` is no longer destructured (the chart was its only use). It stays
+  in `MonitoringModuleProps`, so the parent is unchanged.
+* `GET /assessments/summary` still returns `signal_breakdown`. Nothing reads
+  it now, but it was left as is to keep this change frontend-only.
+
+---
+
+## [2026-10-11] - TCWS Parsing: Missing / Wrong Wind-Signal Areas (Sprint 3, branch: develop)
+
+By Cristian.
+
+The TCB viewer was missing municipalities PAGASA put under a signal, and
+listing some it didn't (seen on OPONG TCB No. 16). Anything not matched to a
+boundary also gets no `tbl_tcb_signals` row, so no exposure and no indemnity.
+Investigated against the stored `tcws_areas` of tcb_id 432, the 23 original
+OPONG PDFs, all 17 MAYMAY bulletins from PAGASA and KIYAPO TCB#11, then
+audited clause by clause. Approach modelled on
+github.com/pagasa-parser (`source-pdf` table reading, `AreaExtractor` clause
+grammar), re-implemented in Python; resolving names to PSGC LGUs is ours.
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* **`parse_bulletin_text()` step 5**: wind-signal rows are now found by their
+  signal cell (`_TCWS_SIGNAL_CELL_RE`, "2 / Wind threat: / Gale-force
+  winds"), not by a "Mindanao" header row in the same table.
+  * Fixes OPONG TCB#13-16. pdfplumber split the table at a page break, the
+    Signal No. 2 part had no header row, and the whole row was skipped.
+  * Fixes OPONG TCB#1-4. The track-forecast table ("980 km East of
+    Northeastern Mindanao") passed as the header, so "12-Hour".."96-Hour
+    Forecast" became bogus Signals 1-9.
+  * A header row now needs all three of Luzon/Visayas/Mindanao as cells
+    (**`_tcws_header_columns()`**). Columns default to 1/2/3 when a table
+    has none (**`_DEFAULT_TCWS_COLUMNS`**).
+  * "Warning lead time / Range of wind speeds / Potential impacts" text is
+    no longer stored as area text (**`_LEAD_TIME_RE`**).
+* **`match_tcws_cell()`**: rewritten. It used to search the whole cell for
+  every boundary name in the country. Now the cell is split into clauses
+  (**`_clauses()`**) and each clause is resolved (**`_resolve_clause()`**):
+  * Whole province: all its LGUs.
+  * "portion of X (list)": only the listed towns, looked up inside X only.
+    An HUC listed under its geographic province (e.g. "Cagayan de Oro
+    City") is still matched as its own province-level city.
+  * "the rest of X": X minus the LGUs already under a higher signal. New
+    `higher` parameter (Cristian's decision, Q1).
+  * "mainland X": X minus its island LGUs.
+  * Island groups and Metro Manila: **`_ISLAND_GROUPS`**, **`_NAMED_AREAS`**
+    (Calamian, Cuyo, Babuyan, Siargao, Bucas Grande, Ticao, Burias, Camotes,
+    Bantayan, Lubang, Caluya, Polillo, ...; the 17 NCR LGUs; Corregidor).
+    These are constants in this file (Q2).
+  * "X including Y Island" adds Y. A list written after the island ("the
+    northern portion of Palawan including Cuyo Islands (El Nido, ...)")
+    belongs to the portion.
+  * Fixes the false matches: "San Juan" under La Union no longer adds City
+    of San Juan (NCR), and "Isabela" under Negros Occidental no longer adds
+    City of Isabela (Basilan).
+  * New `unresolved` parameter collects text that matches no boundary.
+* **`_repair_tcws_text()`**: joins PAGASA's line wraps ("Ilocos\nSur",
+  "Can-\nAvid"). This alone dropped all 34 Ilocos Sur LGUs from MAYMAY
+  TCB#7 Signal No. 2, and all of Dinagat / Surigao del Norte from OPONG.
+* **`_fold()`**: name comparisons ignore case, accents (Castañeda), hyphens
+  (Sanchez-Mira), periods, and "Sto."/"Sta." vs "Santo"/"Santa" (PSGC "City of
+  Sto. Tomas"). **`_PAGASA_SPELLINGS`** covers the rest (Pinamungahan,
+  Pres. Carlos P. Garcia, Baliuag, Pio V. Corpuz).
+* **`_municipality_aliases()`**: also handles PSGC's "Tuguegarao City" style
+  (adds "City of Tuguegarao", "Tuguegarao").
+* **`_BoundaryIndex`**: merges a province stored under two spellings. In
+  `tbl_admin_boundaries`, "SURIGAO DEL NORTE" (ALEGRIA, SAN ISIDRO, SISON) sits
+  next to "Surigao del Norte" (21 towns); "SURIGAO DEL SUR" is the same. It
+  prefers the non-all-caps name. Found by the OPONG dry run: without the
+  merge, the caps variant shadowed the real one, and "Surigao del Norte"
+  resolved to 3 towns. The duplicate boundary rows themselves are a data
+  issue for the DB admin; this change does not touch them.
+* **`_seed_tcb_signals()`**: rows come from the new
+  **`resolve_tcws_signals()`** (also used by the re-parse script). It works
+  through levels highest first and adds each LGU once, at its highest
+  signal. Text that matches no boundary is logged as a warning instead of
+  disappearing silently (Q4: no screen change).
+* Removed `_PAREN_RE`, `_name_re()`, `_mentions()` and the `functools`
+  import.
+* Result: across OPONG + MAYMAY + KIYAPO (16,946 bulletin/signal/LGU
+  entries), every remaining difference from the clause-by-clause reference
+  was checked by hand and the parser is right. Before the fix, MAYMAY alone
+  had 188 missing and 547 extra. The only text still logged as unresolved is
+  PAGASA's own typo "Estanciap" (OPONG TCB#8).
+
+### 2. File: `backend/reparse_opong_bulletins.py` (new)
+* Re-parses OPONG's saved bulletins from the original PDFs (OPONG only, Q3),
+  because signals are only seeded on a bulletin's first insert.
+* Dry run by default: per bulletin, prints the stored signal rows next to
+  what the PDF now resolves to.
+* `--apply` does the following:
+  * Rewrites `tcws_areas`, `max_signal_level` and `tbl_tcb_signals`.
+  * Recomputes OPONG's exposure summaries.
+  * Deletes OPONG summaries for boundaries no bulletin covers any more, if
+    nothing references them.
+  * Refuses to run while OPONG has computed assessments or insurance-usage
+    rows (run `seed_opong_assessment_test.py --reset` first).
+  * Removes the seeder's TEST-ONLY Surigao del Norte override. The real
+    PDFs put Siargao, Bucas Grande and Dinagat at Signal 2 in TCB#13-14 only.
+
+### 3. File: `backend/tests/test_bulletin_parser.py`
+* New tests:
+  * Header-less continuation table.
+  * Forecast table ignored.
+  * Lead-time text dropped.
+  * "The rest of" across signal levels (real OPONG TCB#13 Mindanao text).
+  * Unresolved text logged.
+  * Line breaks inside names.
+  * Same-named towns/cities.
+  * Mainland.
+  * Island groups / Metro Manila.
+  * List after "including".
+  * Spelling differences.
+  * "northern and central portions".
+  * Unresolved names reported.
+* `test_save_bulletin_to_db_creates_bulletin_and_signals` now uses a real
+  cell text instead of the old "SIGNAL NO. 2\nMindanao:" prose prefix.
+
+---
+
+## [2026-10-11] - Header Brand Logo/Badge; Farm Records Column Alignment (branch: develop)
+
+UI polish per Cristian, reviewed in the browser.
+
+### 1. File: `frontend/src/app/components/BrandLogo.tsx` (new)
+* **`BrandLogo`**: inline-SVG logo mark. It replaces the placeholder "P"
+  box: a green shield (insurance) with a gold outline, a white rice stalk
+  (insured crop) and gold field furrows (mapped farm land). Gold matches the
+  active-tab underline (`#fbbf24`). A `useId()` gradient id keeps multiple
+  instances from colliding. Takes `size` and `className`.
+
+### 2. File: `frontend/src/app/components/Header.tsx`
+* Brand block: logo (38px) and name are framed as one badge, with a rounded
+  gold-tinted border, a top-left sheen, a 1px top highlight and a faint gold
+  glow. Text is larger: "PCIC-GIS" 11px to 14px, subtitle 9px to 11px.
+* Removed the divider line between the brand block and the module tabs, and
+  the fixed 200px brand width. The tab bar's left padding is gone, so the
+  active-tab highlight no longer leaves a 4px dark strip.
+
+### 3. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* Farm Records: **Area (ha)** (90px), **CIC No.** (130px) and **Exp (h)**
+  (80px) are now centered, header and values. Their values previously sat
+  against the neighbouring column because of mixed left/right alignment.
+  The table is now 1990px wide.
+
+---
+
+## [2026-10-11] - Farm Records: New Column Order, Cover/CIC/Program Type/Used For Typhoon (branch: develop)
+
+Spatial Analysis & Data Import's Farm Records table, reordered per Cristian:
+Farm ID > Farmer > Municipality > Barangay > Area (ha) > **Amount of Cover** >
+**CIC No.** > Effectivity Date > Expiry Date > **Program Type** > Crop Stage >
+**Used For Typhoon** > Signal > Exp (h) > GPX Boundary. The **Est. Payment**
+column is removed and replaced by Amount of Cover.
+
+### 1. File: `backend/app/api/farms.py`
+* **`list_farms()`**: each row also returns `amount_cover`, `program_type`
+  and `used_for_typhoon`. CIC No. reuses the existing `policy_no`, where CSV
+  ingestion already stores the newer export's `CIC NO` column.
+* **`_locked_typhoons_by_insurance_id()`** (new): one query per page that
+  returns the typhoons each policy was locked for by a final PABS export
+  (`tbl_insurance_usage.is_used` + `finalized_at`), formatted as
+  "OPONG 2025, ADA 2026". The provisional calculate-time mark is not shown.
+  Skipped when the page has no insurance.
+
+### 2. File: `backend/app/core/farms_view.py`
+* **`fetch_latest_insurance_from_view()`**: joins `tbl_insurance_records` on
+  the view's existing `insurance_records_id`, so it also returns
+  `insurance_records_id`, `program_type` and `amount_cover`. The materialized
+  view itself is unchanged, so no migration is needed.
+
+### 3. Files: `frontend/src/lib/api.ts`, `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* **`Farm`** type: `amount_cover`, `program_type`, `used_for_typhoon`.
+* Farm Records table: new column order and widths (table is now 2030px wide,
+  15 columns); "Effective Date" relabelled "Effectivity Date".
+
+### 4. File: `backend/tests/test_farms_api.py`
+* Fake insurance rows carry the new fields; the mock routes the usage query.
+* Every `list_farms()` call now passes `municipality=None, farmer_id=None`.
+  Called as a plain function, those defaulted to the truthy `Query(None)`
+  marker, which applied both filters; 5 tests failed on it (previously hidden
+  as `AttributeError`s, since the fake query had no `.join()`).
+* New **`test_data_row_carries_cover_program_type_and_locked_typhoons`** and
+  **`test_no_usage_query_when_page_has_no_insurance`**.
+
+### Note
+* If `REDIS_URL` is set, farm pages cached before this change lack the new
+  fields and show "—" until those cache entries expire.
+
+---
+
+## [2026-10-11] - Final PABS Export Locks Policies as Used (branch: develop)
+
+After a specialist exports the final PABS CSV, every policy on it with a
+payout is locked as used and can't be assessed again for a new typhoon.
+Until now, usage was only marked provisionally at calculation time, and
+nothing read it back: a policy paid for one typhoon was still assessed and
+paid for the next. The calculation-time mark is kept as a provisional
+"pending" mark; the export adds a permanent lock on top of it.
+
+### 1. File: `backend/app/models/models.py` / `backend/init_schema.sql`
+* **`InsuranceUsage.finalized_at`** (new column, `TIMESTAMPTZ`, nullable):
+  NULL = provisional calculate-time mark only; set = locked by an export.
+* New migration `backend/migrations/2026-10-11_insurance_usage_finalized_at.sql`
+  (re-runnable `ADD COLUMN IF NOT EXISTS`) for already-provisioned databases.
+
+### 2. File: `backend/app/services/assessment_service.py`
+* **`AssessmentService.calculate_for_bulletin()`**: the policy lookup now
+  excludes any policy with a used, finalized `tbl_insurance_usage` row, for
+  every typhoon. A new typhoon can't reuse it, and recalculating the exported
+  typhoon leaves its exported results frozen (policies exported with a ₱0
+  payout are not locked and can still be recalculated).
+* **`AssessmentService.finalize_exported_usage()`** (new): given
+  (insurance, typhoon, assessment) for each exported row with a payout, sets
+  `is_used`/`finalized_at` on the usage row (creating it if missing) and the
+  `tbl_insurance_records` mirror. Rows already locked are skipped, so
+  re-exporting is harmless. Returns the number newly locked.
+
+### 3. File: `backend/app/api/assessments.py`
+* **`export_assessments_pabs_csv()`**: now `POST /assessments/export-pabs`
+  (was `GET`), because exporting changes data. Locks the exported policies via
+  `finalize_exported_usage()` before returning the CSV.
+* **`_build_pabs_rows()`**: rows also carry `insurance_records_id`,
+  `typhoon_id` and `final_indemnity_payment` (not written to the CSV).
+
+### 4. File: `backend/app/api/insurance.py`
+* **`get_insurance_usage()`**: returns `finalized_at` per usage row.
+
+### 5. Files: `frontend/src/lib/api.ts`, `frontend/src/app/components/AssessmentModule.tsx`
+* **`downloadCsv()`**: takes an optional HTTP method;
+  **`downloadAssessmentsPabsCsv()`** sends `POST`.
+* **PABS modal "Download CSV" button**: asks for confirmation first (the lock
+  can't be undone from the UI), then shows a success toast.
+
+### 6. File: `backend/tests/test_assessment_service.py`
+* **`test_policies_locked_by_a_final_export_are_excluded`** (new).
+* New **`FinalizeExportedUsageTests`**: locks a provisional row and updates the
+  mirror, creates a missing usage row, leaves an already-locked row untouched on
+  re-export, and makes no DB calls for an empty export.
+
+---
+
+## [2026-10-11] - PABS "Download CSV" Sends the Auth Token (branch: develop)
+
+Clicking **Download CSV** in the Assessment module's "Review CSV / PABS
+Indemnity" modal opened a tab showing `{"detail":"Not authenticated."}`
+instead of saving a file. The assessments router is gated by
+`Depends(get_current_user)`, which requires an `Authorization: Bearer` header,
+but the button used `window.open()` -- a plain navigation that sends no
+header. The JWT is only attached by `api.ts`'s `request()` wrapper.
+
+### 1. File: `frontend/src/lib/api.ts`
+* **`downloadCsv()`** (new, private): fetches a path with the persisted Bearer
+  token, then saves the response Blob via a synthetic `<a download>`. A 401
+  logs the user out the same way `request()` does. Filenames are hardcoded
+  client-side because `Content-Disposition` is not readable cross-origin
+  without `expose_headers` on the CORS middleware.
+* **`downloadAssessmentsCsv()`** / **`downloadAssessmentsPabsCsv()`** (new):
+  replace `getAssessmentsExportUrl()` / `getAssessmentsExportPabsUrl()`
+  (removed), which returned bare URLs and had the same missing-header flaw.
+
+### 2. File: `frontend/src/app/components/AssessmentModule.tsx`
+* **PABS modal "Download CSV" button**: calls `downloadAssessmentsPabsCsv()`
+  and shows a toast on failure, instead of `window.open()`.
+
+---
+
+## [2026-10-09] - Farm Records Show Farmer Names in PCIC CSV Format (branch: develop)
+
+Spatial Analysis & Data Import listed farmers first-name-first
+("ELIZABETH AGCOL"). They now follow the PCIC CSV's `FARMER NAME` layout:
+**SURNAME, FIRSTNAME [EXTENSION] M.**, e.g. `AGCOL, ELIZABETH M.`,
+`MANTE, DIOSDADO JR. T.`.
+
+### 1. File: `backend/app/core/farmer_name.py`
+* **`format_pcic()`** (new): builds `SURNAME, FIRSTNAME M.`. A full
+  legacy `Middlename` is reduced to its initial. No separate extension handling
+  is needed: `parse_farmer_name()` already keeps JR./SR./II... attached to
+  `first_name`, which is exactly where the PCIC CSV places it (before the
+  middle initial). Returns `None` (never `''`) when no name is on file.
+* **`format_given_first()`**: docstring only. It now serves just the farmer
+  search suggestions.
+
+### 2. File: `backend/app/api/farms.py`
+* **`list_farms()`**: `farmer_name` now uses `format_pcic()`. This affects the
+  Farm Records table and the map popup, which share this field. The
+  Farmer-column sort now orders by surname.
+
+### 3. File: `backend/tests/test_farmer_name.py`
+* New **`FormatPcicTests`**: middle initial, extension placement, legacy full
+  middle name, missing parts, blank or `None` handling.
+
+---
+
+## [2026-10-09] - Assessment Matches Farms by Municipality; OPONG Assessment Test Seeder (branch: develop)
+
+Testing the Assessment module end-to-end against Typhoon OPONG (BUALOI) and
+the USTP CAPSTONE insurance records surfaced a matching bug that skipped
+most farms in every signalled municipality.
+
+### 1. File: `backend/app/services/assessment_service.py`
+* **`AssessmentService.calculate_for_bulletin()`**: policies are now matched
+  on the exposure summary's **(province, municipality)** via a join to
+  `tbl_admin_boundaries`, instead of `Farm.boundary_id == summary.boundary_id`.
+  Farms reference their **barangay** boundary, while
+  `ExposureCalculatorService` keys exposure by municipality and stores just
+  one (arbitrary, last-loaded) barangay row as the summary's `boundary_id` —
+  so only farms in that single barangay were ever assessed.
+
+### 2. File: `backend/app/api/bulletins.py`
+* **`get_typhoon_summary()`**: `people_hit` counts farmers by the summaries'
+  (province, municipality) for the same reason; it previously counted only
+  the one stand-in barangay per municipality.
+
+### 3. File: `backend/tests/test_assessment_service.py`
+* Mock chain updated for the extra `AdminBoundary` join; summaries now carry
+  `province`/`municipality`.
+* New **`test_policies_matched_by_municipality_not_the_summarys_single_barangay`**
+  asserts the policy lookup filters on province + municipality, not the
+  farm's `boundary_id`.
+
+### 4. File: `backend/seed_opong_assessment_test.py` (new, one-off)
+* Ingests the 23 real OPONG PDFs (`USTP CAPSTONE/TCB/`) through
+  `BulletinParserService`, content unchanged, with every `issued_at` shifted
+  by one whole-day offset so NR. 23F lands on the run date and OPONG is the
+  latest TCB.
+* Rebuilds each OPONG bulletin's `tbl_tcb_signals` rows from its PDF on every
+  run (delete, then `BulletinParserService._seed_tcb_signals()`).
+  `save_bulletin_to_db()` only seeds them on first insert, and the saved OPONG
+  bulletins had 0 Surigao del Norte rows. Prints per-bulletin row counts.
+* **Test-only override** (`override_signal()`): guarantees a TCWS 2
+  `tbl_tcb_signals` row for every Surigao del Norte municipality in NR. 12–16,
+  the bulletins where PAGASA hoisted the province. Existing rows are raised to
+  2 and missing ones added. At Signal 2 / 12h only Booting, Flowering and
+  Milking pay; Maturity gives 10% yield loss, below the lowest indemnity
+  bracket (>10%), so the ranking prefers paying stages. OPONG never put Mindanao above Signal 1 (Surigao del
+  Norte: Signal 1, NR. 12–16, 12h), so no farm there could otherwise qualify.
+  The bulletins' raw PAGASA text (`tcws_areas`) is left as issued.
+* Selects the 20 **existing** insurance records on Surigao del Norte farms
+  most likely to pay out (same signal / hours / crop-stage / RECSAP-rule
+  checks as `AssessmentService`) and sets their coverage to span OPONG's
+  shifted dates (30 days before the first bulletin, 1-year term). Original
+  dates are written to `backend/opong_test_original_dates.json` (gitignored)
+  before the commit. Does not run the assessment. Re-runnable.
+* **`--restore`** (`restore_records()`): puts those records' original dates
+  back and deletes the backup file.
+* `undo_ustp_activation()`: an earlier draft activated USTP CSV records
+  instead, so any USTP record whose dates differ from the CSV is put back.
+* **`--reset`** (`reset_assessment()`): clears OPONG's assessment results so
+  the demo can be repeated. It deletes the computed `tbl_risk_assessment` rows
+  (`matrix_id IS NOT NULL`) for OPONG's exposure summaries and OPONG's
+  `tbl_insurance_usage` rows, and clears the `is_used` / `used_for_typhoon_id` /
+  `used_at` mirror where it points at OPONG. Crop-stage seed rows, bulletins,
+  the signal override and the 20 active records are kept.
+
+---
+
+## [2026-10-09] - One-Click Server Start Script (branch: develop)
+
+By Cristian.
+
+### 1. File: `start-servers.bat` (new, repo root)
+* Double-click to start GeoServer and the FastAPI backend, each in its own
+  window. Backend runs the same command as `.claude/LOCAL_SERVER_SETUP.md`
+  (`backend\.venv\Scripts\python.exe -m uvicorn app.main:app --host 0.0.0.0
+  --port 8000 --reload`; `0.0.0.0` needed for Tailscale peers). GeoServer
+  runs `C:\geoserver\bin\startup.bat` with the system `JAVA_HOME`, falling
+  back to the JDK 17 path on Cristian's PC.
+* Skips a server whose port (8080 / 8000) is already listening, so running
+  it twice doesn't start duplicates; prints which path to edit if
+  GeoServer, Java, or the venv isn't found.
+* No secrets: backend credentials stay in `backend\.env` (gitignored),
+  GeoServer's admin login in its own data dir. The GeoServer/JDK paths at
+  the top are machine-specific -- teammates edit them for their install.
+
+---
+
+## [2026-10-09] - Monitoring "TCBs Downloaded": Restore Gayla's Card Design, Keep `is_final` Trigger (branch: develop)
+
+By Cristian. `af5433c` (entry below) was built in parallel with Gayla's
+`eab00b7` "Monitoring & Extraction Redesign" and, once both landed on
+`develop`, replaced her card design and her user-chosen "Ready for
+assessment" wording along with the trigger. Per Cristian, the two are now
+combined: Gayla's design back, only the trigger and matching changed.
+
+### 1. File: `frontend/src/app/components/MonitoringModule.tsx`
+* Restored Gayla's stat-card markup and `statCards` shape exactly: larger
+  cards (`p-5`, `text-3xl`, 14×14 icon tile, `gap-4`), typed `alert` field,
+  amber `AlertTriangle` styling when ready, sub-text `for <NAME>` /
+  "No tracked typhoon yet", badge text exactly "Ready for assessment".
+  Removes `af5433c`'s green `CheckCircle2` "Final TCB No. N received —
+  ready for assessment" notice and its `trackedTyphoon` `useMemo`.
+* Kept Gayla's typhoon choice (first/primary active typhoon, per Fabio,
+  falling back to the newest bulletin's typhoon), but matched by
+  **`typhoon_id`** (`primaryTyphoonId`) instead of name — PAGASA reuses
+  local typhoon names across seasons, so name matching would merge a future
+  storm's count with an older same-named one.
+* **`typhoonDoneCollecting`** now = the tracked typhoon has a bulletin with
+  `is_final` (from `af5433c`), not "no longer on PAGASA's active list". A
+  storm drops off the active list even when its final TCB was never
+  downloaded, which the old stand-in signal couldn't tell apart.
+* Context for why the newest-typhoon fallback matters: QUEENIE's #14 is
+  "NR. 14F" (exited PAR at typhoon strength, not as an LPA), saved Sep 30
+  before `is_final` existed, so the migration's LPA-only backfill couldn't
+  flag it. An earlier "last typhoon with a final bulletin" fallback therefore
+  jumped back to NENENG. QUEENIE gets flagged on its next re-scrape
+  (`TCB#14_queenie.pdf` is still on PAGASA's index).
+
+### Status / Next Steps
+* Unchanged from `af5433c`: the bell/toast notification for new final TCBs
+  in `App.tsx`, all backend/migration changes, the Spatial Analysis table.
+* No migration needed for this change.
+
+---
+
+## [2026-10-09] - Persist Final-TCB Marker (`is_final`) + "Ready for Assessment" Notice; Farm Records Pinned Column (branch: develop, direct push per Cristian)
+
+By Cristian. `bulletin_parser.py` already detected a typhoon's final bulletin
+(PAGASA's trailing "F" on the number, e.g. "NR. 14F", or a "Low Pressure Area
+(formerly ...)" bulletin) but only used it in-memory to trigger assessment —
+it was never stored, and the saved title drops the "F", so the frontend could
+not tell which bulletin was final. This persists it and drives the Monitoring
+"ready for assessment" notice from it.
+
+**Supersedes part of the "Monitoring & Extraction Redesign" entry below.**
+That entry chose `Typhoon.is_active` turning false over the "F" marker
+*because* the marker was not persisted and would have needed a new DB column
++ API change. This entry adds exactly that column and API field, and the
+"TCBs Downloaded" card now keys off the final bulletin instead of
+`is_active`. Fabio's other changes from that redesign (4-card grid, removed
+charts, Farms by Signal Number beside the bulletin list) are kept.
+
+### 1. File: `backend/migrations/2026-10-09_tcb_is_final.sql` (new), `backend/init_schema.sql`, `backend/app/models/models.py`
+* New column `tbl_tropical_cyclone_bulletins.is_final BOOLEAN NOT NULL
+  DEFAULT FALSE` (`TropicalCycloneBulletin.is_final`). The migration
+  backfills existing `'Low Pressure Area'` bulletins to `TRUE` (always final,
+  same rule the parser applies); other already-saved finals get flagged on
+  their next scrape/re-upload (below).
+
+### 2. File: `backend/app/services/bulletin_parser.py`
+* **`BulletinParserService.save_bulletin_to_db()`**: stores
+  `parsed_data["is_final"]` on new bulletins. On an already-saved bulletin,
+  flips `is_final` False → True when a re-scrape/re-upload of its PDF says it
+  is final (covers bulletins saved before the column existed). Never flips
+  True → False.
+
+### 3. File: `backend/app/api/bulletins.py`, `frontend/src/lib/api.ts`
+* **`list_bulletins()`** returns `is_final`; `Bulletin` interface gains
+  `is_final: boolean`.
+
+### 4. File: `frontend/src/app/components/MonitoringModule.tsx`
+* "TCBs Downloaded" follows a `trackedTyphoon` (`useMemo`): the active
+  typhoon with the most recent bulletin; with none active, the newest
+  bulletin's typhoon — PAGASA drops a storm from its status page right around
+  its final bulletin, so "active only" would hide the notice almost
+  immediately. Deliberately not "last typhoon with a final bulletin": that
+  jumped back to an older storm whenever the newest one's final TCB wasn't
+  flagged yet (QUEENIE 14F, saved before `is_final` was stored). Subtitle
+  shows `(+N active)` when several typhoons are active.
+* The amber `is_active`-based "Ready for assessment" alert is replaced by a
+  green notice, "Final TCB No. N received — ready for assessment", shown once
+  the tracked typhoon has an `is_final` bulletin. `AlertTriangle` import
+  dropped, `CheckCircle2` added. Stat cards slightly more compact.
+
+### 5. File: `frontend/src/app/App.tsx`
+* Bulletin polling now also raises a "Final TCB — Ready for Assessment"
+  notification + toast for **every** final bulletin among all bulletins new
+  since the last poll — not just the newest — so a final TCB parsed in the
+  same cycle as another typhoon's bulletin still notifies.
+
+### 6. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* Farm Records table: `table-fixed` at `w-[1600px]` with a `<colgroup>` of
+  fixed widths, every cell `whitespace-nowrap`/`truncate` (full text in a
+  `title` tooltip). Required by the row virtualization: a wrapped cell made a
+  row taller than `ROW_HEIGHT` and desynced scrolling, and auto layout sized
+  columns from only the rendered window so they shifted while scrolling.
+* Farm ID column pinned (`sticky left-0`) with an opaque background mixed to
+  match the row's hover/selected tints.
+* Keeps the `farmer_name || "—"` fix from the blank-farmer-names entry below
+  (merged on top of it; the tooltip uses `|| undefined` for the same reason).
+
+### 7. File: `backend/tests/test_bulletin_parser.py`
+* `test_save_bulletin_to_db_stores_is_final_on_new_bulletin`,
+  `test_reparse_flags_existing_bulletin_as_final`.
+
+### Status / Next Steps
+* **Apply the migration before running this code on any existing DB** —
+  the model now selects `is_final`, so bulletin queries fail on a DB without
+  the column:
+  `psql -U agrisure_admin -d agrisure_db -f backend/migrations/2026-10-09_tcb_is_final.sql`
+* Pushed directly to `develop` per Cristian's explicit instruction.
+
+---
+
+## [2026-10-09] - Sprint 3: Blank Farmer Names in Spatial Analysis — Ingest Idempotency Fix
+
+Reported by Fabio: after ingesting `PCIC10 GPX 11-05-2025 WITH EXISTING IC
+AFFECTED BY TY.csv`, the upload reported success but the **Farmer column in
+Spatial Analysis → Farm Records was empty** for every row from that file.
+
+**The parser was not at fault.** Replaying the name logic from
+`prepare_row_payload()` and `GpxFarmerMatcherService.parse_farmer_name()`
+against the real CSV gives **0 blank names out of 1,114 rows**; all 952
+distinct `FARMERSID` values split correctly. Root cause was a three-link
+chain:
+
+1. **The pre-fix upload wrote a shadow dataset.** The file was uploaded once
+   *before* `9547564`, when `prepare_row_payload()` had no `FARMER NAME` /
+   `CIC NO` / `AREA` aliases. Because `tbl_farmers_profile.last_name` and
+   `first_name` are `NOT NULL`, the `or ""` fallback stored **empty strings**
+   instead of failing — nothing errored. The same missing aliases stored
+   `policy_no = ''`, `area_size = 0`, `amount_cover = 0`.
+2. **Ingestion was not idempotent.** `_ingest_row()` resolved an existing
+   farmer/farm purely as a lookup and discarded the payload, so re-uploading
+   the corrected file matched the broken rows by `farmers_id` and changed
+   nothing. **Re-uploading could never have fixed it** — this is the real
+   defect, and what this entry fixes.
+3. **The API returned `""`, not `null`.** `list_farms()` built
+   `f"{first} {last}".strip()` → `""`, and the frontend's `farmer_name ?? "—"`
+   only substitutes on null/undefined, so the cell rendered visually blank
+   rather than showing a dash. That is why this stayed invisible.
+
+Side effect of the double upload: the duplicate guard is
+`(policy_no, farm_id)`. The pre-fix rows hold `policy_no = ''` while the
+re-upload supplied the real `CIC NO`, so the guard did not match and a
+**second `InsuranceRecord` was inserted per farm**, each with its own
+`tbl_risk_assessment` seed. Cleaned up by the migration below.
+
+### 1. File: `backend/app/api/upload.py`
+* **`_is_blank()`** (new): treats `None` and whitespace-only strings as blank.
+  Documents why blank (not null) is the state these NOT NULL columns reach.
+* **`_backfill_blank_fields()`** (new): copies payload values onto an
+  already-persistent instance for **only** the fields currently blank on it.
+  Returns the field names changed, for logging. No `db.add()` — the instance
+  is already persistent, so the UPDATE rides the caller's existing per-row
+  `SAVEPOINT`, leaving failure isolation and progress reporting untouched.
+  Blank-only rather than "CSV always wins" (Fabio's call, 2026-10-09): the
+  newer export derives the farmer from one combined `FARMER NAME` field, so
+  letting it overwrite would let a split value clobber the legacy export's
+  three discrete columns. Repairing a blank cannot lose information.
+* **`_ingest_row()`**: on the existing-farmer branch, backfills
+  `last_name`/`first_name`/`middle_name` and logs what was filled. On the
+  existing-farm branch, backfills `area_size` when the stored value is
+  `0`/`None` — not routed through `_backfill_blank_fields()` because "blank"
+  there is `0` (the create path coerces an unreadable `AREA` column to `0`,
+  and a real farm is never 0 ha).
+
+### 2. File: `backend/app/core/farmer_name.py` (new)
+* **`format_given_first()`** — `'ALFONSO ABANES'`, returns `None` (never `''`)
+  when nothing is on file, so the frontend's `?? "—"` fallback actually fires.
+* **`format_surname_first(with_middle_initial=False)`** — `'ABANES, ALFONSO'`,
+  and `'ABANES, ALFONSO. F.'` for the payout export. Reproduces the export's
+  existing shape exactly, trailing period included — that quirk predates this
+  helper and the column format is PCIC-facing, so it is preserved deliberately.
+* A blank part no longer leaves its separator behind (previously `", "` and
+  `", ."`). Centralized rather than inlined because four endpoints each had
+  their own f-string and all four degraded differently on blanks.
+
+### 3. Files: `backend/app/api/farms.py`, `insurance.py`, `assessments.py`
+* `list_farms()` and `search_farmers()` → `format_given_first()`.
+* `get_insurance_usage()` → `format_surname_first()`.
+* `export_assessments_csv()` → `format_surname_first(with_middle_initial=True)`.
+* `search_farmers()` keeps `name` a non-empty string (the suggestion list
+  renders it as the clickable label, so null would be an invisible,
+  unselectable row) — a nameless farmer is labelled `(unnamed farmer #<id>)`
+  so the gap is visible and still pickable.
+
+### 4. File: `backend/migrations/2026-10-09_prefix_ingest_cleanup.sql` (new)
+* Deletes `tbl_insurance_records WHERE policy_no = ''` — the ~1,100 shadow
+  records from the pre-fix upload. `tbl_risk_assessment` and
+  `tbl_insurance_usage` both cascade off that FK, so one statement suffices.
+* **Diagnostic-first**: leading read-only `SELECT`s report every affected count
+  (including the good records that must *not* change) before anything is
+  deleted, then a verify pass afterwards. Safe to re-run.
+* `policy_no = ''` is a precise fingerprint: `seed_database.py` writes real
+  numbers, `seed_active_insurance.py` prefixes `POL-SEED-`, and `upload.py`
+  only produces `''` when the CSV had no recognizable policy column at all.
+* Deliberately does **not** delete the farmers or farms — their blank names and
+  zero areas are repaired in place by item 1 on the next upload. Deleting them
+  would cascade into the *good* insurance records and the `location_geom`
+  already loaded from the `.gpkg`.
+
+### 5. Files: `frontend/src/app/components/SpatialAnalysisModule.tsx`, `GISLeafletMap.tsx`
+* Farmer name fallback `??` → `||`, so a blank-but-not-null name can never
+  render as an empty cell again regardless of what the API sends.
+
+### 6. Files: `backend/tests/test_upload_csv_ingestion.py`, `tests/test_farmer_name.py` (new)
+* New **`ExistingRowBackfillTests`** (6 tests): blank names backfilled;
+  whitespace-only treated as blank; **real names not overwritten**; partially
+  blank fills only the gap; `area_size = 0` backfilled; real `area_size` not
+  overwritten. Uses the existing `_build_mock_db()` / `_run_ingestion()`
+  harness, pre-seeding via `mock_db.add()`.
+* New `test_farmer_name.py` (14 tests) covering both formatters, the
+  blank/null/whitespace cases, and the unchanged export shape.
+
+### 7. File: `.claude/HANDOFF_2026-10-09_FARMER_NAME_BACKFILL.md` (new)
+* Runbook for the remaining database/UI verification (steps 2–5): diagnostic
+  counts with a decision gate (including when NOT to run the delete), the
+  cleanup migration, the re-upload that does the actual repair, and the SQL/UI
+  checks. Also records the gotchas most likely to waste time — chiefly that
+  "Active Insurance Only" hides every farm from this CSV (its policies expired
+  `02/28/2026`), and that `backend/.env` may not exist. No secrets or real
+  farmer data in the file.
+
+### Status / Next Steps
+* **Test suite run by Fabio, 2026-10-09: PASSED.** All 20 new tests green
+  (`ExistingRowBackfillTests` 6, `test_farmer_name.py` 14). The only failures
+  are the 10 pre-existing `test_farms_api.py` ones noted below, unchanged in
+  count and all the same `_ChainableQuery`/`.join` harness error.
+* Required a throwaway `JWT_SECRET_KEY` on the command line —
+  `backend/.env` does not exist on Fabio's laptop, and `app/core/security.py:28`
+  hard-fails without it, which collected-errored every test module that imports
+  an API router. `DATABASE_URL` has a fallback (`app/core/database.py:15`) and
+  the suite is fully mocked, so no database was needed:
+  `JWT_SECRET_KEY=$(python -c "import secrets; print(secrets.token_urlsafe(48))") python -m pytest tests/ -v`
+* Also verified without touching the venv/DB: the name logic replayed against
+  the real CSV with stdlib only (0/1,114 blank);
+  `_is_blank()`/`_backfill_blank_fields()` exercised as extracted source (8/8
+  logic cases); `py_compile` clean on all edited Python.
+* Remaining run order for Fabio: (2) the migration's
+  diagnostic half, confirming the counts; (3) the delete; (4) **re-upload the
+  CSV** — this is what repairs the blank names and zero areas; (5) confirm
+  `SELECT COUNT(*) FROM tbl_farmers_profile WHERE COALESCE(TRIM(last_name),'')=''
+  AND COALESCE(TRIM(first_name),'')='';` returns 0.
+* Note when checking the UI: this CSV's policies expired `02/28/2026`, so with
+  **Active Insurance Only** on these farms do not appear at all. Search a
+  municipality (e.g. `MAINIT`) and turn that toggle off.
+* Not changed: `nullable=False` on `last_name`/`first_name`. Making them
+  nullable would surface this bug class earlier but affects every consumer —
+  its own task if wanted. `/gpkg` is untouched (it only ever updates
+  `location_geom` and never creates or renames a farmer).
+* Pre-existing, still not fixed here: the 10 `test_farms_api.py` failures noted
+  in the entry below. `_fake_farm()`'s farmer fixture yields the same string
+  through `format_given_first()`, so item 3 neither fixes nor worsens them.
+  **Worth knowing:** because those 10 never execute, `list_farms()`'s response
+  shape — including item 3's `farmer_name` change — currently has no automated
+  coverage. The cause is a one-line harness gap (`list_farms()` is called
+  without `municipality`/`farmer_id`, so FastAPI's truthy `Query(None)` default
+  reaches the `.join()` branch, which `_ChainableQuery` doesn't implement).
+  Fixing it is a small, self-contained follow-up.
+
+## [2026-10-09] - Sprint 3: CSV Ingest Reuses Preloaded Boundaries + Ingestion Test Harness Fix
+
+Verification of the crop-stage branch below on Cristian's PC. The first run
+of the suite failed every `test_upload_csv_ingestion.py` test, and the real
+upload of `PCIC10 GPX 11-05-2025 WITH EXISTING IC AFFECTED BY TY.csv` gave
+1,055 inserted / 14 skipped / **45 failed** (expected 0), which left the
+`.gpkg` upload at 1,055 updated / 45 failed.
+
+All 45 failures were one barangay: `POBLACION (ALEGRIA)`, Alegria, Surigao del
+Norte. The exact-name lookup missed, `_resolve_psgc_code()` stripped the
+parenthetical to reach `POBLACION` (`1606701001`), and the ingest inserted a
+new boundary with that code. `tbl_admin_boundaries` has been preloaded
+nationwide since 2026-09-30, so the row already existed and the insert hit
+`tbl_admin_boundaries_psgc_code_key`. This bug predates the crop-stage
+branch; the new export is the first file to contain such a variant.
+
+### 1. File: `backend/app/api/upload.py`
+* **`_ingest_row()`**: after `_resolve_psgc_code()` succeeds, looks up an
+  existing `AdminBoundary` by `psgc_code` and reuses it. Only inserts a new
+  boundary when none exists. The caller still caches the result under the
+  CSV's own spelling, so the extra query runs once per variant per upload.
+
+### 2. File: `backend/tests/test_upload_csv_ingestion.py`
+* **`_extract_filter()`**: handles `Model.column.is_(True)` — its `.right`
+  is a `True_`/`False_` constant with no `.value`. `CropStageResolver.load()`
+  uses this filter, so every ingestion run raised `AttributeError` in
+  `_prefetch_caches()` and returned `None` (the cause of all 19 failures).
+  Added `False_`, `True_` imports.
+* **`_run_ingestion()`**: raises `AssertionError` with the `mark_error()`
+  message instead of returning `None`, so a swallowed crash is visible.
+* New **`test_name_variant_reuses_existing_boundary_by_psgc_code`**.
+* `test_repeated_boundary_across_many_rows_is_only_queried_once`: expected
+  `AdminBoundary` query count 2 → 3 (the new `psgc_code` lookup).
+
+### 3. File: `.claude/LOCAL_SERVER_SETUP.md` (new)
+* Runbook for running the full stack on Cristian's PC without Docker:
+  PostgreSQL, backend, native GeoServer 3.0.1 (datastore host `localhost`),
+  frontend, startup order, upload order, and known non-bugs (Active Insurance
+  Only filter, raster overlay not clickable). No secrets in the file.
+
+### Status / Next Steps
+* Applied `backend/migrations/2026-10-09_crop_stage_mapping.sql` on Cristian's
+  PC's DB (2026-10-09): 17 mapping rows seeded.
+* After the harness fix, `test_upload_csv_ingestion.py` passed 19/19
+  (2026-10-09), before the boundary fix and new test.
+* To do: re-run the suite, re-upload the CSV (expect the 45 rows to insert),
+  then re-upload the `.gpkg`.
+* Pre-existing, not fixed here: 10 `test_farms_api.py` tests fail on `develop`
+  too. They call `list_farms()` without `municipality`/`farmer_id`, so the
+  truthy FastAPI `Query(None)` default triggers `.join()` on the fake query
+  (since `273532d`).
+
+## [2026-10-09] - Sprint 3: Second PABS/GPX CSV Layout + Crop-Stage Translation
+
+The client's newer export ("PCIC10 GPX 11-05-2025 WITH EXISTING IC AFFECTED BY
+TY.csv", 42 columns, 1,114 rows) would not ingest. Only 9 of its headers collide
+with the legacy layout after normalization: it calls the policy number `CIC NO`,
+AreaInsured `AREA`, carries the farmer as one combined `FARMER NAME` field, and
+gives the crop stage as free text (`Dough Stage`) where the legacy export gives an
+integer `Stage No.`.
+
+Mapping that stage column surfaced a live bug in the EXISTING path. `Stage No.` is
+PCIC's own 0-9 agronomic code (0=S/T, then the Table 7a/7b sequence
+MnTl|MxTl|PI|BS|FS|MS|SD|HD|YR), but `prepare_row_payload()` wrote it straight into
+`tbl_risk_assessment.crop_stage_no`, which `AssessmentService` reads as the Table 11
+scale (1=Booting, 2=Flowering, 3=Maturity). Two different scales. On the legacy
+file that meant 41 of 100 rows passed the eligibility gate with every one of them
+mis-staged (code 1 = Maximum Tillering assessed as Booting, code 3 = Panicle
+Initiation assessed as Maturity), while the genuinely eligible rows -- code 4
+(Booting) and code 7 (Dough) -- fell outside {1,2,3} and were silently dropped.
+
+Decisions taken with Fabio, sourced from `USTP CAPSTONE/RECSAP-From-IRR.pptx`
+(Tables 1, 7a/7b, 9, 10, 11) and the manuscript's worked example (p. 53):
+* Milking Stage resolves to `crop_stage_no` 2, the Flowering row -- PCIC pairs
+  `FS/MS` as one unit in Tables 9 and 10.
+* Booting's indemnity group moved Late Vegetative -> Reproductive. The real PABS
+  export labels it "4 - Booting Stg. (REPRODUCTIVE)", and the full assignment that
+  implies (Early Vegetative = S/T, MnTl; Late Vegetative = MxTl; Reproductive = PI,
+  BS, FS; Late Reproductive = MS; Maturity = SD, HD, YR) leaves no group unused.
+  The previous value was flagged in init_schema.sql as inferred and unconfirmed.
+* `Panicle Initiation/Booting` (176 rows, 15.8%) stays deliberately UNMAPPED. Table
+  11 Note 1 excludes PI from wind damage but BS is eligible, and no PCIC document
+  gives a days-after-transplanting threshold to separate them. Those rows ingest and
+  are never assessed; enabling them later is one UPDATE, not a deploy.
+* `crop_stage_no` and `stage_group` are now resolved INDEPENDENTLY. Milking and
+  Flowering share `crop_stage_no` 2 but sit in different Table 1 groups, which the
+  old derive-group-from-stage-number approach could not express.
+
+Fabio is resetting his development database rather than migrating it, so no backfill
+of existing mis-staged rows was written.
+
+### 1. File: `backend/app/services/crop_stage_resolver.py` (new)
+* **`normalize_stage_label()`**: lowercases and collapses whitespace. Deliberately
+  does NOT strip `/` the way `upload.py:_normalize_header()` strips punctuation from
+  column names -- the slash carries meaning in PCIC's merged labels.
+* **`coerce_stage_code()`**: coerces `Stage No.` to int across every shape pandas
+  infers for that column (int64, float64 when any row is blank, object).
+* **`ResolvedCropStage`**: frozen dataclass of
+  `(crop_stage_no, stage_group, pcic_stage, matched_by)` with an `is_assessable`
+  property. `crop_stage_no` None means "ingest but never assess".
+* **`CropStageResolver.load()`**: one query per upload into two dicts (by code, by
+  label); warns if the mapping table is empty.
+* **`CropStageResolver.resolve()`**: integer code is tried first -- it distinguishes
+  PI from BS, which the merged text label cannot. Unknown values warn once per
+  distinct value, not once per row.
+
+### 2. File: `backend/app/api/upload.py`
+* **`prepare_row_payload()`**: added second header spellings via the existing
+  `get(*header_names)` alias helper -- `CIC NO`, `FARMERSID`, `AREA`,
+  `AMOUNT OF COVER`, `VARIETY NAME`. When `Surname`/`Firstname` are absent it now
+  splits `FARMER NAME` through `GpxFarmerMatcherService.parse_farmer_name()`, the
+  same parser the GeoPackage path uses on the same field, so a CSV-created farmer
+  and the .gpkg feature carrying its boundary agree on the name.
+* **`prepare_row_payload()`**: `crop_stage_seed` now carries RAW `stage_code` /
+  `stage_label` instead of emitting a `crop_stage_no` of its own, keeping the
+  function DB-free and unit-testable. Translation moved to `_ingest_row()`.
+* **`_IngestCaches`**: new read-only `crop_stage: CropStageResolver | None` field.
+* **`_prefetch_caches()`**: loads the resolver once per upload.
+* **`_ingest_row()`**: resolves the stage and writes both `crop_stage_no` and the
+  new `stage_group` onto the seed `RiskAssessment`.
+
+### 3. File: `backend/app/services/gpx_farmer_matcher.py`
+* New module-level **`_INITIAL_RE`** (`^[A-Za-z]\.?$`).
+* **`parse_farmer_name()`**: everything between the comma and a trailing middle
+  initial is now the first name. Taking only the first token truncated compound
+  first names -- 131 of the real export's 1,114 rows have three or more tokens,
+  e.g. 'ACERO, ANNA MARIE S.' lost 'MARIE'. A trailing token only counts as an
+  initial when it looks like one, so 'SMITH, JOHN PAUL' keeps both words.
+
+### 4. File: `backend/app/core/indemnity_calc.py`
+* **`CROP_STAGE_TO_INDEMNITY_GROUP`**: now a FALLBACK only, consulted when a row
+  carries no `stage_group`. `1` moved `"Late Vegetative"` -> `"Reproductive"`.
+* **`get_matrix_rule()`** / **`calculate_final_payout()`**: take an optional
+  `stage_group` parameter used in place of the derived one.
+* Manual testing CLI: new optional stage-group prompt so Milking can be exercised.
+
+### 5. File: `backend/app/services/assessment_service.py`
+* **`calculate_for_bulletin()`**: reads the seed row's own `stage_group`, passes it
+  into both lookups, and copies it onto the assessment rows it writes.
+
+### 6. Files: `backend/app/models/models.py`, `backend/init_schema.sql`, `backend/migrations/2026-10-09_crop_stage_mapping.sql` (new)
+* New **`CropStageMapping`** model / `tbl_crop_stage_mapping` table: keyed on either
+  `source_code` (legacy integer) or `source_label` (newer text), with a CHECK
+  constraint enforcing exactly one, and partial unique indexes on each. Seeded with
+  17 rows covering both vocabularies; every ineligible row carries a `notes` value
+  saying why.
+* **`RiskAssessment`** / `tbl_risk_assessment`: new nullable `stage_group VARCHAR(30)`.
+* The migration exists for the OTHER provisioned instances (e.g. Cristian's
+  Tailscale-hosted backend) that are not being reset; it is idempotent via
+  `IF NOT EXISTS` / `ON CONFLICT DO NOTHING`.
+
+### 7. Tests
+* `backend/tests/test_crop_stage_resolver.py` (new): normalization, both lookup
+  paths, code-wins-over-label, the held PI/BS row, warn-once behaviour, empty table.
+* `backend/tests/test_upload_csv_ingestion.py`: **the whole harness was dead.** All
+  14 tests called `upload_csv(file=..., db=mock_db)`, but `upload_csv()` has taken
+  only `file` since the row loop moved into `_run_csv_ingestion()` with its own
+  `SessionLocal` -- every test was raising `TypeError`. Replaced `_fake_upload_file()`
+  with **`_dataframe()`** (mirrors the endpoint's own UTF-8 -> cp1252 decode chain)
+  and **`_run_ingestion()`**, which drives `_run_csv_ingestion()` with `SessionLocal`,
+  `upload_jobs`, `invalidate_farms_cache` and `refresh_farm_latest_insurance_view`
+  patched and returns the `mark_done()` payload. Added **`_stage_mapping()`** and
+  seeded the fake DB's `CropStageMapping` table. New `CropStageTranslationTests`.
+* `backend/tests/test_csv_upload.py`: updated the `crop_stage_seed` assertion for the
+  new raw-passthrough keys; new `NewPabsGpxLayoutTests` (header aliases, name split,
+  compound first names, legacy columns winning, separator/dash parsing).
+* `backend/tests/test_assessment_service.py`: pinned `stage_group` on the existing
+  prior mocks, exposed `mock_db.indemnity_query`, and added a test proving Milking
+  filters the Late Reproductive bracket despite sharing `crop_stage_no` 2.
+* `backend/tests/test_gpx_farmer_matcher.py`: new `ParseFarmerNameTests`.
+
+### 8. File: `frontend/src/app/App.tsx`
+* **`handleCsvFileSelected()`**: maps `result.failures` into the existing
+  `UploadFailuresModal` via a "View details" toast action, the way the GPX/GPKG
+  handler already did. Per-row CSV reasons were previously dropped entirely, so a
+  rejected row surfaced only as a count.
+
+### Status / Next Steps
+* NOT YET RUN -- `cd backend && python -m pytest tests/ -v` is Fabio's to run, as is
+  the `init_schema.sql` reset. See the verification sequence in the approved plan.
+* `panicle initiation/booting` (176 rows) will ingest and never pay out until PCIC
+  supplies a days-per-stage table. Enabling it is one UPDATE on
+  `tbl_crop_stage_mapping`, no deploy.
+* `docs/RECSAP_MATRIX_SCHEMA.md` updated for the superseded Booting mapping.
+
+## [2026-10-08] - Sprint 3: GeoPackage (.gpkg) Farm Boundary Ingestion
+
+The client sent its real farm boundary data as a GeoPackage
+(`docs/PCICX GPX_EXISTING IC AFFECTED BY TY TINO_11-05-2025.gpkg`) instead of
+individual GPX files: one layer, 1,113 features (one per originally walked GPX
+file), EPSG:4326, carrying `FARMERSID`/`FARMID`/`FARMER NAME`/`file_name`
+attributes. The layer declares POLYGON but 383 features are MultiPolygon, and 13
+FARMIDs appear twice (exact re-exports or a later re-walk). The existing
+"Upload GPX" flow now accepts `.gpkg` too. Per Fabio: **update-only** (existing
+farms get `location_geom`; unmatched features are reported, nothing is created)
+and **latest walk date wins** for duplicate FARMIDs.
+
+### 1. File: `backend/app/services/gpkg_parser.py` (new)
+* **`GpkgParserService.parse_gpkg_features(path)`**: opens the GeoPackage read-only
+  with stdlib `sqlite3` (no GDAL/pyogrio dependency), discovers feature layers via
+  `gpkg_contents`/`gpkg_geometry_columns`, rejects non-EPSG:4326 layers, and reads
+  each feature's attributes (header lookup normalized like upload.py's
+  `_normalize_header`) plus its raw geometry blob.
+* **`GpkgParserService.dedupe_by_farm_reference(features)`**: keeps the most recent
+  walk per FARMID (date parsed leniently from `file_name`, e.g. `2025-8-29`),
+  falling back to the later feature; returns `(kept, skipped_duplicates)`.
+* **`GpkgFeature`** dataclass: `to_location_geom()` decodes lazily (a bad geometry
+  only fails its own feature); `to_match_input()` builds a `ParsedGpxFilename`
+  from FARMERSID (id1) / FARMID (id2) / FARMER NAME.
+* **`_gpkg_blob_to_geometry(blob)`**: strips the GeoPackageBinary header (envelope
+  size computed from the flags byte, not hardcoded), decodes WKB via shapely,
+  forces 2D.
+
+### 2. File: `backend/app/services/gpx_parser.py`
+* Extracted **`to_multipolygon_wkt(geometry)`** from `parse_gpx_to_polygon()` so
+  both parsers share it. Now also accepts MultiPolygon input, and handles
+  `buffer(0)` returning a MultiPolygon/empty geometry (previously
+  `MultiPolygon([multipolygon])` would have raised).
+
+### 3. File: `backend/app/services/gpx_farmer_matcher.py`
+* Split **`match(filename, db)`** into `parse_filename` + new
+  **`match_parsed(parsed, db)`** (matching rules unchanged) so GPKG features can
+  feed attribute-derived IDs straight in.
+* Extracted **`parse_farmer_name(name)`** from `parse_filename()` (now a
+  classmethod) for reuse on the GPKG `FARMER NAME` attribute.
+
+### 4. File: `backend/app/api/upload.py`
+* Added **`upload_gpkg()`** (`POST /api/upload/gpkg`): writes the upload to a temp
+  file (sqlite needs a path), parses + dedupes, then per feature in its own
+  SAVEPOINT matches via `GpxFarmerMatcherService.match_parsed` and sets
+  `farm.location_geom`. Rejects a second feature landing on a farm already updated
+  in the same upload (guards `_pick_farm`'s single-farm fallback). One commit, then
+  `invalidate_farms_cache()`. Returns `features_total/updated/failed`,
+  `duplicates_skipped`, `failures` (up to 200).
+
+### 5. Frontend
+* `frontend/src/lib/api.ts`: added `uploadGpkg(file)`, `UploadGpkgResult`,
+  `UploadGpkgFeatureFailure`.
+* `frontend/src/app/App.tsx` **`handleGpxFilesSelected`**: routes `.gpkg` files to
+  `uploadGpkg`, folding per-feature successes/failures into the existing toast,
+  notification and failure-details modal; toast now reads "Updated N farm
+  boundary(ies)" and notes skipped duplicate walks.
+* `frontend/src/app/components/SpatialAnalysisModule.tsx`: GPX file input now
+  `accept=".gpx,.gpkg"` (same button, no layout change).
+
+### 6. Tests
+* New `backend/tests/test_gpkg_parser.py` (builds a small GeoPackage with stdlib
+  sqlite3: Polygon + MultiPolygon, dedupe across date formats, wrong SRS, non-GPKG
+  file, bad blob isolation) and `backend/tests/test_upload_gpkg_api.py`.
+
+### 7. Docs
+* `.claude/API_CONTRACT.md`: documented `POST /api/upload/gpkg`.
+* `.claude/BACKEND_DATABASE_WORKFLOW.md`: Sprint 3 ingestion step mentions `.gpkg`.
+
+---
+
+## [2026-08-21] - Fix Cascading InFailedSqlTransaction in PAGASA Scraper
+
+Remote backend's scheduled PAGASA scraper was completely broken: every 15-min
+poll failed on every bulletin PDF with `psycopg2.errors.InFailedSqlTransaction`.
+Root cause: the `province` column on `tbl_tcb_signals` (added 2026-08-20) was
+never applied on the remote DB, so the first `TcbSignal` INSERT failed and
+poisoned the shared DB session — every subsequent PDF in the same loop hit
+"current transaction is aborted, commands ignored until end of transaction
+block." Second symptom: all typhoon bulletins (LUIS, KIYAPO, etc.) existed in
+the DB but with zero `TcbSignal` rows, causing "No areas listed" in the
+Assessment module's Areas Affected modal.
+
+### File: `backend/app/services/bulletin_parser.py`
+* **`scrape_and_save_all()`**: added `db.rollback()` in the per-link
+  `except Exception` handler (line 304). Without this, one failed PDF's
+  aborted transaction cascades to every remaining PDF in the same scrape
+  cycle — PostgreSQL refuses all queries on a session with an uncommitted
+  failed transaction until `ROLLBACK` is issued. Safe because: any
+  uncommitted work from the failed PDF is correctly discarded, and any
+  previously committed work (successful earlier iterations) is unaffected.
+* Replaced bare `print(f"Error processing PDF link {link}: {e}")` with
+  `logger.exception(...)` — captures the full traceback (which `print`
+  loses) and routes through the same logging infrastructure as the rest of
+  the backend.
+* Added `import logging` and module-level `logger = logging.getLogger(__name__)`.
+
+### Remote DB fix (applied by Fabio, same session):
+* Full `init_schema.sql` reset + `seed_all.py` reseed on the remote box
+  (`192.168.1.41`), which recreates `tbl_tcb_signals` with the `province`
+  column already defined. The migration file
+  (`backend/migrations/2026-08-20_tcb_signal_province.sql`) was the
+  lighter-weight alternative, but a full reset was chosen since every
+  typhoon's `TcbSignal` rows were already broken (bulletins existed without
+  signals, and re-parsing skips existing bulletins).
+
+---
+
 ## [2026-07-17] - Sprint 1 Completion
 
 ### 1. File: `backend/app/models/models.py`
@@ -101,6 +3902,197 @@ Checked Sprint 1's "[Done]" items in `.claude/DEVELOPMENT_PLAN.md` against `.cla
 
 ---
 
+## [2026-07-21] - Branch Model: `develop` as Integration Branch
+
+**Branch:** `develop` (new, cut from `main` at `3dfc695`; committed locally, not pushed yet).
+
+### 1. File: `.claude/GITHUB_WORKFLOW.md`
+* **Process/doc change, no code touched.** Restructured the branch model from "feature branches → PR directly into `main`" to a three-tier model, per Fabio's direction that `main` should stay untouched until final, release-ready code:
+  * `main`: now frozen — only receives merges from `develop`, and only at a deliberate release point.
+  * `develop` (new): integration branch. All feature branches now branch off `develop` (not `main`) and PR back into `develop` (Phase 1, Phase 2's rebase step, and Phase 4 all updated accordingly).
+  * Added **Phase 7 — Release to `main`**: describes the `develop` → `main` PR at a release milestone, same review bar as Phase 5.
+  * Added a **Setup Note** flagging that GitHub branch protection for `main`/`develop` (blocking direct pushes, requiring PR review) must be configured by Fabio in the GitHub repo settings — not achievable from the local git CLI.
+* Existing in-flight branch `cristian/backend/sprint3-gpx-exposure` (already pushed, based on `main`) retargets to merge into `develop` going forward per Fabio's decision, rather than being treated as an exception into `main`.
+
+### 2. File: `.claude/TEAM_RESPONSIBILITIES.md`
+* Updated the "Review and Merging Workflow" bullet: PR approval requirement now targets merging into `develop`, with a note that `main` only receives merges from `develop` at a release point.
+
+### Status / Next Steps
+* `develop` branch is **not pushed** — needs Fabio to push it himself (no stored GitHub credentials in this environment) before the team can start branching off it or retargeting open PRs.
+* GitHub branch protection rules for `main` and `develop` still need to be configured by Fabio via the GitHub web UI — this doc change only updates the *documented* workflow, it does not enforce it on GitHub.
+
+---
+
+## [2026-07-21] - Sprint 3 Backend: GPX Parser & Exposure Calculation (+ Sprint 2 Fixes)
+
+**Branch:** `cristian/backend/sprint3-gpx-exposure` (committed locally, not pushed, no PR open yet).
+
+### Sprint 2 Fixes
+### 1. File: `backend/app/services/bulletin_parser.py`
+* **Bug fix:** Added the missing `from sqlalchemy import func` import. `save_bulletin_to_db()` called `func.lower(...)` without it, so every DB-save attempt raised `NameError` — this code path had never actually run successfully since Sprint 2 was marked "Done."
+* **Changes to Functions:**
+  * `parse_bulletin_text()`: added `issued_at` extraction (regex for PAGASA's typical "Issued at HH:MM AM/PM, DD Month YYYY" phrasing), returned in the parsed-data dict. Falls back to `None` if not found — no bulletin sample exists in the repo/tests to validate the exact real-world phrasing yet, so this needs validation against a real PAGASA bulletin before being fully trusted.
+  * `save_bulletin_to_db()`: now uses the parsed `issued_at` when available, falling back to `datetime.now(timezone.utc)` only if parsing failed. `expires_at` is unchanged (still a placeholder — PAGASA bulletins don't reliably state their own expiry).
+* **Audit finding, not changed:** the `island_group = 2` hardcode is not a bug — the platform is scoped to PCIC Region X (Northern Mindanao) only (`PROJECT_CONTEXT.md`), so every `AdminBoundary` row in this dataset is Mindanao by definition. Left as-is rather than inventing an unfounded Luzon/Visayas mapping.
+
+### 2. File: `backend/tests/test_bulletin_parser.py`
+* **Changes to Tests:**
+  * Added `test_parse_bulletin_text_extracts_issued_at()` and `test_parse_bulletin_text_issued_at_missing_defaults_to_none()`.
+  * Added new class `BulletinParserSaveToDbTests` with `test_save_bulletin_to_db_creates_bulletin_and_signals()` — a regression test for the `func` import bug (mocked `Session`, dispatches `db.query(Model)` per model class). Previously only `parse_bulletin_text()` was tested; `save_bulletin_to_db()` had zero coverage.
+
+### Sprint 3 Backend: GPX Boundary Parser
+### 3. File: `backend/app/services/gpx_parser.py` (new)
+* Added **`GpxParserService.parse_gpx_to_polygon()`**: parses an uploaded `.gpx` file with `gpxpy`, builds a Shapely `Polygon` from track points (falls back to route points if no tracks), auto-closes the ring, and returns a `WKTElement` (`MULTIPOLYGON`, SRID 4326) matching the geometry pattern `bulletin_parser.py` already uses for `center_geom`.
+
+### 4. File: `backend/app/api/upload.py`
+* **Changes to API Routes:**
+  * Added **`upload_gpx()`** (`POST /api/upload/gpx`): accepts a multipart GPX file + `farmer_id` + `farm_id` per `API_CONTRACT.md` §2, parses it via `GpxParserService`, and updates that `Farm.location_geom`.
+
+### 5. File: `backend/tests/test_gpx_parser.py` (new)
+* Added `GpxParserServiceTests` covering: a valid closed-ring track, route-only fallback, and a `ValueError` for files with fewer than 3 points.
+
+### Sprint 3 Backend: Exposure-Hours Calculation
+### 6. File: `backend/app/services/exposure_calculator.py` (new)
+* Added **`ExposureCalculatorService.compute_for_typhoon()`**: walks a typhoon's `TropicalCycloneBulletin` rows in `issued_at` order, matches each `TcbSignal.area_name` against `AdminBoundary.municipality` (same text-matching approach Sprint 2 already uses — no schema change), and upserts per-boundary `start_time`/`end_time`/`max_signal_level`/`total_exposure_hours`/`is_eligible_6hr` (≥6h threshold) into `tbl_area_exposure_summary`.
+  * Deliberately does **not** model a circular "signal radius" geometry — PAGASA publishes TCWS signal areas as named municipality/province lists per bulletin, not a radius around the storm center, so exposure is a time-series aggregation over named areas rather than a spatial buffer intersection. Confirmed against `docs/ERD.drawio.png` (`tbl_area_exposure_summary` has `start_time`/`end_time`/`total_exposure_hours`, no radius/geometry column).
+
+### 7. File: `backend/app/api/bulletins.py`
+* **Changes to API Routes:**
+  * Added **`compute_exposure()`** (`POST /api/bulletins/{tcb_id}/compute-exposure`). This is **not** the documented `POST /api/assessments/calculate` contract — that endpoint bundles in yield-loss/payout output which depends on Sprint 4's `RecsapMatrix`/`RiskAssessment` work, not built yet. Sprint 4 can add the real `/api/assessments/calculate` on top of this later.
+
+### 8. File: `backend/tests/test_exposure_calculator.py` (new)
+* Added `ExposureCalculatorServiceTests` covering: multi-bulletin aggregation (exposure hours + max signal level across two bulletins), a single-bulletin case (0 hours, not eligible), and no-bulletins (empty result).
+
+### 9. File: `backend/requirements.txt`
+* Added `gpxpy==1.6.2`, `geopandas==1.1.4`, `shapely==2.1.2`, `pyproj==3.7.2` for this sprint's GPX/exposure work.
+* Also added `beautifulsoup4==4.15.0` and `pdfplumber==0.11.10` — these were already imported by Sprint 2's `bulletin_parser.py` but were missing from `requirements.txt` entirely (a pre-existing gap; `backend/venv` had nothing installed beyond `pip` itself when this branch started). Also added `pytest==9.1.1` to actually run the test suite (existing tests use stdlib `unittest`, no runner was previously pinned).
+
+### Status / Next Steps
+* **Flagging for Fabio, not built:** `docs/ERD.drawio.png` shows `tbl_tcb_signals` should have a `boundary_id` FK to `tbl_admin_boundaries`, and `tbl_admin_boundaries` should have a `geom` column. Neither exists in `models.py`/`init_schema.sql` today — Sprint 2 stores `area_name` as free text instead, and this branch's exposure calculator matches on that same text field. Adding the FK/geom columns would make the matching robust and align the schema with the ERD, but it's a DB structure change and needs to be proposed to Fabio per `GITHUB_WORKFLOW.md`, not done unilaterally here.
+* `issued_at` regex parsing (Sprint 2 fix above) is unvalidated against a real PAGASA bulletin — only tested against a hand-written sample string.
+* Frontend Leaflet map integration for Sprint 3 (visualizing farm boundaries and typhoon path overlaps) is out of scope for this branch — that's James's (Frontend Developer) piece per `TEAM_RESPONSIBILITIES.md`.
+* Adjacent, out of scope: `upload.py`'s pre-existing `adjuster_calculation` bug (passed into `RiskAssessment` where no such column exists — flagged in the 2026-07-21 "Recsap Matrix Persistence" entry above, still unfixed). Not touched here since it's Sprint 1/CSV path, unrelated to GPX/exposure.
+* Branch is **not pushed** and has **no PR open** — needs review before merging into `main`.
+
+---
+
+## [2026-07-21] - PAGASA Scraper Fix: Dead Index URL & Overly-Strict PDF Filter
+
+**Branch:** `cristian/backend/sprint3-gpx-exposure` (committed locally, not pushed, no PR open yet).
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* **Bug fix:** `PAGASA_INDEX_URL` changed from `.../tamss/weather/bulletin.html` to `.../tamss/weather/bulletin/` — the `.html` path was not the live directory-listing endpoint. The trailing slash is required, not stylistic: `fetch_active_bulletin_links()` derives the base URL via `PAGASA_INDEX_URL.rsplit("/", 1)[0]`, which only strips the correct (empty) trailing segment when the constant ends in `/`; without it, `rsplit` would strip the real `bulletin` path segment and misresolve every relative link.
+* **Bug fix:** Removed the `"bulletin" in href.lower()` condition from `fetch_active_bulletin_links()`'s link filter (now just `href.endswith(".pdf")`). Real PAGASA filenames follow a `TCB#<n>_<stormname>.pdf` pattern (e.g. `TCB#10_francisco.pdf`) with no literal "bulletin" substring, so the old filter silently matched zero links against the live server. Verified against the live index: 0 links found before the fix, 55 found after.
+
+### Status / Next Steps
+* Verified against the live PAGASA server only (`fetch_active_bulletin_links()`); `download_bulletin_pdf()` / `parse_bulletin_text()` / `save_bulletin_to_db()` were not exercised against a real downloaded PDF as part of this fix.
+* Branch is **not pushed** and has **no PR open** — needs review before merging into `main`.
+
+---
+
+## [2026-07-21] - CLAUDE.md: Handoff Rules for DB/sudo and Frontend Commands
+
+**Branch:** `cristian/backend/sprint3-gpx-exposure` (committed locally, not pushed, no PR open yet).
+
+### 1. File: `.claude/CLAUDE.md`
+* **Process/doc change, no code touched.** Added two new sections following the existing "Git Command Execution" / "Python Environment (venv) Execution" pattern, closing gaps found while auditing the codebase for commands that require Fabio's own terminal/credentials:
+  * **`Database Command Execution (sudo / psql)`**: `sudo systemctl start postgresql`, `sudo -iu postgres psql`, `CREATE USER`/`CREATE DATABASE`, and applying `backend/init_schema.sql` via `psql -f` must be handed to Fabio, one command at a time, confirmed via AskUserQuestion — same handoff pattern as `git push`, since these need his `sudo` access and DB superuser credentials.
+  * **`Frontend Local Environment Execution`**: `npm i`/`npm install`, `npm run dev`, `vite build` (see `frontend/package.json` scripts) must likewise be handed off rather than run via tool call, since they install into and run against Fabio's local `frontend/node_modules`.
+* Companion memory entries were added outside the repo (`feedback_db_command_handoff.md`, `feedback_frontend_handoff.md` in the Claude Code memory store) so future sessions apply this immediately instead of rediscovering it.
+
+---
+
+## [2026-07-21] - Sprint 4: Parametric Payout Engine & CSV Export
+
+**Branch:** `fabio/backend/sprint4-payout-engine` (based on `cristian/backend/sprint3-gpx-exposure`, since eligibility depends on that branch's `AreaExposureSummary`/`tbl_area_exposure_summary` work; committed locally, not pushed, no PR open yet).
+
+### Two assumptions this entry depends on (confirmed with Fabio before writing code)
+1. **Crop growth stage source:** the schema has no live-updated place tracking a policy's current crop stage — `crop_stage_no`/`crop_stage` only exist on `tbl_risk_assessment`, populated once at legacy CSV-import time (`pabs_results.csv`'s `Stage No.`/`Stage` columns). The payout engine reuses each policy's most recent existing `RiskAssessment` row for this value. This is a real architecture gap, not a new abstraction invented here — flagging for whoever eventually builds real crop-stage tracking.
+2. **`tbl_recsap_matrix` placeholder data:** real PCIC "Table 11" values are still not available (blocked since the "Recsap Matrix Persistence" entry above). Seeded 36 placeholder rows instead so the engine has something to compute against.
+
+### 1. File: `backend/init_schema.sql`
+* Appended a `-- PLACEHOLDER` seed block: 36 `tbl_recsap_matrix` rows (`crop_stage_no` 1–3 × `wind_signal_tcws` 2–5 × `exposure_hours` 6/12/24), made-up but monotonically increasing yield-loss/indemnity values. `crop_stage_no` 2=Flowering and 3=Maturity are confirmed against `pabs_results.csv`; 1=Booting is inferred from `MASTER_DEVELOPMENT_CONTEXT.md`'s stage ordering, not independently confirmed. **Replace this entire block** once real Table 11 values are available.
+
+### 2. File: `backend/app/services/assessment_service.py` (new)
+* Added **`AssessmentService.calculate_for_bulletin()`**: given `(typhoon_id, bulletin_id, db)`, re-runs `ExposureCalculatorService.compute_for_typhoon()`, filters to boundaries meeting eligibility (`max_signal_level >= 2` and `total_exposure_hours >= 6`), finds each eligible boundary's active policies via `Farm.boundary_id` (the same text-matched boundary linkage Sprint 3 uses — no boundary geometry column exists to spatially intersect against, so this stands in for the "typhoon path overlay" step), filters further by crop stage (Booting/Flowering/Maturity per assumption #1 above), looks up the matrix rule and computes the payout via the existing `ParametricAssessment` (`indemnity_calc.py`, untouched), and upserts one `RiskAssessment` row per `(insurance_records_id, summary_id)` pair.
+* "Active policy" is determined by `InsuranceRecord.effectivity_date <= bulletin.issued_at.date() <= expiry_date` — evaluated as of the typhoon event, not "today".
+
+### 3. File: `backend/app/api/assessments.py` (new)
+* Added **`POST /api/assessments/calculate`**: thin wrapper around `AssessmentService.calculate_for_bulletin()`, matching the documented `.claude/API_CONTRACT.md` contract (`{typhoon_id, bulletin_id}` payload).
+* Added **`GET /api/assessments/`**: lists `RiskAssessment` rows with optional `typhoon_id` (via an explicit join on `summary_id` — `tbl_risk_assessment.summary_id` is a bare `INT`, not an FK, so there's no relationship to join through) and `policy_no` filters.
+  * **Known duplication, not resolved here:** `backend/app/main.py` already has an ad hoc `GET /api/assessments` (no trailing slash) doing a similar but simpler join. Left untouched since something (possibly the frontend) may already call it and this wasn't in scope to audit; FastAPI treats the two paths as distinct routes, so both coexist without conflict, but this is worth cleaning up later.
+* Added **`GET /api/assessments/export`**: streams a CSV matching `pabs_results.csv`'s original column layout with computed columns (`Wind Signal (TCWS)`, `Period of Exposure (Hours)`, `Final Indemnity Payment`, `Assessment Date`) appended, per the manuscript's "append to original row layouts" spec. Only includes rows this engine computed (`matrix_id IS NOT NULL`) — excludes the legacy CSV-imported rows, which have no `matrix_id`.
+* Registered `assessments_router` in `backend/app/main.py` under the `/api` prefix.
+
+### 4. File: `backend/tests/test_assessment_service.py` (new)
+* Added `AssessmentServiceTests` covering: a full eligible-policy payout calculation (asserts the exact `I = (AC/1000) × IF × Area` result and `estimated_damage`), a policy skipped for an ineligible crop stage, a boundary skipped for wind signal below threshold, and a `ValueError` when the bulletin isn't found. Mocks `ExposureCalculatorService.compute_for_typhoon()` directly rather than its internals, since that method already has its own test coverage in `test_exposure_calculator.py`.
+
+### Status / Next Steps
+* **Not merged anywhere** — sits on top of `cristian/backend/sprint3-gpx-exposure`, which itself isn't merged into `develop` yet. This branch inherits that same blocker.
+* `GET /api/assessments/` vs. the pre-existing `GET /api/assessments` duplication (noted above) should be cleaned up in a follow-up, ideally by whoever owns the frontend's existing call site.
+* Real PCIC Table 11 values still needed before any of this is production-usable — everything downstream of `tbl_recsap_matrix` is placeholder-driven until then.
+* Not run against a live database — verified by reading the code and the new unit tests only; Fabio needs to run the test suite and a real `/api/assessments/calculate` call himself (per `CLAUDE.md`'s venv-handoff rule).
+
+---
+
+## [2026-07-21] - Sprint 3 & Sprint 4 Merged into develop
+
+Both branches above are now on `develop`, closing out the "not merged" status noted in their respective entries:
+* `cristian/backend/sprint3-gpx-exposure` → `develop`: merged via PR, commit `9f7c2cf`.
+* `fabio/backend/sprint4-payout-engine` → `develop`: merged locally (`--no-ff`) on top of the updated `develop`, commit `6227ec2`, then pushed. Merge was clean (verified with `git merge-tree --write-tree` before merging) aside from an auto-mergeable append conflict in this file.
+
+Outstanding items from both entries above (Table 11 placeholder data, `GET /api/assessments/` duplication, live-DB verification, `boundary_id`/`geom` FK gap) are unchanged by the merge and still need follow-up.
+
+---
+
+## [2026-07-21] - Real PCIC Table 11 Data: Recsap Matrix Split Into Two Lookups
+
+Resolves the "Table 11 placeholder data" blocker noted in the two entries above. Fabio supplied the actual PCIC damage-matrix and Rice Indemnity Factor Table figures (screenshots transcribed from the manuscript). While wiring them in, found the real tables don't share one key structure the way the placeholder assumed — they're two chained lookups, not one flat table — and that `indemnity_factor`'s column precision couldn't have held the real values anyway.
+
+### Two things confirmed with Fabio before writing code
+1. **Growth-stage taxonomy mismatch:** the yield-loss matrix uses 3 stages (Booting, Flowering, Maturity — `tbl_recsap_matrix.crop_stage_no` 1/2/3), but the indemnity-factor table uses PCIC's own 5-stage taxonomy (Early Vegetative, Late Vegetative, Reproductive, Late Reproductive, Maturity). The manuscript's worked example only confirms Flowering → Reproductive. Fabio confirmed Booting → Late Vegetative; Maturity → Maturity by same name. Early Vegetative and Late Reproductive are consequently unreachable via the current 3-stage crop tracking, but per a follow-up request from Fabio all 5 stage-groups were seeded anyway for fidelity to the source table (see updated bullet 1 below).
+2. **Data completeness:** the 3 screenshots are the complete source tables — yield loss ≤10% has no bracket (no payout) and 30-35% is the top bracket, not partial data.
+
+### 1. File: `backend/init_schema.sql`
+* **Schema:** `tbl_recsap_matrix` dropped its `indemnity_factor` column — it now only resolves step 1, `(crop_stage_no, wind_signal_tcws, exposure_hours) → estimated_yield_loss`.
+* **Schema:** Added **`tbl_indemnity_factor_matrix`** for step 2: `(crop_stage_group, yield_loss_min, yield_loss_max) → indemnity_factor`. Brackets are exclusive-lower/inclusive-upper per the source table's ">10 to 15" style labels. `indemnity_factor` is `NUMERIC(7,2)`, not `NUMERIC(5,4)` — the old precision (max 9.9999) couldn't have stored real values like 392.00 or 560.00 even before this change; this was a latent bug in the Sprint 4 placeholder work, not something introduced by real data.
+* **Schema:** `tbl_risk_assessment.indemnity_factor` widened to `NUMERIC(7,2)` to match; added `indemnity_matrix_id` FK to `tbl_indemnity_factor_matrix`, alongside the existing `matrix_id` FK to `tbl_recsap_matrix`.
+* **Seed data:** Replaced the 36-row made-up placeholder block with the real transcribed values: 35 `tbl_recsap_matrix` rows (one cell, Maturity/signal-2/6h, reads "<10" with no exact figure in the source and was intentionally omitted rather than inventing a number — it resolves to $0 payout either way since the indemnity table's floor is >10%) and 25 `tbl_indemnity_factor_matrix` rows (5 yield-loss brackets × all 5 stage groups, per Fabio's follow-up request — only 3 of the 5 are reachable by the app today, see taxonomy note above). The source table's "TCWS No.04 (118-184 KPH) AND > 184 KPH" header groups wind signals 4 and 5 under identical values, so both were seeded identically.
+
+### 2. File: `backend/app/models/models.py`
+* Trimmed **`RecsapMatrix`**: removed `indemnity_factor`.
+* Added **`IndemnityFactorMatrix`**: mapped `tbl_indemnity_factor_matrix`.
+* Updated **`RiskAssessment`**: `indemnity_factor` widened to `Numeric(7, 2)`; added `indemnity_matrix_id` FK column and `indemnity_matrix` relationship.
+
+### 3. File: `backend/app/core/indemnity_calc.py`
+* Added **`CROP_STAGE_TO_INDEMNITY_GROUP`**: the 3-stage → 5-stage taxonomy mapping confirmed with Fabio above.
+* Added **`ParametricRule`** dataclass: bundles both lookup steps' results (`matrix_id`, `indemnity_matrix_id`, `estimated_yield_loss`, `indemnity_factor`) so callers get one object instead of juggling two query results.
+* Rewrote **`ParametricAssessment.get_matrix_rule()`**: now chains the two lookups — queries `tbl_recsap_matrix` for yield loss %, maps the crop stage to its indemnity-table stage group, then queries `tbl_indemnity_factor_matrix` for the bracket containing that yield loss %. Returns `None` (→ `$0` payout via the existing `calculate_final_payout()` path, unchanged) if either step has no match.
+
+### 4. File: `backend/app/services/assessment_service.py`
+* `calculate_for_bulletin()`: now also sets `existing.indemnity_matrix_id = rule.indemnity_matrix_id` alongside the existing `matrix_id` assignment.
+
+### 5. File: `backend/tests/test_assessment_service.py`
+* Updated `_build_mock_db()` and the eligible-policy test to mock both chained queries (`RecsapMatrix` then `IndemnityFactorMatrix`) instead of one flat `RecsapMatrix` row, and to use a real indemnity value (330.00, from the Reproductive/>20-25% bracket) instead of the old made-up `0.25` multiplier. Recomputed the expected payout accordingly (`(50000/1000) × 330.00 × 2.5 = 41250.0`, was `31.25`).
+
+### 6. File: `docs/RECSAP_MATRIX_SCHEMA.md` (new)
+* Added a text record of the new `tbl_recsap_matrix` / `tbl_indemnity_factor_matrix` / `tbl_risk_assessment` structure — column-by-column tables, the 3-stage→5-stage taxonomy mapping, and the full seeded source data (yield-loss and indemnity-factor tables) — per Fabio's request. `docs/ERD.drawio.png` is a static PNG exported from a `.drawio` source not checked into this repo, so it can't be regenerated here; this file is the interim text record until the visual diagram is updated separately.
+
+### Status / Next Steps
+* Not run against a live database or the test suite — Fabio needs to re-run `init_schema.sql` and the test suite himself (per `CLAUDE.md`'s DB/venv handoff rules) to confirm the migration and tests pass.
+* `docs/ERD.drawio.png` itself is now stale (still shows the old single `tbl_recsap_matrix` shape) and needs a manual update in the drawio tool by whoever owns that source file — `docs/RECSAP_MATRIX_SCHEMA.md` is a stopgap, not a replacement.
+* Merged locally (`--no-ff`) into `develop` on Fabio's instruction, matching the Sprint 3/4 merge precedent above — no PR opened for this one. Push to `origin/develop` still pending Fabio's own terminal.
+
+---
+
+## [2026-07-21] - Recsap Matrix Real-Data Branch Merged into develop
+
+`fabio/backend/recsap-matrix-real-data` merged locally (`--no-ff`) into `develop`, closing out the "not yet pushed" status noted in the entry above. Clean merge, no conflicts. Not yet pushed to `origin/develop` — pending Fabio running the push himself.
+
+Outstanding items from the entry above (live-DB/test-suite verification, stale `docs/ERD.drawio.png`) are unchanged by the merge and still need follow-up.
+
+---
+
 ## [2026-07-21] - Frontend-Backend Wiring (Sprint 3)
 
 Connected the static React frontend to the backend endpoints that already exist and match its data needs.
@@ -161,3 +4153,5127 @@ Replaced the frontend's MUI-based screens with the team's high-fidelity Figma "M
 * `npm run build` passes clean; verified both dev servers respond, but UI was not visually screenshotted (no browser-automation tool available in this environment) — Fabio should click through it locally before merging.
 * Not pushed yet — awaiting Fabio's push per the git workflow rules in `.claude/CLAUDE.md`.
 
+---
+
+## [2026-07-23] - Real PSGC Codes + Region X Boundary Map Layer
+
+Replaces the mock `tbl_admin_boundaries` PSGC codes with real ones, and adds a municipality-outline context layer to the Leaflet map. Scoped as "map layer only" per Fabio's decision — does **not** touch `tbl_admin_boundaries`'s schema or `ExposureCalculatorService`/`AssessmentService`'s existing text-matching logic (still no `geom` column, matching the gap already flagged in the 2026-07-21 Sprint 3 entry and `docs/ERD.drawio.png`'s stale divergence from the actual schema).
+
+Source: `github.com/faeldon/philippines-json-maps` (2023 PSGC-current, derived from PSA/NAMRIA data via `altcoder/philippines-psgc-shapefiles`). The official HDX COD-AB page (`data.humdata.org/dataset/cod-ab-phl`) is the canonical source but returns HTTP 403 to automated fetches (Cloudflare bot protection) — this GitHub mirror was used instead since it's directly fetchable and traces back to the same PSA/NAMRIA lineage. Verified against `backend/pabs_results.csv`: only Bukidnon/Talakag and Misamis Oriental/Claveria are actually seeded today.
+
+### 1. File: `backend/app/data/psgc_region10_boundaries.csv` (new)
+* Real PSGC codes for every barangay in all 22 Bukidnon municipalities and all 25 Misamis Oriental municipalities (888 barangays total), per Fabio's follow-up request to cover both provinces in full rather than just Talakag/Claveria. Verified spot-checks: San Isidro (Talakag) = `1001320027`, Poblacion (Claveria) = `1004306020`.
+
+### 2. File: `backend/seed_database.py`
+* **Changes to Functions (`run_setup()`):**
+  * Replaced the mock `psgc_code = f"PH10{idx:06d}"` generation with a real lookup against `app/data/psgc_region10_boundaries.csv` (loaded via pandas, indexed on `(province, municipality, barangay)`).
+  * If a CSV row's boundary isn't found in the reference file, `run_setup()` now raises `ValueError` naming the missing boundary, instead of silently minting a fake code — surfaces data gaps rather than hiding them.
+
+### 3. File: `frontend/public/data/region10-boundaries.geojson` (new)
+* Merged, low-res municipality polygons for all 5 Region X provinces (Bukidnon, Camiguin, Lanao del Norte, Misamis Occidental, Misamis Oriental — 91 municipalities, ~55KB), each feature carrying `psgc_province`, `psgc_municipality`, `province`, `municipality`. Served as a static asset (Vite `public/`) — no backend endpoint, since this data doesn't change at runtime.
+
+### 4. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* **Changes to Functions/Behavior:**
+  * Added a `GeoJSON` react-leaflet layer (`regionXBoundaries` state, fetched from `/data/region10-boundaries.geojson` on mount) rendering Region X municipality outlines — dashed green, no fill, `bindTooltip` on hover showing `municipality, province`. Presentation-only; not read by any calculation.
+  * Changed `MapContainer`'s default `center`/`zoom` from `[13.68, 123.2]`/`10` (Camarines Sur) to `[8.38, 124.84]`/`9` (Region X, centered between Talakag and Claveria) so the new layer is actually visible on load.
+
+### Status / Next Steps
+* **Not fixed, flagged only:** the map's mock farmer data (`mockData.ts`, ~20 rows) and the typhoon-track/signal-ring mock overlays (`GISLeafletMap.tsx`'s `MUNICIPALITY_CENTERS`/`TYPHOON_TRACK`/`SIGNAL_WIND_RINGS`) are still all Camarines Sur/Bicol coordinates (per the 2026-07-22 "High-Fidelity UI Adoption" entry). After this change, those will render far outside the new Region X default viewport. Fabio decided to leave this as-is for now rather than expand scope — replacing the mock farmer data with real Region X placeholders is a separate follow-up task.
+* Two Region X cities — Cagayan de Oro and Iligan (independent/highly-urbanized, administratively separate from any province) — aren't in the source repo's province-level files and weren't chased down further: not in `pabs_results.csv`, and PCIC insures rice farms rather than urban cores. Flagging in case boundary coverage there is wanted later.
+* Not run against a live database or `npm run build` — Fabio needs to re-run `seed_database.py` (per `CLAUDE.md`'s venv-handoff rule; will only succeed on a fresh/re-seeded `tbl_admin_boundaries`, since existing rows with mock `PH10######` codes won't be overwritten by the `SELECT ... WHERE province/municipality/barangay` existence check) and view the frontend locally.
+* Not pushed yet — awaiting Fabio's push per the git workflow rules in `.claude/CLAUDE.md`.
+
+---
+
+## [2026-07-23] - Sprint 3 Close-Out: Wire Real Farm/Bulletin Data into the Spatial UI
+
+**Branch:** `cristian/backend/wire-real-data-sprint3` (cut from `develop`; committed locally, not pushed, no PR open yet).
+
+Rechecked Sprint 3 after the Sprint 3/4 backend work, real recsap matrix data, and the high-fidelity frontend UI had all merged into `develop`, and found none of Sprint 3's backend deliverables (GPX parser, exposure calculator) were actually reachable from the UI: the GPX dropzone faked uploads with a `setTimeout`, `GISLeafletMap.tsx` rendered 100% hardcoded/mock data, and there was no `GET /api/farms/` endpoint at all — so the frontend had no way to fetch real farm data even if it tried. This entry closes that gap end-to-end.
+
+### 1. File: `backend/app/api/farms.py` (new)
+* Added **`list_farms()`** (`GET /api/farms/`): lists all farms with farmer name, province/municipality/barangay, area size, and `location_geom` serialized to GeoJSON via `geoalchemy2.shape.to_shape()` + `shapely.geometry.mapping()` (`None` if no GPX has been uploaded yet). Response envelope: `{"status", "data": [...]}`, matching `assessments.py`'s convention.
+
+### 2. File: `backend/app/api/bulletins.py`
+* `list_bulletins()`: added `center_lat`/`center_lng` (derived from `TropicalCycloneBulletin.center_geom` via `to_shape()`) to each row, so the frontend can place a real typhoon marker instead of a hardcoded one. Bare-array envelope left unchanged.
+
+### 3. File: `backend/app/api/assessments.py`
+* `list_assessments()`: added `farm_id` (via `a.insurance_record.farm_id`) to each row — previously assessments were only keyed by `policy_no`, with no way to trace a computed assessment back to a specific farm. This is the join key the frontend now uses to attach real wind-signal/exposure/payout data onto the real farm table.
+
+### 4. File: `backend/app/main.py`
+* Registered `farms_router` under the `/api` prefix.
+
+### 5. File: `frontend/src/lib/api.ts`
+* Added **`uploadGpx(file, farmerId, farmId)`** → `POST /api/upload/gpx`, **`getFarms()`** → `GET /api/farms/`, **`getAssessments(typhoonId?, policyNo?)`** → `GET /api/assessments/`. Added `Farm`, `GeoJsonMultiPolygon`, `Assessment`, `UploadGpxResult` types; extended `Bulletin` with `center_lat`/`center_lng`.
+
+### 6. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* **Replaced the `mockFarmers`-driven table with real data** (`getFarms()` + `getAssessments()`, joined client-side by `farm_id`) — this went beyond the originally-scoped "minimal dropdown" approach per an explicit decision to do the bigger rework instead. Columns not backed by any real field (`plantingDate`, mock `growthStage` taxonomy) were dropped rather than faked; wind signal / exposure / payout columns show "Not yet assessed" / "—" when no matching `RiskAssessment` exists for that farm — **expect most/all rows to show this initially**, since the payout engine has never been run against a live database. This is expected, not a bug.
+* GPX upload targeting: since the table is now real, **selecting a table row is the upload target** (no separate dropdown needed) — `processFiles()`'s `.gpx` branch now calls `uploadGpx()` for real against the selected row's `farmer_id`/`farm_id`, replacing the previous fake `setTimeout`-only placeholder. Re-fetches `getFarms()` afterward so the map picks up the new geometry immediately.
+* Municipality filter options are now derived from real farm data instead of a hardcoded Camarines Sur town list.
+
+### 7. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* **Deviates from the plan's "additive layer, keep mock untouched" wording** — since the table driving selection is now fully real (per item 6), keeping the old `FarmerRecord`-based mock layer as a second, disconnected, unselectable layer would have been confusing (clicking a real table row wouldn't highlight anything in it, and its farms don't correspond to any table row anymore). Instead, the component's farm layer is now fully real-data-driven: farms with `location_geom` render as real `<GeoJSON>` boundary polygons; farms without one yet render as small `<CircleMarker>` dots at an approximate municipality-center placement (reusing the old grid-spread logic, just for placement, not as a fake boundary shape) so they stay visible/selectable as GPX upload targets. Confirmed via grep this component has no other callers, so the prop-signature change is safe.
+* Removed `TYPHOON_TRACK`/`TYPHOON_EYE`/`SIGNAL_WIND_RINGS` (hardcoded, explicitly commented "Simulated") entirely. Replaced with a real `<Marker>` at the selected bulletin's `center_lat`/`center_lng` (custom inline-SVG `L.divIcon`, sidestepping the well-known Vite/Webpack "missing default Leaflet marker icon" asset-resolution issue rather than fixing that separately) plus a real affected-municipality list via the already-working `getBulletinSignals()`, both in the marker's popup. No polygon/radius overlay — that geometry doesn't exist (see the new schema proposal, item 9).
+
+### 8. Files: `frontend/src/app/App.tsx`, `frontend/src/app/components/MonitoringModule.tsx`
+* Lifted `selectedBulletin` state from `MonitoringModule` up to `App.tsx` (passed down as `selectedBulletin`/`onSelectBulletin` props to both `MonitoringModule` and `SpatialAnalysisModule`), so one typhoon-event selection is shared app-wide instead of `SpatialAnalysisModule` needing its own independent, duplicate bulletin picker. `MonitoringModule.handleSelectBulletin()` now calls the passed-down setter instead of owning local state; its own signal-list fetching logic is otherwise unchanged.
+
+### 9. File: `docs/PROPOSAL_boundary_geometry.md` (new)
+* Drafted (not implemented) a proposal for Fabio: add `tbl_admin_boundaries.geom` (municipal boundary polygon) and `tbl_tcb_signals.boundary_id` (FK, replacing today's fragile `area_name` text-matching). This is the real blocker for ever rendering a true "typhoon path crosses this municipality" polygon overlay — reconfirmed against `docs/ERD.drawio.png`, which already shows both fields in the intended design. No schema change made; awaiting Fabio's review per the DB Admin approval rule in `CLAUDE.md`.
+
+### Status / Next Steps
+* Not run against a live database or the frontend dev server — I can no longer run venv/pytest/npm commands myself (per `CLAUDE.md`'s handoff rules); Fabio needs to run the backend test suite, exercise the three endpoints via Swagger UI, and click through the frontend (`npm run dev`) himself to confirm end-to-end.
+* `location_geom`'s GeoJSON shape is passed to react-leaflet's `<GeoJSON data={...}>` with an `as any` cast (its prop type expects the `geojson` package's `GeoJsonObject`, which our hand-rolled `GeoJsonMultiPolygon` interface structurally matches but isn't declared as) — flagging in case `npm run build`'s type-check is stricter than expected; not verified since I can't run the build myself.
+* `frontend/src/app/components/mockData.ts`'s `mockFarmers` is still used elsewhere (`MonitoringModule.tsx`'s dashboard stats, `AssessmentModule.tsx`) — untouched, out of scope for this entry.
+* Branch is **not pushed** and has **no PR open** — needs review before merging into `develop`.
+
+---
+
+## [2026-07-23] - Merge Conflict Resolution: Region X Boundary Layer + Sprint 3/4 Real-Data Rewrite
+
+Merging `cristian/backend/wire-real-data-sprint3` into `develop` produced a genuine structural conflict in `frontend/src/app/components/GISLeafletMap.tsx` — `develop`'s "Real PSGC Codes + Region X Boundary Map Layer" entry (above) added a municipality-outline `GeoJSON` layer on top of the *old* mock-farmer-driven component, while the Sprint 3 entry completely rewrote the same component for real farm/typhoon data. Resolved by hand rather than picking a side: kept the Sprint 3 rewrite's structure (real `GeoJSON` farm boundaries, real typhoon marker, `CircleMarker` fallback placement) and merged in the Region X boundary layer feature (`regionXBoundaries` state/fetch, `styleBoundary()`/`labelBoundary()`, the `<GeoJSON>` outline layer) on top of it.
+
+While reconciling, corrected a latent bug the Sprint 3 rewrite had carried over unnoticed: `MUNICIPALITY_CENTERS` (used to place farms without a GPX boundary yet) still listed the old mock UI's Camarines Sur towns (Naga City, Pili, etc.), which don't match any real seeded data. Replaced with the two municipalities actually seeded per `pabs_results.csv` (Talakag, Bukidnon and Claveria, Misamis Oriental), and changed `DEFAULT_CENTER`/zoom to Region X (matching the boundary-layer commit's map view) instead of the leftover Camarines Sur default.
+
+### Status / Next Steps
+* Not verified with a build/dev server — same handoff situation as both merged entries; Fabio needs to run `npm run build`/`npm run dev` to confirm the reconciled component compiles and renders both the real farm/typhoon layers and the Region X boundary outline together correctly.
+
+---
+
+## [2026-07-23] - Sprint 4 Close-Out: Wire Real Payout/Export Data into AssessmentModule
+
+**Branch:** `cristian/backend/wire-real-data-sprint4`, stacked on top of the still-unmerged `cristian/backend/wire-real-data-sprint3` (committed locally, not pushed, no PR open yet).
+
+An audit found Sprint 4 (parametric payout engine + real PCIC Table 11 data + CSV export) had the exact same pattern as Sprint 3's original gap: a correct, real-data backend, completely unwired from the frontend. Worse than Sprint 3's gap — `AssessmentModule.tsx`'s "calculation" was a fully scripted fake progress bar with an invented SAR/GEE failure narrative ("Sentinel-1 tile coverage gap detected") that has nothing to do with the real backend (no SAR/GEE dependency exists anywhere in this calculation), plus a hardcoded "Signal 2 only" scope that contradicts the real eligibility rule (signal ≥ 2, not signal = 2), a 4-stage growth taxonomy that doesn't match the real 3-stage `crop_stage_no`, and a per-farm coverage-rate override feature with no real backend equivalent (`InsuranceRecord.amount_cover` is fixed at CSV-import time). This entry removes the fabricated simulation and wires the module to the real engine.
+
+### 1. File: `backend/app/api/bulletins.py`
+* `list_bulletins()`: added `typhoon_id` to each row (the query already resolved `Typhoon` by this ID to get `typhoon_name` — it just never returned the ID itself). Needed so the frontend can call `POST /api/assessments/calculate` (which requires a `typhoon_id`) directly from a selected bulletin.
+
+### 2. File: `backend/app/api/assessments.py`
+* `list_assessments()`: added `amount_cover` (via `a.insurance_record.amount_cover`, a real Sum Insured value) and `indemnity_factor` (previously only returned by `/calculate`'s response, not the persistent `GET /`, so it disappeared on page reload).
+* `export_assessments_csv()`: added an optional `typhoon_id` query filter (same `AreaExposureSummary` join pattern `list_assessments()` already uses), so the export can be scoped to one typhoon instead of always returning every computed assessment ever. Backward compatible — omitting the param keeps the old unscoped behavior.
+
+### 3. File: `frontend/src/lib/api.ts`
+* Added `typhoon_id` to `Bulletin`; added `amount_cover`/`indemnity_factor` to `Assessment`.
+* Added `CalculateAssessmentsResult` type and `calculateAssessments(typhoonId, bulletinId)` → `POST /api/assessments/calculate` (the file's first JSON-body POST — existing POSTs all use `FormData`, so `Content-Type: application/json` is set explicitly at the call site).
+* Added `getAssessmentsExportUrl(typhoonId)` — returns a plain URL string rather than a typed fetch-blob helper, since no `api.ts` function anywhere sets auth headers; the CSV modal opens this URL directly (`window.open`) and lets the browser handle the download.
+
+### 4. File: `frontend/src/app/App.tsx`
+* `AssessmentModule` now receives the same lifted `selectedBulletin`/`onSelectBulletin` props as `MonitoringModule`/`SpatialAnalysisModule` (one shared typhoon-event selection app-wide). Its `coverageRatePerHa` prop was removed — `CalibrationModule` keeps owning that value for whatever else uses it, but `AssessmentModule` no longer has a use for it (see below).
+
+### 5. File: `frontend/src/app/components/AssessmentModule.tsx` (near-total rewrite)
+* Replaced all `mockFarmers`/`mockBulletins` usage with `getBulletins()` (grouped client-side by `typhoon_name` for the folder UI — same interaction shape as before, real data underneath), and `getAssessments(typhoonId)` + `getFarms()` joined by `farm_id` for the results table (same join pattern as `SpatialAnalysisModule`).
+* Selecting a bulletin now calls the real `calculateAssessments()`. Replaced the fake `setInterval` progress/failure simulation with real `isCalculating`/`calcError` state — `calcError` surfaces the actual thrown error (e.g. a real 404), not fabricated SAR/GEE text. Removed `lastSuccessfulTCB` rollback-to-previous-bulletin logic entirely (it only existed to serve the fake failure path). Added an explicit **honest zero-result state** ("0 assessments computed — no policies met eligibility criteria...") since that's a normal, expected real outcome, not an error.
+* Removed: per-farm coverage-rate override editing (pencil icon/inline input/override map — no real backend concept), the 4-stage growth-stage taxonomy and `windVelocityMin`/`windVelocityMax` range display (real data is a single signal number), the hardcoded "Signal 2 Only" default filter and footer summary panel (the real eligibility rule is already enforced server-side at calculate time), the per-typhoon-folder signal badge (no real per-bulletin signal on the list endpoint, not worth an N+1 fetch just for a badge), and the "Damage Factors" reference table (4-stage taxonomy/percentages don't correspond to the real `tbl_recsap_matrix`/`tbl_indemnity_factor_matrix` values, which are a 3-key lookup, not a simple stage×signal table — no cheap real replacement without a new backend endpoint).
+* CSV export: simplified from a two-modal preview→confirm flow to one modal (preview table + a "Download CSV" button linking to the new `typhoon_id`-scoped export URL) — the original two-step flow was preserved in spirit, just consolidated, since the download is now a real server-generated file (nothing left to "confirm" client-side beyond reviewing the same rows about to download).
+* "Indemnity by Municipality" bar chart kept, re-sourced from real filtered/joined assessment rows grouped by `Farm.municipality` (clean real-data path existed for this one).
+
+### Status / Next Steps
+* Not run against a live database or the frontend dev server — same handoff situation as the Sprint 3 entry: Fabio needs to run the backend test suite, exercise the three modified endpoints via Swagger UI, and click through the frontend himself.
+* An uncommitted, unrelated change was already present in the working tree when this branch was created: `.claude/DEVELOPMENT_PLAN.md`'s Sprint 4 formula was edited from `I = (AC / 1000) * IF * Area` to `I = (AC / 1000) * IF` (dropping `* Area`). This was not made by this work and contradicted the actual formula used everywhere in the real code (`indemnity_calc.py`, `PROJECT_CONTEXT.md`) at the time — flagged to the user, who chose to keep and include it in this branch rather than revert it. **Resolved by the entry below**, which confirmed this was correct per PCIC and fixed the rest of the codebase to match.
+* Branch is **not pushed** and has **no PR open**, and depends on `cristian/backend/wire-real-data-sprint3` merging first (stacked branch) — needs review before merging into `develop`.
+
+---
+
+## [2026-07-23] - Formula Correction: Drop `* Area` from the Indemnity Payout Calculation
+
+**Branch:** `cristian/backend/wire-real-data-sprint4` (same branch as the entry above; committed locally, not pushed, no PR open yet).
+
+Fabio confirmed the correct PCIC formula is `I = (AC / 1000) * IF` — farm area is **not** a factor. This corrects a bug: the payout engine had been computing `I = (AC / 1000) * IF * Area` this entire session (matching what `.claude/PROJECT_CONTEXT.md`/`MASTER_DEVELOPMENT_CONTEXT.md` documented at the time, which was itself wrong), silently over/under-paying every farm proportional to its area. Every prior changelog entry describing the old formula is left as historical record, not rewritten.
+
+### 1. File: `backend/app/core/indemnity_calc.py`
+* `ParametricAssessment.calculate_final_payout()`: dropped the `area_hectares` parameter and the `* area_hectares` term — now `payout = (amount_of_cover / 1000) * float(rule.indemnity_factor)`. Updated the docstring and the interactive `__main__` CLI testing block (no longer prompts for area).
+
+### 2. File: `backend/app/services/assessment_service.py`
+* `calculate_for_bulletin()`: removed the now-unused `area = float(insurance.farm.area_size)` local and stopped passing it to `calculate_final_payout()`. `estimated_damage`'s calculation (`amount_cover * yield_loss% / 100`) was never area-dependent and is unchanged.
+
+### 3. File: `backend/tests/test_assessment_service.py`
+* Recomputed the eligible-policy test's expected payout: `(50000/1000) * 330.00 = 16500.0` (was `41250.0`, which included the now-removed `* 2.5` area factor).
+
+### 4. Files: `.claude/PROJECT_CONTEXT.md`, `.claude/MASTER_DEVELOPMENT_CONTEXT.md`
+* Both updated from `I = (AC / 1000) * IF * Area` to `I = (AC / 1000) * IF`, matching `.claude/DEVELOPMENT_PLAN.md`'s already-corrected version and the fixed code.
+
+### Status / Next Steps
+* Not run against a live database — same handoff situation as every other entry in this file; Fabio needs to run the test suite himself to confirm.
+* This changes real computed payout amounts. If any assessments were ever computed against a live database using the old formula (unlikely given the repeated "never run against a live database" notes above, but worth confirming), those `RiskAssessment.final_indemnity_payment` values would need recomputing.
+
+---
+
+## [2026-07-24] - PABS CSV Ingestion Fix, GPX Filename Auto-Matching, and `farmers_id` Schema Proposal
+
+**Branch:** `fabio/db/pabs-ingestion-gpx-matching` (committed locally, not pushed, no PR open yet).
+
+Prompted by two new real files dropped in `docs/`: `Rice Risk Exposure Region X 04-15-2026.csv` (a fresh PABS export, 23,917 rows — intended as the recurring source-of-truth format the GIS specialist will keep exporting) and `TAB_ABAO , JONEL  J._120961_1148107_2024-08-06.gpx` (a real farm-boundary walk). Investigating whether the database could actually ingest the CSV, and whether a GPX file's farmer could be auto-detected from its filename, surfaced that **`POST /api/upload/csv` was completely broken for any CSV, old or new format** — before touching anything else — plus a design trap that would have made things worse.
+
+### 0. The trap: `RiskAssessment` at CSV-import time looked removable, but isn't
+`upload_csv()`'s previous per-row `RiskAssessment(..., adjuster_calculation=...)` insert crashed on every real upload (`adjuster_calculation` is not a column on that model — confirmed via grep, only referenced in this one call site and its own unit test). The obvious fix looked like "delete that insert entirely." That would have been wrong: `AssessmentService.calculate_for_bulletin()` (the real payout engine) reads each policy's crop growth stage from its **most recent existing `RiskAssessment` row** (`assessment_service.py`'s own docstring says so explicitly, and `test_assessment_service.py` mocks exactly this `prior` row in every eligibility test). Deleting the insert would have made every CSV-ingested policy permanently un-assessable — silently, since `calculate_for_bulletin()` just skips policies with no prior row. `backend/seed_database.py` (the separate, legacy ingestion script) already depends on this same mechanism, seeding a `RiskAssessment` row with `final_indemnity_payment` set equal to `estimated_damage` as a placeholder. `export_assessments_csv()` already filters `WHERE matrix_id IS NOT NULL` specifically to exclude these placeholder rows from "real" results. Fix keeps this seed row, narrowed to only the fields the CSV actually provides (crop stage + estimated damage), matching `seed_database.py`'s existing placeholder convention (confirmed with Fabio).
+
+### 1. File: `docs/PROPOSAL_farmers_id_column.md` (new)
+* Proposal for adding `tbl_farmers_profile.farmers_id VARCHAR(20) UNIQUE` — PABS's own per-farmer ID. Empirically (full 23,917-row pass of the real CSV): `FarmersID` is 100% populated vs. `RSBSA No.`'s 71.3% (6,862 blank rows — legitimate for non-RSBSA program types like `APCP`/`AGRISENSO PROGRAM`). Includes the exact `init_schema.sql`/`models.py` diffs. Approved by Fabio (concept-level) before this commit; **the live database does not have this column until Fabio applies it** — see Status below.
+
+### 2. File: `backend/init_schema.sql`
+* **Changes to Schema:** Added `tbl_farmers_profile.farmers_id VARCHAR(20) UNIQUE` per the proposal above. Not yet applied to any live database.
+
+### 3. File: `backend/app/models/models.py`
+* **Changes to Classes/Structures:** `FarmerProfile` gained `farmers_id = Column(String(20), unique=True)`. Also fixed `rsbsa_no` from `nullable=False` to nullable — it was already nullable in both the live DDL and the manuscript's own dictionary (p.37: "UNIQUE, NULLABLE"); only the SQLAlchemy model contradicted reality. Needed so the CSV fix below can insert a genuine `NULL` for the ~29% of real rows with no RSBSA number.
+
+### 4. File: `backend/app/services/gpx_farmer_matcher.py` (new)
+* Added **`GpxFarmerMatcherService.parse_filename(filename)`**: regex-parses the `TAB_<LASTNAME> , <FIRSTNAME> <MI>._<ID1>_<ID2>_<DATE>.gpx` filename convention. ID/date suffix and name portion are parsed independently so a malformed name doesn't lose the IDs (or vice versa).
+* Added **`GpxFarmerMatcherService.match(filename, db)`**: matching precedence is ID1 → `farmers_id` (once applied), then ID2 → `Farm.csv_farm_reference`, then normalized (last name + first name) match, with middle name/initial used **only** as a tiebreaker between multiple name candidates — never a hard requirement. This is deliberate: the real sample file's filename middle initial ("J.") disagrees with its own in-file `<trk><name>` middle name ("BEBERRENO"), proving the two can genuinely disagree. Returns an explicit "ambiguous" result (populated `candidates`) or an empty result (no match at all) rather than guessing — confirmed against the real sample file, which matches **nothing** in the new CSV/XLSX by name or ID (independently-sourced files), so "no match" had to be a first-class, gracefully-handled outcome, not an edge case.
+* `gpx_parser.py` (geometry parsing) is untouched — filename/identity matching is a separate concern with its own file, consistent with this codebase's one-concern-per-service pattern.
+
+### 5. File: `backend/app/api/upload.py`
+* **Changes to Functions:**
+  * Added **`_normalize_header(key)`**: collapses a CSV header to bare alphanumerics so `"Farm ID"` (legacy `pabs_results.csv` layout) and `"FARMID"` (the new PABS export's actual header — no space) resolve to the same lookup. This was the exact bug that would have collapsed every farm across a 23,917-row import onto a single DB row: the old code read `data.get("Farm ID")` literally, which always returned `None` against the new file's `FARMID` column, and the get-or-create farm lookup matched on that `None`/blank value rather than refusing to match on it.
+  * Added **`_stringify_id(value)`**: coerces a pandas-inferred numeric ID column (`FARMID`/`FarmersID` are pure-digit columns pandas reads as int64/float64) to text before it reaches a `VARCHAR` column.
+  * Rewrote **`prepare_row_payload(row)`**: now header-normalized (see above); added `farmers_id` (farmer) and `product_name` (insurance — was silently read nowhere despite `InsuranceRecord.product_name` existing on the model and being `NOT NULL` in the manuscript's dictionary, p.39); renamed the `"assessment"` sub-dict to `"crop_stage_seed"` and dropped `adjuster_calculation` entirely (the field that crashed every upload); kept `risk_exposure_amount` only for a runtime cross-check, never persisted (confirmed numerically identical to `EstimatedDamage` across all 23,917 real rows — logged as a warning if a future file ever disagrees, not silently ignored). Blank `rsbsa_no` now normalizes to `None`, not `""` — the root cause of the farmer-side collapse bug (matching on `""` treated "no RSBSA number" as a real, shared identity).
+  * Rewrote **`upload_csv()`**: (a) added an encoding fallback (`utf-8-sig` → `cp1252`) — the real export is ISO-8859-1/cp1252-encoded (e.g. surnames like "SEÑERES"), and the old code had no encoding handling at all; (b) farmer get-or-create now prefers `farmers_id` over `rsbsa_no`, and — like the farm lookup — never matches an existing row when the key is blank/`None`, only when it's a real value; (c) removed the broken `RiskAssessment(..., adjuster_calculation=...)` call, replaced with the narrowed crop-stage-seed insert described in item 0 above (`final_indemnity_payment` seeded from `estimated_damage`, per Fabio's explicit instruction to pull this from the CSV's own figures rather than a fabricated placeholder); (d) fixed two bugs found in passing in this same function: `InsuranceRecord.farmer_id` was never set on CSV-uploaded records (silently broke `export_assessments_csv()`'s farmer-name lookup for any non-`seed_database.py` data), and `product_name` was read but never persisted.
+  * Updated **`upload_gpx()`**: `farmer_id`/`farm_id` are now optional (`Form(default=None)`). Omitting both auto-detects via `GpxFarmerMatcherService.match()` on the uploaded filename; providing both keeps the exact previous manual behavior (backward compatible); providing exactly one is a 400. Auto-detect failure (no match, or an ambiguous name match) returns 404/400 with no DB change — falls back to the existing manual UI selection, never guesses. Response now includes `matched_by` and `farmer_name`.
+
+### 6. File: `.claude/API_CONTRACT.md`
+* Synced the `POST /api/upload/gpx` entry to document the now-optional `farmer_id`/`farm_id` and the auto-detect/ambiguous/no-match behavior.
+
+### 7. File: `.claude/CLAUDE.md`
+* Fixed a stale pointer: the manuscript link pointed at `.claude/Revised AgriSureGIS Manuscript.pdf`, but that file actually lives at `docs/Revised AgriSureGIS Manuscript.pdf` (confirmed via direct listing — it isn't in `.claude/` at all, and isn't an untracked/moved file per `git status`, so this drift predates this session). Updated the reading-order link to point at the real location. Not rewriting historical changelog entries that cite the old path (e.g. the `[2026-07-21]` Sprint 1 audit entry) — those are left as an accurate record of what was true when written, same convention as the formula-correction entry above.
+
+### 8. Files: `frontend/src/lib/api.ts`, `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* `api.ts`: `uploadGpx()`'s `farmerId`/`farmId` params are now optional; added `matched_by`/`farmer_name` to `UploadGpxResult`.
+* `SpatialAnalysisModule.tsx`: dropping a `.gpx` file with no table row pre-selected now calls `uploadGpx(file)` (auto-detect) instead of hard-erroring with "select a farm row first". On success, the success banner reports the matched farmer/method and the matched row is auto-highlighted (reusing the table's existing row-selection styling — no new UI surface). A pre-selected row still takes priority and behaves exactly as before (manual override unchanged). Dropzone hint text updated to mention auto-matching.
+
+### 9. Files: `backend/tests/test_csv_upload.py`, `backend/tests/test_upload_csv_ingestion.py` (new), `backend/tests/test_gpx_farmer_matcher.py` (new), `backend/tests/test_upload_gpx_api.py` (new)
+* `test_csv_upload.py`: updated for the renamed `crop_stage_seed` payload shape; added a test using the new export's exact real header spellings (`FARMID`, `Product Name`, `FarmersID`, `RiskExposureAmount`, `DistinctCount`), and a test proving blank `RSBSA No.`/`FARMID` normalize to `None` (not `""`).
+* `test_upload_csv_ingestion.py`: new DB-integration-level tests against a small in-memory fake-table `db` mock (value-matched, not sequence-scripted, so it behaves like a real get-or-create across multiple rows in one upload) — direct regression tests for the farmer/farm blank-collapse bug, farmer reuse when `farmers_id` matches, the `InsuranceRecord.farmer_id`/`product_name` fixes, the crop-stage-seed shape, the `RiskExposureAmount` mismatch warning, and the cp1252 encoding fallback with a real accented surname.
+* `test_gpx_farmer_matcher.py`: filename-parsing tests against the exact real sample filename (including the "missing IDs still recovers name" and "missing name still recovers IDs" tolerance cases), and `match()` tests covering every precedence branch, the middle-initial tiebreaker, the ambiguous-candidates case, and the genuine no-match case modeled on the real sample file.
+* `test_upload_gpx_api.py`: `upload_gpx()` auto-detect success/no-match/ambiguous, manual-mode regression (unchanged behavior), and the exactly-one-ID-provided 400 case. No `TestClient` introduced — tested as plain function calls with a mocked `db`, consistent with how every other test in this suite already calls service/API functions directly.
+
+### Manuscript Audit Findings (verified directly against `docs/Revised AgriSureGIS Manuscript.pdf` — footer pp.23-25 Functional/Non-Functional Requirements, p.37 `tbl_farmers_profile` dictionary, p.38 `tbl_farms` dictionary)
+* **CSV column layout:** the manuscript requires CSV import (footer p.23: "allow the specialist to import the existing risk exposure report... via CSV file") but specifies no column layout for it. The new export's `FarmersID`, `FARMID` (vs. legacy `Farm ID`), `RiskExposureAmount`, `DistinctCount`, and `Product Name` are all real-world extensions the manuscript never enumerated — a gap-fill, not a conflict.
+* **GPX farmer linkage — an actual deviation, not just a gap:** the manuscript's `tbl_farms` dictionary (p.38) states `location_geom` is "Populated via spatial join with the georef_id." In practice, `Georef ID` is blank on 99.8% of real CSV rows, and the real GPX file carries no `georef_id` anywhere inside it at all — only a farmer name (in a non-standard `<metadata><farmer><name>` block gpxpy doesn't surface, and in the standard `<trk><name>` it does) plus two numeric IDs in the *filename*. Filename-based matching is a necessary, pragmatic replacement for a documented mechanism that the real data can't actually support — worth stating plainly rather than softening it as mere silence.
+* **`farmers_id`:** no such field exists anywhere in the manuscript's `tbl_farmers_profile` dictionary (p.37) — a pure additive extension, motivated by `farmers_id`'s 100% real-world coverage vs. `rsbsa_no`'s 71.3%.
+* **Corroboration:** FR (footer p.23) explicitly requires the system to automate "matching the crop growth stage" as part of the payout calculation — independently validates item 0's finding that a crop-stage source must survive CSV ingestion. `tbl_farms.georef_id`'s dictionary example value, `"R10-13-16-012-000016"` (p.38), exactly matches the format of real populated `Georef ID` values seen in the CSV — confirms that mapping is correct where it does apply.
+* **Unrelated, pre-existing divergence noted for the record only (not touched by this change):** the manuscript's `tbl_risk_assessments` dictionary (p.40) describes `final_indemnity_payment` as `amount_cover * indemnity_factor` — no `/1000`. This differs from the actual formula `(amount_cover / 1000) * indemnity_factor`, which Fabio already confirmed correct and which the `[2026-07-23]` "Formula Correction" entry above already fixed in code. Flagging only because this audit was already reading that page; no action taken.
+
+### Status / Next Steps
+* **The live database does not have the `farmers_id` column yet.** Any upload that hits the `farmers_id`-matching branch will raise `UndefinedColumn` until Fabio applies `docs/PROPOSAL_farmers_id_column.md`'s DDL. Everything else in this entry (encoding fix, header normalization, blank-collapse fix via `rsbsa_no` alone, `product_name`/`InsuranceRecord.farmer_id` fixes, the crop-stage-seed rework, and GPX matching via `farm_reference`/name) has no DDL dependency and works against the current live schema.
+* Backend test suite run by Fabio (`pytest tests/ -v`): 36/43 passed on the first pass; the 7 failures were all in `test_upload_csv_ingestion.py` and all traced to the same root cause (a gap in that test file's own mock harness, not production code — see the follow-up entry directly below). Not yet re-run since the fix; not run against a live database or the frontend dev server.
+* Branch is **not pushed** and has **no PR open** — needs review before merging into `develop`.
+
+---
+
+## [2026-07-24] - Test Fix: `RiskAssessment` Inserts in the CSV Ingestion Fake-DB Harness
+
+Follow-up to the entry directly above, found by Fabio's first `pytest` run against it.
+
+### 1. File: `backend/tests/test_upload_csv_ingestion.py`
+* **Changes to Tests:** `_build_mock_db()`'s `add_side_effect()` only tracked the four get-or-create models (`AdminBoundary`/`FarmerProfile`/`Farm`/`InsuranceRecord`) in its fake PK-tracking table. `upload_csv()` also calls `db.add()` on a `RiskAssessment` instance (the crop-stage seed row, item 0 in the entry above) — a model the harness never queries back, so it was never added to that table, and `tables[RiskAssessment]` raised `KeyError: <class 'app.models.models.RiskAssessment'>` on every test, caught by `upload_csv()`'s broad `except Exception` and re-surfaced as a 500. Fixed by only running the PK-assignment bookkeeping for models actually present in the tracking table, while still recording every added instance (including `RiskAssessment`) in the flat `added_instances` list the tests assert against.
+
+### Status / Next Steps
+* This was a test-harness-only bug. All 36 other tests (the updated `test_csv_upload.py`, `test_gpx_farmer_matcher.py`, `test_upload_gpx_api.py`, and the rest of the existing suite) passed on the first run, meaning the actual production code from the entry above (`upload.py`, `gpx_farmer_matcher.py`, `models.py`) was already correct.
+* Fabio re-ran `pytest tests/ -v`: all 43 tests passed.
+
+---
+
+## [2026-07-24] - CSV Ingestion: PSGC Boundary Lookup and Case-Insensitive Matching
+
+Found by Fabio actually exercising `/api/upload/csv` end-to-end in the browser against the real `docs/Rice Risk Exposure Region X 04-15-2026.csv` — the first genuine live-DB test of this endpoint. Two real, pre-existing bugs surfaced (neither introduced by the entry above; the boundary-creation code was untouched by it):
+
+1. **`AdminBoundary` creation never set `psgc_code`.** `tbl_admin_boundaries.psgc_code` is `NOT NULL UNIQUE`, but `upload_csv()` only ever passed `province`/`municipality`/`barangay` when creating a new boundary row. Every row whose exact boundary didn't already exist in the DB hit `psycopg2.errors.NotNullViolation` (Fabio's actual error: `null value in column "psgc_code"... Failing row contains (3, null, Agusan del Norte, REMEDIOS T. ROMUALDEZ, POBLACION II)`).
+2. **The PSGC reference file only covered 2 of the CSV's 8 provinces.** `backend/app/data/psgc_region10_boundaries.csv` (888 rows) covered Bukidnon and Misamis Oriental only; the real CSV spans Agusan del Norte, Agusan del Sur, Bukidnon, Camiguin, Dinagat Islands, Misamis Oriental, Surigao del Norte, and Surigao del Sur.
+3. **Case mismatch, independent of the above:** the reference file and `pabs_results.csv` both use Title Case province/municipality/barangay names, but the new CSV export uses ALL CAPS for municipality/barangay (e.g. `Bukidnon,BAUNGON,LIBORAN`). Exact-string matching (both the `AdminBoundary` get-or-create query and the new PSGC lookup) would have silently failed for nearly every row, including Bukidnon/Misamis Oriental rows that were supposedly already "covered."
+
+### 1. File: `backend/app/data/psgc_region10_boundaries.csv`
+* Appended 1,369 barangay-level rows (78 municipalities/cities) covering the 6 previously-missing provinces, sourced from `https://psgc.gitlab.io/api/` (a PSA/NAMRIA-derived PSGC API — the same class of source as the original Bukidnon/Misamis Oriental data, per the `[2026-07-23]` "Real PSGC Codes" entry). Cross-checked against the existing file before trusting it: two known entries (`Balintad` under both Baungon, Bukidnon and Manticao, Misamis Oriental) matched exactly, including the full 10-digit PSGC code. File now covers all 8 provinces the real CSV spans (2,257 total rows).
+* One finding worth recording: `REMEDIOS T. ROMUALDEZ` (flagged in Fabio's error above, and initially suspected as a shifted/malformed CSV column) is confirmed to be a **real, official Agusan del Norte municipality** — not a data error. It resolves correctly once case-insensitive matching (below) is in place.
+* Cities required special handling: barangays under a **city** (e.g. City of Butuan, City of Bislig) reference a `cityCode` field in the source API rather than `municipalityCode` — missed on the first extraction pass (caught 0 Butuan-area rows), fixed to check both fields.
+
+### 2. File: `backend/app/api/upload.py`
+* **Changes to Functions:**
+  * Added **`_boundary_key(province, municipality, barangay)`**: normalizes (strip + uppercase) a boundary tuple for comparison, shared by both the PSGC lookup dict and the DB query below.
+  * `_load_psgc_lookup()`: dict keys now built via `_boundary_key()` instead of raw CSV text, so lookups are case-insensitive.
+  * `upload_csv()`: the `AdminBoundary` get-or-create query now compares `func.upper(AdminBoundary.column) == payload_value.upper()` instead of exact equality, for the same reason. Boundary rows are still **stored** with whatever casing the source CSV used (no data rewritten) — only the comparison is case-insensitive.
+  * Boundary creation now looks up `psgc_code` via `_load_psgc_lookup()` before constructing `AdminBoundary(...)`, raising a clear `ValueError` (`"No PSGC code on file for (...). Add it to app/data/psgc_region10_boundaries.csv..."`, matching `seed_database.py`'s existing message style) instead of letting a missing code reach the database as a cryptic constraint violation.
+
+### 3. File: `backend/tests/test_upload_csv_ingestion.py`
+* Added `test_missing_psgc_code_raises_clear_error_not_db_constraint_violation` — regression test for the exact failure Fabio hit.
+* The fake-DB `_FakeQuery`/`_FakeTable` harness needed a real fix, not just a cosmetic one: it introspected filter criteria as plain `Model.column == value` expressions, but `func.upper(Model.column) == value` has a different shape (`.left` is the `Function`, not the `Column`). Without handling this, the harness would have silently stopped matching on province/municipality/barangay at all (every row would appear to create a brand-new boundary instead of reusing one) rather than failing loudly — fixed to detect the `func.upper(...)` wrapper, pull the real column name from its wrapped argument, and apply the same uppercase transform to the stored value before comparing.
+* `_FAKE_PSGC_LOOKUP`'s key updated to the uppercase-normalized form `_boundary_key()` now produces (was previously keyed by the raw Title-Case text, which no longer matches).
+
+### Status / Next Steps
+* Not yet re-verified against a live database — Fabio needs to re-attempt the CSV drop in the browser to confirm the real file now ingests (or fails only on genuinely bad rows, e.g. a `Surigao del Norte,DDINAGAT` typo spotted in passing — looks like a real source-data typo, not something to silently "correct").
+* **Resolved by the entry below:** whether the whole 23,917-row import should abort on the first bad row, or isolate failures per-row. Fabio chose per-row isolation.
+
+---
+
+## [2026-07-24] - CSV Ingestion: Per-Row Failure Isolation
+
+Follow-up to the entry above. `upload_csv()` previously wrapped the *entire* row loop in one try/except with a single `db.commit()` at the end — any row's exception (e.g. the PSGC lookup failure two entries up, or a genuine data-quality row like the `DDINAGAT` typo) rolled back the whole batch, discarding every other already-processed row. Given a 23,917-row real export is not going to be perfectly clean, Fabio confirmed per-row isolation is wanted over all-or-nothing.
+
+### 1. File: `backend/app/api/upload.py`
+* **Changes to Functions:**
+  * Extracted **`_ingest_row(payload, db)`**: the per-row boundary/farmer/farm/insurance/crop-stage-seed logic, unchanged in behavior, pulled out of `upload_csv()`'s loop body into its own function. Returns `"inserted"` or `"skipped"`; raises on any unrecoverable problem (missing PSGC code, etc.) for the caller to handle.
+  * `upload_csv()`: each row now runs inside its own SQLAlchemy SAVEPOINT (`db.begin_nested()`). On success, the savepoint is committed (still pending in the outer transaction, not yet durable) and the loop continues; on failure, only that row's savepoint is rolled back — every previously-processed row in the same upload is unaffected — the row is counted in a new `rows_failed`, and `{row, policy_no, error}` is appended to a new `failures` list (capped at 50 entries in the response to avoid a pathological response size if the PSGC data or CSV itself turns out to be more broken than expected; `rows_failed` itself is always the true total). The outer try/except is kept for genuinely unexpected failures (e.g. the final `db.commit()` itself failing) — that still aborts and rolls back everything, since at that point something is wrong beyond a single row's data.
+  * Response `message` now says `"CSV data ingested with N row(s) skipped due to errors."` when `rows_failed > 0`, instead of always claiming full success.
+
+### 2. Files: `frontend/src/lib/api.ts`, `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* `api.ts`: added `UploadCsvRowFailure` type and `rows_failed`/`failures` to `UploadCsvResult`.
+* `SpatialAnalysisModule.tsx`: CSV upload success banner now appends `", N failed"` when `rows_failed > 0` (previously only showed inserted/skipped counts). No new UI surface for browsing individual failures yet — `result.failures` is available on the response for a future "view details" affordance if wanted, but the *count* was the priority for the GIS specialist to at least know something needs attention.
+
+### 3. File: `backend/tests/test_upload_csv_ingestion.py`
+* Renamed/updated `test_missing_psgc_code_raises_clear_error_not_db_constraint_violation` → `test_missing_psgc_code_is_reported_as_a_row_failure_not_a_raised_exception`: with per-row isolation, this case no longer raises out of `upload_csv()` at all — it's now a normal 200 response with the failure captured in `result["failures"]`.
+* Added `test_one_bad_row_does_not_abort_the_rest_of_the_batch`: two rows, one with an unmappable boundary — asserts the good row's `FarmerProfile`/`InsuranceRecord` are still present and counted, and the bad row is isolated in `failures` rather than wiping out the batch.
+
+### 4. File: `.claude/API_CONTRACT.md`
+* Documented the per-row SAVEPOINT behavior and the new `rows_failed`/`failures` response fields for `POST /api/upload/csv`.
+
+### Status / Next Steps
+* Awaiting Fabio's re-run of `pytest tests/ -v`, then a re-attempt of the real CSV drop in the browser — expecting the bulk of the 23,917 rows to now ingest successfully, with any remaining genuine data-quality rows (e.g. `DDINAGAT`) reported in `failures` rather than blocking everything else.
+* No mechanism yet to *fix* a reported bad row and re-run just that one — re-uploading the same CSV after a fix is safe (already-inserted policies are skipped via the existing `policy_no` uniqueness check), just not surgical. Not building that now — flagging in case it's wanted later.
+* **Superseded in part by the entry below:** Fabio tried the real 23,917-row CSV and the request never returned within several minutes — this entry's per-row SAVEPOINTs, on top of the pre-existing per-row SELECT queries, meant far more DB round trips per row than before, with no caching of repeated lookups within the same upload.
+
+---
+
+## [2026-07-24] - CSV Ingestion: Cache Repeated Boundary/Farmer/Farm Lookups Within One Upload
+
+Fabio reported the real CSV upload appeared to hang (waited several minutes, backend terminal showed no activity). Root cause: the real file's 23,917 rows span far fewer distinct boundaries/farmers than rows — the same barangay repeats across roughly 10-20 rows on average, and the same farmer across ~1.2 rows — but every row was independently re-querying the database for its boundary/farmer/farm via `SELECT`, on top of the new per-row SAVEPOINT overhead from the entry above. Nothing had actually deadlocked; it was just doing many times more DB round trips than necessary. Since the whole upload is one outer transaction that only commits at the very end, nothing was lost by the wait — safe to just retry after this fix.
+
+### 1. File: `backend/app/api/upload.py`
+* **Changes to Functions:**
+  * Added **`_IngestCaches`** (dataclass): four in-process dicts (`boundaries`, `farmers_by_farmers_id`, `farmers_by_rsbsa_no`, `farms_by_reference`) scoped to a single `upload_csv()` call. Populated by the caller **only after** a row's SAVEPOINT successfully commits — a rolled-back row's newly-created objects must never be cached for a later row to reuse, since the DB-level insert they'd point to no longer exists.
+  * Added **`_RowIngestResult`** (dataclass): what `_ingest_row()` now returns (outcome, the resolved boundary/farmer/farm objects and their cache keys) so `upload_csv()`'s loop can update the caches after each successful commit.
+  * Extracted **`_ingest_row(payload, db, caches)`**: same per-row logic as the entry above, now checking `caches` before issuing any `SELECT` for boundary/farmer/farm, only hitting the database on a cache miss.
+* This is purely an internal optimization — no change to `upload_csv()`'s request/response contract, ingestion order, or the get-or-create/blank-matching rules from earlier entries.
+
+### 2. File: `backend/tests/test_upload_csv_ingestion.py`
+* `_build_mock_db()` now tracks `query_call_counts` per model, so tests can assert on query *volume*, not just correctness.
+* Added `test_repeated_boundary_across_many_rows_is_only_queried_once` and `test_same_rsbsa_no_across_rows_is_only_queried_once` — direct regression tests for this exact problem, asserting the database is queried once per distinct boundary/farmer rather than once per row.
+
+### Status / Next Steps
+* The caching fix worked (request returned quickly instead of hanging), but Fabio's next attempt reported all 23,917 rows failed. **Resolved by the entry below**, a distinct bug this caching change wasn't responsible for.
+
+---
+
+## [2026-07-24] - CSV Ingestion: Coerce Every VARCHAR-Mapped ID to a String
+
+Fabio's retry (fast this time, confirming the caching fix above worked) reported **every single row failing identically**: `psycopg2.errors.UndefinedFunction: operator does not exist: character varying = integer` on `WHERE tbl_insurance_records.policy_no = 1192155`. Root cause: `Policy No.` in the real PABS export is purely numeric (e.g. `1192155`), so pandas infers that whole column as `int64` — `prepare_row_payload()` only ever coerced `FARMID`/`FarmersID` to text via `_stringify_id()`, not `Policy No.` (or `RSBSA No.`/`Georef ID`, which have the same latent risk even though the current file's values happen to be dash-formatted). This bug predates this session entirely — the original `upload_csv()` had the identical `_normalize_value(data.get("Policy No.")) or ""` line — it just never surfaced because nobody had run it against a live database with a real, purely-numeric Policy No. column before now. None of this session's own tests caught it either, since every test fixture used a non-numeric policy number like `"POL-1"`, which never exercises pandas' numeric type inference at all.
+
+### 1. File: `backend/app/api/upload.py`
+* **Changes to Functions:**
+  * `prepare_row_payload()`: `policy_no`, `rsbsa_no`, and `georef_id` are now all passed through `_stringify_id()`, same as `farmers_id`/`csv_farm_reference` already were. All five are VARCHAR-mapped identifiers that PABS could plausibly export as pure digits in some file even if the current one only demonstrates it for `Policy No.`.
+  * `_stringify_id()`'s docstring updated to reflect it's a general "every ID column read from this CSV" helper, not FARMID/FarmersID-specific.
+
+### 2. Files: `backend/tests/test_csv_upload.py`, `backend/tests/test_upload_csv_ingestion.py`
+* Added `test_purely_numeric_policy_no_is_coerced_to_string` (`test_csv_upload.py`) — parses a **real CSV string** through `pd.read_csv()` (not a hand-built `pd.DataFrame([...])`, which never exercises pandas' own type inference) with an all-digit Policy No., confirming it comes out of `prepare_row_payload()` as `str`.
+* Added `test_purely_numeric_policy_no_ingests_successfully_end_to_end` (`test_upload_csv_ingestion.py`) — same scenario through the full `upload_csv()` call, asserting `rows_failed == 0` and the stored `InsuranceRecord.policy_no` is a string.
+* Neither existing test suite caught this originally because every fixture used letters in its policy numbers (`"POL-001"`, `"POL-1"`, etc.) — worth remembering when writing CSV-ingestion test fixtures going forward: use realistic, purely-numeric IDs where the real PABS data is purely numeric, not letter-prefixed placeholders that accidentally dodge pandas' type inference.
+
+### Status / Next Steps
+* Awaiting Fabio's re-run of `pytest tests/ -v`, then a fresh CSV upload attempt — this should be the last blocker for a full, successful end-to-end ingestion of the real 23,917-row file (modulo any genuinely bad individual rows like the `DDINAGAT` typo, which will now report cleanly in `failures` instead of blocking anything).
+
+---
+
+## [2026-07-26] - Sample Ingestion Assets Added to `docs/`
+
+No backend/frontend code touched. Fabio dropped four real-world sample artifacts into `docs/` for GPX-matching/ingestion work on this branch; a replacement flowchart export also lands here (the old `docs/Flowchart.drawio.png` stays as-is, unrelated to this branch's revert).
+
+### 1. File: `docs/Rice Risk Exposure Region X 04-15-2026.csv` (new)
+* Trimmed from the original ~23,918-row PABS export down to 100 lines (header + 99 rows) at Fabio's request, so it's usable as a lightweight test fixture instead of the full file.
+* The naive first-100-rows slice was 94/99 `RSBSA` `Program Type` rows (only 5 non-`RSBSA`), which isn't representative — the full file's `Program Type` column has 8 distinct values (`RSBSA`, `APCP`, `ACEF PROGRAM`, `AGRI-PUHUNAN PROGRAM`, `RSBSA - ARB`, `AGRISENSO PROGRAM`, `ANYO PROGRAM`, `OTHER - LI LC`), and non-`RSBSA` rows are only 437 of 23,917 total, sparse and scattered throughout the file. Rebuilt as: the first 92 `RSBSA` rows (original order) + the first occurrence of each of the 7 non-`RSBSA` program types, merged back into original row order — giving a 100-line sample that exercises every program type instead of being effectively all-`RSBSA`.
+
+### 2. File: `docs/TAB_ABAO , JONEL  J._120961_1148107_2024-08-06.gpx` (new)
+* Real farmer GPX boundary track sample for this branch's GPX-matching work.
+
+### 3. File: `docs/RICE_Insured-Farms_with-PPI-Polygon_02-09-2026.xlsx` (new)
+* Real insured-farms reference workbook with PPI polygon data.
+
+### 4. File: `docs/Parametric_Indemnity_Process_Flowchart.drawio.png` (new)
+* Updated flowchart export. Added alongside (not replacing) the existing `docs/Flowchart.drawio.png`, which an earlier revert on this branch restored to its committed state.
+
+### Status / Next Steps
+* Committed on `fabio/db/pabs-ingestion-gpx-matching`, which has never been pushed to `origin` before now — this is the branch's first push, needs `git push -u origin fabio/db/pabs-ingestion-gpx-matching` (no upstream configured yet).
+
+---
+
+## [2026-07-27] - Automated PAGASA TCB Ingestion (Background Scheduler + In-App Notification)
+
+TCB ingestion was 100% manual: a GIS specialist had to click "Parse Latest Bulletin" to trigger `POST /api/bulletins/parse`. Per Fabio's decisions (scraping + in-app pop-up only, no email; in-process APScheduler, no OS cron; wire the interval to the existing mock "TCB Polling Interval" Calibration field rather than hardcoding it), this entry automates the scrape/parse/save pipeline and makes the interval live-configurable. Schema change proposed and approved per `docs/PROPOSAL_parser_settings_table.md` — **not yet applied to any live database**, that's Fabio's `psql -f init_schema.sql` to run.
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* Added **`BulletinParserService.scrape_and_save_all(db, temp_dir="temp_bulletins")`**: extracts the fetch→download→parse→save loop previously inlined in `trigger_pagasa_scrape`. Pure refactor, no behavior change — but unlike the HTTP route, this method never raises on an empty/all-failed result, since the new scheduled job needs "nothing new found" to be a quiet, normal outcome rather than an error.
+
+### 2. File: `backend/app/api/bulletins.py`
+* `trigger_pagasa_scrape` (`POST /parse`) is now a thin wrapper: still raises `404` if no links are found (unchanged HTTP contract for the manual button), then delegates to `scrape_and_save_all`.
+* Added **`GET /settings`** / **`PUT /settings`** (→ `/api/bulletins/settings`), backed by the new `ParserSettings` model: `GET` returns the current polling interval (get-or-create a default row if missing); `PUT` validates `1-24` via a new inline `ParserSettingsUpdate(BaseModel)` (matching this file's existing convention from `assessments.py` — no `app/schemas/` module exists in this codebase), persists the new value, and reschedules the **live** APScheduler job via `request.app.state.scheduler`.
+
+### 3. File: `backend/app/models/models.py`
+* Added **`ParserSettings`**: maps the new `tbl_parser_settings` single-row config table (`polling_interval_hours`, `updated_at`).
+
+### 4. File: `backend/init_schema.sql`
+* Added `tbl_parser_settings` (+ drop, + seed row `polling_interval_hours = 3`, matching the frontend's existing default). See `docs/PROPOSAL_parser_settings_table.md` (new) for the full proposal — this is the one schema change in this entry.
+
+### 5. File: `backend/app/core/scheduler.py` (new)
+* Added **`build_scheduler(initial_interval_hours)`**: registers a `BackgroundScheduler` job (`id="pagasa_bulletin_poll"`, `max_instances=1` to guard against overlapping runs if a scrape outlasts the interval).
+* Added **`run_scheduled_scrape()`**: the APScheduler job target. Opens/closes its own `SessionLocal()` session (no FastAPI request context exists in a background job, so `Depends(get_db)` isn't usable here), drives the async `scrape_and_save_all` via `asyncio.run(...)`, and never lets an exception escape the job (logs instead) so one bad scrape can't kill the scheduler thread.
+* Added **`reschedule_bulletin_job(scheduler, new_interval_hours)`**: used by the `PUT /settings` route to reconfigure the already-running job in place.
+* Used `BackgroundScheduler` (thread-based), not `AsyncIOScheduler` — the job mixes `await httpx` calls with sync SQLAlchemy/pdfplumber work, so it's simpler to drive the async call via `asyncio.run(...)` inside a plain scheduler thread than to integrate with uvicorn's own event loop.
+* **Known limitation, not engineered around:** this repo's documented dev setup is single-worker `uvicorn --reload`, so exactly one scheduler runs at a time. A hypothetical multi-worker deployment would start one independent scheduler per worker, all polling redundantly — harmless (saves are idempotent per `(typhoon_id, bulletin_count)`) but wasteful. Out of scope.
+
+### 6. File: `backend/app/main.py`
+* Replaced `app = FastAPI(...)` with a `lifespan` async context manager: on startup, reads the persisted interval from `tbl_parser_settings` (defaults to 3 if missing), builds and starts the scheduler, stashes it on `app.state.scheduler`, and logs the interval; on shutdown, `scheduler.shutdown(wait=False)`. Everything else in `main.py` is unchanged.
+
+### 7. File: `backend/requirements.txt`
+* Added `APScheduler==3.11.0`.
+
+### 8. File: `frontend/src/lib/api.ts`
+* Added **`ParserSettings`** interface + **`getParserSettings()`** / **`updateParserSettings(hours)`**, following the existing `request<T>()` wrapper pattern.
+
+### 9. File: `frontend/src/app/App.tsx`
+* Added a `useEffect` (gated on `currentUser`) polling `getBulletins()` every 60s, tracking the highest `tcb_id` seen in a `ref`. First poll after login only records the baseline — it does not notify about bulletins that already existed. When a higher `tcb_id` appears (i.e. the background scheduler parsed something new with no button click involved), pushes a real `AppNotification` (matching `mockData.ts`'s existing interface/wording) onto the `notifications` state already wired to `Header`'s bell dropdown, and fires a `sonner` `toast.success(...)` (the `<Toaster>` was already mounted).
+* Changed the initial `notifications` state from `useState(mockNotifications)` to `useState([])`, since it's now populated by real events. `mockData.ts` itself is untouched — `mockNotifications` isn't imported anywhere else.
+* No WebSockets/SSE — plain polling of the existing list endpoint, matching this project's synchronous-HTTP-only style.
+
+### 10. File: `frontend/src/app/components/CalibrationModule.tsx`
+* `parserInterval` stays local `useState` (no `App.tsx` prop-drilling needed — nothing else in the app needs this value client-side) but is now backed by a `useEffect` that calls `getParserSettings()` on mount, and `handleSave()` now also calls `updateParserSettings(parserInterval)` alongside its existing local "Settings saved" banner. No JSX/layout changes — same input, same styling.
+
+### 11. Files: `backend/tests/test_bulletin_parser.py`, `backend/tests/test_parser_settings_api.py` (new), `backend/tests/test_scheduler.py` (new)
+* `test_bulletin_parser.py`: added `ScrapeAndSaveAllTests` (`unittest.IsolatedAsyncioTestCase`, this repo's first async test) — empty-links returns `[]` without raising; a failing link is skipped while the rest still process; happy-path dict shape.
+* `test_parser_settings_api.py`: get-or-create default row; existing-value read; update persists + calls `reschedule_bulletin_job` (mocked); Pydantic `ge=1,le=24` rejects out-of-range values via direct `ParserSettingsUpdate` construction — matches this suite's existing convention of calling route functions directly with a mocked `db`/fake `request`, never `TestClient`.
+* `test_scheduler.py`: `build_scheduler`/`reschedule_bulletin_job` register/update the job with the right interval. Deviates slightly from the original plan (which assumed `get_job()` works without `.start()`) — APScheduler keeps unstarted jobs in a pending queue not visible to `get_job()`, so these tests `.start()` then immediately `.shutdown(wait=False)` in a `finally` block. Since the interval is always in hours (minimum 1h), the job cannot actually fire within a test's lifetime — no real network/DB activity occurs. Confirmed safe more broadly: no test in this suite imports `app` from `main.py` (all call functions/services directly), so `lifespan` — and the real scheduler/network calls — never run during `pytest` collection.
+
+### Status / Next Steps
+* **Schema not yet applied** — `tbl_parser_settings` doesn't exist on any live database yet. `GET/PUT /api/bulletins/settings` and the scheduler's startup read will raise `UndefinedTable` until Fabio re-runs `init_schema.sql` (or applies the equivalent `CREATE TABLE`/`INSERT` from `docs/PROPOSAL_parser_settings_table.md`).
+* `APScheduler` needs `pip install -r requirements.txt` in Fabio's venv before the backend will start.
+* Not run against a live database or `pytest` — Fabio needs to run the test suite himself, then the manual end-to-end verification (scheduler starts with logged interval; changing/saving the Calibration interval reschedules the live job per a log line, without restarting `uvicorn`; a simulated new bulletin — e.g. via the existing `/api/bulletins/upload` fallback — shows up as a toast/bell notification within ~60s with no manual "Parse Latest Bulletin" click).
+* No email/SMTP notification (out of scope per Fabio's decision) — only the in-app toast/bell.
+
+---
+
+## [2026-07-27] - Fix: `ParserSettings` Mapper Crash + Typhoon Name/Grouping Bugs
+
+Fabio's first `pytest` run after the entry above hit 10 collection errors (`ModuleNotFoundError: No module named 'app'` — fixed by running `python -m pytest` instead of bare `pytest`, since the `pytest` console-script doesn't add cwd to `sys.path` and this repo has no `pytest.ini`/`conftest.py` to do it another way), then a second run surfaced 18 real test failures. Root cause of nearly all of them: one stray line I introduced.
+
+### 1. File: `backend/app/models/models.py`
+* **Bug fix:** Removed a stray `boundary = relationship("AdminBoundary")` line accidentally left on the new `ParserSettings` model (added in the entry above) — `ParserSettings` has no `boundary_id` column at all. SQLAlchemy configures every mapper in the registry together on first use; this one broken relationship (`NoForeignKeysError: ... between 'tbl_parser_settings' and 'tbl_admin_boundaries'`) cascaded into totally unrelated test failures across `test_assessment_service.py`, `test_bulletin_parser.py`, `test_exposure_calculator.py`, and all of `test_upload_csv_ingestion.py` (the last of these especially misleadingly — `upload_csv()`'s per-row try/except silently caught the resulting `InvalidRequestError` on every row and recorded it as a row failure instead of raising, so the symptom looked like a CSV-ingestion regression rather than a models.py typo). Verified fixed via a standalone `configure_mappers()` check before handing back to Fabio to re-run the full suite.
+
+### 2. File: `backend/app/services/bulletin_parser.py`
+Separately, while looking at the Monitoring module's "Typhoon Events" list, Fabio spotted duplicate-looking entries — "Typhoon KIYAPO" next to "Typhoon KIYAPO Issued at", etc.
+* **Bug fix — `parse_bulletin_text()`:** the typhoon-name capture group `[A-Z\s\-]+` had no upper bound and, with `re.IGNORECASE`, happily consumed through a following word (since `\s` matches the space between words, and even newlines) whenever the source PDF didn't wrap the name in quotes — e.g. `TYPHOON GARDO Issued at 5:00 PM...` parsed as name `"GARDO Issued at"` instead of `"GARDO"`. Tightened to `[A-Z][A-Z\-]*` — a single word, matching the Philippine local-name convention — so it stops at the first space.
+* **Changed `save_bulletin_to_db()`'s "Get or Create Typhoon" step**, per Fabio's decision: group bulletins under the same `Typhoon` row by name (case-insensitive) **and** recency — a bulletin only joins an existing typhoon if that typhoon has some bulletin issued within the last 30 days (`reference_time = parsed_data["issued_at"] or now`; `window_start = reference_time - 30 days`; query joins `Typhoon` to `TropicalCycloneBulletin`, filters `issued_at >= window_start`, orders by `issued_at desc`). Previously it matched by name + current calendar-year only (`Typhoon.year == datetime.now().year`), which had two problems: (a) it used *today's* year rather than the bulletin's own year, so a bulletin from a prior year processed later would misfile; (b) PAGASA's local-name list rotates and reuses names across separate seasons, so a bare name match had no time bound at all and could wrongly merge unrelated storms. Any bulletin number for an ongoing typhoon (bulletin No. 10, 20, ...) still lands well inside the 30-day rolling window since real bulletins for one event are issued every few hours, not weeks apart — per Fabio's confirmation.
+* New `Typhoon` rows now get `year=reference_time.year` (the bulletin's own issued year) instead of `datetime.now().year`.
+
+### 3. File: `backend/cleanup_typhoon_names.py` (new)
+* One-off script (not run automatically, not wired to any endpoint) to fix `Typhoon` rows already corrupted by the name-regex bug before this fix landed: derives each row's "clean" name using the same single-word rule, then either merges the corrupted row's bulletins into an existing clean-named row and deletes the corrupted row, or renames the corrupted row in place if no clean counterpart exists yet.
+
+### 4. File: `backend/tests/test_bulletin_parser.py`
+* Added `test_parse_bulletin_text_name_does_not_swallow_trailing_issued_at` — regression test for the regex fix.
+* Added `test_reuses_existing_typhoon_when_a_bulletin_is_within_30_days` and `test_creates_new_typhoon_when_no_bulletin_within_30_days` — cover both branches of the new grouping logic.
+* Updated `_build_mock_db()`'s Typhoon-query mock to match the new `.join(...).filter(...).order_by(...).first()` chain (previously just `.filter(...).first()`), with a new `existing_typhoon` parameter so tests can control the "found within window" vs. "not found" outcome.
+
+### Status / Next Steps
+* Fabio needs to re-run `python -m pytest tests/ -v` from `backend/` to confirm all failures are now resolved (not yet re-run since these fixes).
+* **`cleanup_typhoon_names.py` has not been run against the live database** — needs Fabio to run it himself (`python cleanup_typhoon_names.py` from `backend/`, in his venv) to fix the corrupted rows already visible in his screenshot. Existing `TcbSignal` rows pointing at a to-be-deleted corrupted `Typhoon` are unaffected (they key off `tcb_id`, not `typhoon_id`).
+
+---
+
+## [2026-07-27] - Bulletin Parsing Rewrite: Bulletin Number, Category, Coordinates, Real TCWS Table
+
+Fabio provided a real sample bulletin (`docs/TCB#11_kiyapo.pdf` — Tropical Storm KIYAPO, Bulletin NR. 11) and pointed at the `pagasa-parser` project (github.com/pagasa-parser) as a reference implementation. Running our existing `parse_bulletin_text()` against this real file (not a hand-typed mock) surfaced four concrete bugs beyond the name-regex fix from the entry above. Fixes below are modeled on `@pagasa-parser/source-pdf`'s regex approach (confirmed via its published source: `Tropical Cyclone Bulletin N[ro]\. (\d+)` for the bulletin number, a title-line-anchored category/name/international-name pattern, and `([0-9.]+)°([NS]),\s?([0-9.]+)°([WE])` for coordinates) and its use of real PDF table extraction (`tabula-java` in their Node.js stack) for the TCWS signal table, rather than regex-scanning flattened prose.
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* **Bug fix — bulletin number:** real bulletins abbreviate to `"BULLETIN NR. 11"`, not `"Bulletin No. 11"`. Regex widened to `N[ro]\.` (matches both). Against the real sample, this was silently defaulting to `1` for every bulletin.
+* **Bug fix — category:** replaced the old `"Typhoon" if "typhoon" in text.lower() else "Tropical Storm"` substring check — which false-positived whenever the word "typhoon" appeared anywhere else in the bulletin's forecast prose (e.g. "may be upgraded... reach typhoon category") — with extraction directly from the title line itself (e.g. `"Tropical Storm KIYAPO (NOUL)"`), via one regex anchored to line-start (`^\s*(TYPHOON|TROPICAL STORM|...)`) that also captures the name and, as a bonus, the international name in parentheses. Against the real sample this was misreporting a Tropical Storm as a "Typhoon".
+* **New field:** `parsed_data["international_name"]` (e.g. `"NOUL"` for KIYAPO) — captured for free by the same title-line regex. Not yet wired into `save_bulletin_to_db()`/the `Typhoon` model; available for future use.
+* **Bug fix — coordinates:** real phrasing is a parenthesized `"(18.8°N, 122.0°E)"` pair with a full clause between the word "at" and the actual numbers (`"...data at over the coastal waters of ... (18.8°N, 122.0°E)"`), and the old fallback regex was missing the `°` symbol entirely — so neither of the two old patterns matched, and every real bulletin silently got `latitude=0.0, longitude=0.0`. Replaced both with one pattern, `([0-9.]+)\s*°\s*([NS]),\s*([0-9.]+)\s*°\s*([EW])`, matched anywhere in the text.
+* **Rewrite — signal/area extraction:** PAGASA bulletins contain the signal-area data as an actual table (`TCWS No. | Luzon | Visayas | Mindanao`, one row per signal level, `"-"` where a column doesn't apply, confirmed against the real sample's actual `page.extract_tables()` output) — not free prose. The old approach regex-scanned the flattened text for any "Signal No. X" occurrence, which had no way to tell the real table apart from a narrative sentence merely *mentioning* a signal (e.g. "The hoisting of Wind Signal No. 3 is not ruled out should KIYAPO intensify...") — against the real sample this fabricated phantom signals `{1, 2, 3}` from unrelated narrative text. Now uses `page.extract_tables()` (already available via `pdfplumber`, already a dependency — no new library needed, unlike `pagasa-parser`'s Java/tabula-java requirement), locates the table row containing "Mindanao" in its header, and reads only that column per signal level (this project is scoped to PCIC Region X/Mindanao per `PROJECT_CONTEXT.md`, so Luzon/Visayas columns are intentionally not extracted). `signals_data` keeps its original `{level: text}` shape, so `save_bulletin_to_db()` needed no changes.
+* Note: the real sample (KIYAPO) only has Luzon areas — its Mindanao column is `"-"` for every signal level — so `signals == {}` is the **correct** result for this file, not a remaining bug.
+
+### 2. File: `backend/tests/test_bulletin_parser.py`
+* Added a `_mock_pdf(text, tables=None)` helper (every mock page now sets both `extract_text` and `extract_tables`, since the production code now reads both).
+* Added `test_parse_bulletin_text_extracts_bulletin_number_with_nr_abbreviation`, `test_parse_bulletin_text_category_is_not_fooled_by_the_word_elsewhere_in_the_text`, `test_parse_bulletin_text_extracts_coordinates_with_degree_symbol_and_no_at_prefix`, `test_parse_bulletin_text_extracts_mindanao_signals_from_table` (mocked table matching the real sample's shape, including a "Warning lead time" continuation row with a blank first cell that must stay attributed to the running signal level, and a Signal 1 row whose Mindanao cell is `"-"` and must be excluded).
+* Added `test_parse_bulletin_text_against_real_sample_pdf` — a true end-to-end regression test that opens `docs/TCB#11_kiyapo.pdf` directly (no mocks) and asserts the exact real values (name, international name, bulletin number, category, winds, coordinates, issued-at, and the correct empty `signals`).
+* Updated the existing metadata/issued-at tests to use the new `_mock_pdf` helper (previously missing `extract_tables`, which would now raise `TypeError` since the new code always iterates it).
+
+### Status / Next Steps
+* Verified directly (regex/table logic hand-run against both mocks and the real PDF) before handing back, but **not yet run through the actual `pytest` suite** — needs Fabio's `python -m pytest tests/ -v` re-run, same as the entry above.
+* `international_name` is parsed but not persisted anywhere yet — flag for later if Fabio wants it stored on `tbl_typhoons`.
+* Did not port `pagasa-parser`'s full `AreaExtractor` (directional-qualifier parsing like "eastern portion of X" into structured province/part/municipality JSON) — our `TcbSignal`/`AdminBoundary` matching only needs municipality-level substring matching today, so this was intentionally left out as bigger scope than asked; flagging in case finer-grained (barangay/partial-area) signal data is wanted later.
+
+---
+
+## [2026-07-27] - Final-Bulletin Detection: Auto-Close Typhoon + Auto-Run Exposure Summary
+
+Fabio confirmed PAGASA's real signal for "no more bulletins will follow" is a trailing `F` on the bulletin number itself (e.g. `"NR. 21F"` for Francisco's last bulletin) — not any particular closing-sentence wording (which we have no real sample of). Per Fabio's decision, a detected final bulletin now auto-closes the typhoon and auto-runs the exposure summary; it deliberately stops short of the assessment/payout calculation, which stays a separate manual step.
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* **`parse_bulletin_text()`:** bulletin-number regex widened to `N[ro]\.\s+(\d+)([A-Za-z]?)`, capturing an optional trailing letter. New `parsed_data["is_final"]` = `True` when that letter is `"F"`/`"f"`. Verified against both the real KIYAPO sample (`bulletin_count=11, is_final=False` — it explicitly says "next bulletin at 5:00 PM today") and a synthetic Francisco `"NR. 21F"` case (`bulletin_count=21, is_final=True`).
+* **`save_bulletin_to_db()`:** when `is_final` is set and the resolved `Typhoon.is_active` is still `True`, flips it to `False` and commits — the first code path that ever sets this existing-but-previously-unused column.
+* **`scrape_and_save_all()`:** added `from app.services.exposure_calculator import ExposureCalculatorService`; after a final bulletin is saved, calls `ExposureCalculatorService.compute_for_typhoon(bulletin.typhoon_id, db)` inline (inside the existing per-link try/except, so a failure here doesn't crash the rest of the scrape loop). Since both the manual `POST /api/bulletins/parse` route and the new scheduled job funnel through this one shared method, this trigger applies to both without duplicating logic. `bulletins_created` dict entries now also include `"is_final"`.
+
+### 2. File: `backend/tests/test_bulletin_parser.py`
+* Added `test_parse_bulletin_text_detects_final_bulletin_marker` (the `"NR. 21F"` case) and an `is_final` assertion on the existing NR./real-sample tests.
+* Added `test_save_bulletin_to_db_marks_typhoon_inactive_when_final` — uses a real `Typhoon(...)` instance (not a `MagicMock`) as `existing_typhoon` so `.is_active`'s actual before/after state can be asserted directly.
+* Added `test_final_bulletin_triggers_exposure_summary` and `test_non_final_bulletin_does_not_trigger_exposure_summary` to `ScrapeAndSaveAllTests`, patching `app.services.bulletin_parser.ExposureCalculatorService.compute_for_typhoon` to assert it's called with the right `typhoon_id` only in the final case.
+* Updated `test_returns_created_bulletin_dicts_on_happy_path`'s exact-dict assertion to include the new `"is_final"` key.
+
+### Status / Next Steps
+* Verified directly (hand-run against both the auto-trigger and typhoon-inactive scenarios) before handing back; not yet run through `pytest` — needs Fabio's re-run, same as the two entries above.
+* The assessment/payout calculation (`AssessmentService.calculate_for_bulletin()`) intentionally still requires a manual `POST /api/assessments/calculate` call even after a final bulletin — per Fabio's explicit scope decision, not an oversight.
+* Only real-world confirmation of the `F`-suffix convention is Fabio's own domain knowledge (Francisco's `"NR. 21F"`) — no real *final* bulletin PDF was available to verify end-to-end the way `docs/TCB#11_kiyapo.pdf` verified the other parsing fixes. Worth dropping a real final-bulletin sample into `docs/` later if one becomes available.
+
+---
+
+## [2026-07-27] - Active-Typhoon Reconciliation Against PAGASA's Current Listing
+
+Fabio asked for a way to cross-check whether the typhoons we have on file are still actually "active" per PAGASA, since the "F" final-bulletin marker (previous entry) is only a signal PAGASA sometimes sends — it doesn't cover a storm that simply stops getting new bulletins without one. Per Fabio's decisions: this runs automatically as part of the existing scheduler/scrape cycle (not a separate on-demand endpoint), and closing a stale typhoon does the same thing the final-bulletin path does (mark inactive + auto-run the exposure summary).
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* **New `PagasaScrapeError` exception** + **behavior change in `fetch_active_bulletin_links()`**: previously swallowed *any* failure (bad HTTP status or a network exception) into a bare `return []`, identical to a successful check that genuinely found nothing active. Now raises `PagasaScrapeError` for real failures; `[]` is returned only for a confirmed-successful check with zero links. This distinction matters because the new reconciliation step (below) treats an empty result as "PAGASA confirms nothing is active — close everything still marked active," which would have been actively dangerous to trigger off of a transient network hiccup instead of a real empty check.
+* **New `ACTIVE_LINK_NAME_RE`** (module-level): `TCB#\d+[A-Za-z]?_([A-Za-z]+)\.pdf` — parses the storm name out of a real PAGASA bulletin filename (e.g. `"TCB#11_kiyapo.pdf"` → `KIYAPO`). Tolerates an optional trailing letter on the bulletin number (`"TCB#21F_francisco.pdf"`) since Fabio confirmed the same "F" final-bulletin marker can appear in the filename's own number, not just inside the PDF text.
+* **New `_reconcile_active_typhoons(active_links, db)`**: for every `Typhoon` row still marked `is_active=True`, checks whether its name appears among the storm names parsed from `active_links`; if not, closes it (`is_active=False` + `ExposureCalculatorService.compute_for_typhoon(...)`) — same action as an explicit final bulletin, just triggered by absence from PAGASA's list instead. An empty-but-successful `active_links` list correctly means "close everything."
+* **`scrape_and_save_all()`**: calls `_reconcile_active_typhoons(links, db)` once, after the per-link download/parse/save loop, using the same `links` already fetched at the top of the method. Since the initial `links = await cls.fetch_active_bulletin_links()` call is *not* wrapped in the per-link try/except, a `PagasaScrapeError` here propagates straight out of `scrape_and_save_all()` — skipping the loop and reconciliation entirely — and is caught by the scheduler job's own top-level try/except (`backend/app/core/scheduler.py`'s `run_scheduled_scrape()`), so a failed PAGASA check just gets logged and retried next cycle rather than closing anything.
+
+### 2. File: `backend/app/api/bulletins.py`
+* `trigger_pagasa_scrape()` now catches `PagasaScrapeError` from its own initial `fetch_active_bulletin_links()` check and returns the same existing `404 "No active bulletin PDFs found on PAGASA portal."` response as a genuinely empty result — no visible behavior change for the manual-trigger button, just an internal distinction that only matters for reconciliation.
+
+### 3. File: `backend/tests/test_bulletin_parser.py`
+* New `FetchActiveBulletinLinksTests` (mocking `httpx.AsyncClient`): non-200 response and a network exception both raise `PagasaScrapeError`; a successful zero-link response still returns `[]`.
+* New `ReconcileActiveTyphoonsTests`: closes a stale typhoon absent from the active-links list; leaves one present in the list untouched; correctly matches a name despite the filename's own `"21F"`-style final suffix; closes everything when `active_links` is empty.
+* New `test_propagates_pagasa_scrape_error_and_skips_reconciliation` on `ScrapeAndSaveAllTests` — confirms a fetch failure isn't swallowed and never reaches the exposure-summary call.
+
+### Status / Next Steps
+* Verified directly (hand-run against all of the above scenarios, including confirming existing `scrape_and_save_all` tests still pass unmodified — a bare `MagicMock()`'s `.all()` iterates as empty by default, so the new reconciliation step doesn't interfere with tests that don't care about it) before handing back; not yet run through `pytest` — needs Fabio's re-run.
+* Name-matching is filename-based only (same assumption `GpxFarmerMatcherService` already relies on for GPX filenames) — a PAGASA filename that doesn't follow the `TCB#<n>[F]_<name>.pdf` convention would fail to match and could cause a false closure. No real-world counterexample has been seen; flagging as a known limitation, not engineered around further.
+
+---
+
+## [2026-07-28] - Fix Map Attribution Links Kicking Users Back to Login
+
+**Branch:** `fabio/db/pabs-ingestion-gpx-matching` (James's frontend edit, per Fabio's request to use this branch — committed locally, not pushed yet).
+
+James found that clicking the Leaflet/OpenStreetMap attribution links at the bottom-right of the map (Spatial Analysis screen) navigated the whole browser tab away to `leafletjs.com`/`openstreetmap.org`. Since this SPA has no URL routing, pressing Back afterward doesn't restore the app's prior state — it reloads the app from scratch, which drops the user (all state is in-memory `useState`, including `currentUser`) back on the Login screen instead of wherever they were.
+
+### 1. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* **Changes to Functions/Behavior:**
+  * Added `target="_blank" rel="noopener noreferrer"` to the `TileLayer`'s custom OpenStreetMap copyright attribution string.
+  * Added a `mapWrapperRef` + `useEffect` with a `MutationObserver` that patches every link inside `.leaflet-control-attribution` (including Leaflet's own auto-injected "Leaflet" credit link, which isn't reachable via a react-leaflet prop) to also open in a new tab. The observer is needed because Leaflet renders its attribution control after mount, not as part of React's initial render.
+
+### Status / Next Steps
+* Verified in-browser by James: clicking both attribution links now opens a new tab instead of navigating the app away.
+* Not pushed yet.
+
+---
+
+## [2026-07-28] - GeoServer Integration (Schema, Backfill, Frontend WFS/WMS)
+
+Fabio asked to wire up GeoServer, the 2nd-tier spatial layer server shown in
+`docs/system architecture.png` but never actually implemented (confirmed zero
+references anywhere in the codebase prior to this change). Scoped after finding that
+`tbl_farms`' interactive click/popup layer can't move to WMS without losing
+interactivity (WMS returns raster, not clickable features), and that
+`tbl_admin_boundaries` had no geometry column at all — so region boundaries were a
+static bundled file, not something GeoServer could serve from PostGIS. Fabio chose:
+farm layer stays additive-only (existing FastAPI-sourced interactive layer untouched,
+new optional WMS overlay added), and to add the missing geometry column so region
+boundaries can move to a live GeoServer WFS source. GeoServer itself installs
+natively (no Docker) — actual install/publish steps are a runbook for Fabio, not
+run by Claude, per `.claude/CLAUDE.md`'s DB/venv execution rules.
+
+### 1. File: `backend/init_schema.sql`
+* **`tbl_admin_boundaries`**: added `boundary_geom GEOMETRY(MultiPolygon, 4326)` column and
+  `idx_admin_boundaries_boundary_geom` GIST index, so GeoServer has a real PostGIS
+  geometry to publish for the region-boundaries layer. Backfilled from
+  `frontend/public/data/region10-boundaries.geojson` (see backfill script below), not
+  used in any exposure calculation — `ExposureCalculatorService` still matches on
+  province/municipality/barangay text.
+
+### 2. File: `backend/app/models/models.py`
+* **`AdminBoundary`**: added `boundary_geom = Column(Geometry(geometry_type="MULTIPOLYGON", srid=4326))`
+  to match the schema change above.
+
+### 3. File: `backend/backfill_admin_boundary_geom.py` (new)
+* **`run_backfill()`**: one-off script reading `region10-boundaries.geojson` and
+  `UPDATE`-ing `tbl_admin_boundaries.boundary_geom` for every row matching a
+  feature's `(province, municipality)` — matched on text, not `psgc_code`, since the
+  geojson's `psgc_municipality` codes are municipality-level and don't correspond to
+  any single barangay's `psgc_code`. Prints unmatched municipalities (expected for
+  ones with no seeded farms yet, not an error). Not run yet — needs Fabio, per venv
+  execution rules.
+
+### 4. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* **Changes to Functions/Behavior:**
+  * Added `GEOSERVER_URL`/`GEOSERVER_PROXY_BASE`/`REGION_X_BOUNDARIES_WFS_URL`/
+    `FARMS_WMS_LAYER`/`FARMS_WMS_URL` constants. `VITE_GEOSERVER_URL` is only used to
+    decide *whether* GeoServer is configured (shows/hides the overlay toggle, gates
+    the WFS attempt); actual requests are built against the `/geoserver-proxy` path
+    (see `vite.config.ts` below), not the raw `VITE_GEOSERVER_URL`, so the browser
+    never makes a cross-origin request.
+  * The `regionXBoundaries` fetch effect now tries GeoServer WFS
+    (`agrisuregis:tbl_admin_boundaries`, GeoJSON output) first and falls back to the
+    existing static `region10-boundaries.geojson` fetch if `VITE_GEOSERVER_URL` is
+    unset or the WFS request fails — same rendering/tooltip code (`styleBoundary`,
+    `labelBoundary`) either way, so this changes only the data source, not behavior.
+  * Added `showFarmsWmsOverlay` state and a new checkbox control (top-right,
+    only rendered when `VITE_GEOSERVER_URL` is set) toggling a `<WMSTileLayer>` for
+    `agrisuregis:tbl_farms`, rendered as a semi-transparent overlay alongside —
+    not replacing — the existing interactive per-farm `<GeoJSON>` layer, so
+    click-to-select/popups are unaffected.
+
+### 5. File: `frontend/vite.config.ts`
+* **Changes to Config:** switched `defineConfig({...})` to the function form
+  `defineConfig(({ mode }) => {...})` so it can `loadEnv()` and read
+  `VITE_GEOSERVER_URL` at dev-server-config time (not just client-side via
+  `import.meta.env`). Added `server.proxy['/geoserver-proxy']` forwarding to
+  `VITE_GEOSERVER_URL` with `changeOrigin: true`, only registered when that env var
+  is set. This exists specifically to avoid needing CORS configured on GeoServer —
+  see the incident note below.
+
+### 6. File: `.claude/GEOSERVER_SETUP.md` (new)
+* Runbook for Fabio: native GeoServer install (no Docker), applying the schema
+  change to the live DB, running the backfill script, creating the `agrisuregis`
+  workspace + PostGIS datastore, publishing `tbl_farms`/`tbl_admin_boundaries` as
+  WMS/WFS layers, and a written incident note steering away from editing GeoServer's
+  `web.xml` for CORS (see below).
+
+### 7. File: `.claude/ENV_GUIDE.md`
+* Documented new `VITE_GEOSERVER_URL` variable.
+
+### 8. File: `frontend/.env.example` (was empty)
+* Populated with `VITE_API_BASE_URL` (pre-existing var, was missing from this file)
+  and the new `VITE_GEOSERVER_URL`, per `ENV_GUIDE.md`'s rule to keep this file in
+  sync with what the code reads.
+* **Follow-up correction**, found while testing: initially set
+  `VITE_API_BASE_URL=http://localhost:8000/api`, copying `ENV_GUIDE.md`'s documented
+  default verbatim without checking it against `frontend/src/lib/api.ts` — every path
+  there already includes its own leading `/api/...` (e.g. `request('/api/bulletins/')`),
+  so that combination produced `/api/api/bulletins/` and 404'd every core feature
+  (bulletins, farms, assessments, CSV upload) once Fabio copied it into a real `.env`.
+  Corrected to `http://localhost:8000` (no suffix) in both this file and
+  `ENV_GUIDE.md`. GeoServer's own requests were unaffected (they go through
+  `/geoserver-proxy`, not `API_BASE_URL`), which is what made this identifiable as a
+  separate bug rather than a GeoServer regression.
+
+### 9. Files: `.claude/PROJECT_CONTEXT.md`, `.claude/MASTER_DEVELOPMENT_CONTEXT.md`, `docs/README.md`
+* Added GeoServer to the written architecture descriptions, matching what
+  `docs/system architecture.png` already showed but the text docs omitted.
+
+### Incident: GeoServer outage from a bad CORS fix attempt
+While testing, the frontend's WFS call to GeoServer hit a CORS error (expected —
+GeoServer doesn't send CORS headers by default). The Jetty-bundled GeoServer
+distribution ships a *Tomcat*-specific `CorsFilter` block in `web.xml`, commented
+out; its own comment says "enable CORS in Tomcat," which doesn't apply to this
+Jetty-based install. Uncommenting it anyway threw `ClassNotFoundException:
+org.apache.catalina.filters.CorsFilter` and crashed the entire GeoServer webapp
+(503 on everything, including the admin UI). A follow-up attempt to hand-revert the
+comment markers over chat left the XML malformed (unclosed `<web-app>` tag),
+crashing it a second way. Recovered by extracting a clean `web.xml` from Fabio's
+original downloaded archive rather than continuing to hand-patch it. Fabio then
+deleted and re-extracted the whole GeoServer folder to get a guaranteed-clean state,
+which also reset `data_dir` (workspace/datastore/published layers) back to
+out-of-the-box defaults, requiring the workspace/datastore/publish steps to be
+redone. Final fix avoids `web.xml` entirely — see `vite.config.ts` above. Runbook
+updated with an explicit warning against editing that file for CORS.
+
+### Status / Next Steps
+* **Verified working end-to-end by Fabio**: schema applied, database reseeded,
+  `boundary_geom` backfilled, GeoServer installed (JDK 11 — JDK 17 hit a separate
+  `NoClassDefFoundError`/Marlin-renderer incompatibility on WMS `GetMap`/rendering
+  operations), workspace/datastore/layers republished after the folder
+  re-extraction reset them, frontend restarted with corrected env vars. Core app
+  features (bulletins, farms, assessments, CSV upload) and the GeoServer WFS
+  boundary layer + WMS farm overlay toggle all confirmed working in-browser.
+* Pushed (`fabio/db/pabs-ingestion-gpx-matching`).
+
+---
+
+## [2026-07-28] - Windows Setup Guide
+
+Fabio asked for a Windows-specific setup walkthrough. Written by checking actual
+code behavior rather than trusting existing docs at face value, since the
+GeoServer work earlier the same day surfaced two cases (`DATABASE_URL`,
+`VITE_API_BASE_URL`) where `.claude/ENV_GUIDE.md` described env-var behavior the
+code doesn't actually implement — confirmed via `grep` that nothing in
+`backend/app/` imports `python-dotenv` or reads `os.environ`/`os.getenv` at all,
+despite the package being listed in `requirements.txt`; `DATABASE_URL` and
+`PAGASA_SCRAPE_URL` are both hardcoded in source
+(`backend/app/core/database.py`, `backend/app/services/bulletin_parser.py`)
+instead.
+
+### 1. File: `docs/WINDOWS_SETUP.md` (new)
+* Full walkthrough: prerequisites (Git, Python 3.11+, Node 20 LTS, PostgreSQL+PostGIS
+  via the EDB installer/Stack Builder, optional JDK for GeoServer), DB
+  user/database/extension creation matching the hardcoded credentials in
+  `database.py` (flagged as a doc/code mismatch rather than silently "fixed"),
+  backend venv/pip/uvicorn steps (PowerShell-specific execution-policy note for
+  venv activation), frontend npm/`.env` steps (repeats the `VITE_API_BASE_URL`
+  no-`/api`-suffix warning from the GeoServer work), and an optional GeoServer
+  section (Windows paths/`startup.bat`/`JAVA_HOME` via PowerShell, same JDK 17
+  Marlin-renderer warning, explicit "don't edit `web.xml` for CORS" warning
+  referencing the incident from the same day's GeoServer entry, and a pointer to
+  `.claude/GEOSERVER_SETUP.md` §5–6 for the OS-independent workspace/datastore/
+  publish steps rather than duplicating them).
+
+### 2. File: `README.md`
+* Added a link to `docs/WINDOWS_SETUP.md` under Contents.
+
+### Status / Next Steps
+* Not verified on an actual Windows machine — written from the codebase's actual
+  behavior (grepped, not assumed) plus the Linux setup already verified the same
+  day, but no Windows hardware available to test the walkthrough end-to-end.
+* Not pushed yet.
+
+---
+
+## [2026-07-29] - Assessment & Reporting: PABS-Format Combined Summary + Exposure Summary Mock
+
+**Branch:** `fabio/db/pabs-ingestion-gpx-matching` (James's frontend work + supporting backend fix, per Fabio's request to use this branch — committed locally, not pushed yet).
+
+Restructured the Assessment & Reporting screen around the PABS-mandated combined-CSV format (all typhoons together, not scoped to one bulletin/typhoon), then iterated through several rounds of Fabio's feedback (relayed through James) on how the computation trigger and its result table should actually be shaped.
+
+### 1. File: `backend/app/api/assessments.py`
+* Added **`_build_pabs_rows()`**: shared row-builder joining `RiskAssessment` → `InsuranceRecord` → `Farm` → `FarmerProfile`, and `RiskAssessment` → `AreaExposureSummary` → `Typhoon`, filtered to `matrix_id IS NOT NULL` (real computed assessments only, excludes legacy CSV-import seed rows). `IRID`, `P`, `S` have no known schema equivalent and are left `None`; `REMARKS` is a manually-inputted field per the source format's own legend, also left `None`.
+* Added **`GET /pabs-summary`** (JSON) and **`GET /export-pabs`** (CSV) using that shared builder.
+* `DATE_FILED` / `DATE_OF_OCCURRENCE` now formatted `MM/DD/YYYY` (previously raw datetimes) to match the reference format (`pabs_format_mockup.csv`) exactly.
+* `export_assessments_pabs_csv()`: added `float_format="%.2f"` so `AC`/`AREA` come out as e.g. `"16542.00"`, matching the reference CSV's decimal style instead of pandas' default float printing (`16542.0`).
+
+### 2. File: `frontend/src/lib/api.ts`
+* Added `PabsAssessmentRow` type, `getAssessmentsPabsSummary()`, `getAssessmentsExportPabsUrl()`.
+* Added `AreaExposureSummary` type, `ComputeExposureResult` type, `computeExposure()` — supports Monitoring's new TCB Exposure Summary modal (see `MonitoringModule.tsx` entry below).
+
+### 3. File: `frontend/src/app/App.tsx`
+* `AssessmentModule` no longer receives `selectedBulletin`/`onSelectBulletin` — Assessment stopped needing shared bulletin-selection state once it moved to the always-combined summary view.
+
+### 4. File: `frontend/src/app/components/AssessmentModule.tsx`
+* Net rewrite of the screen. In order, per successive rounds of feedback:
+  * Replaced the mock/prototype table with the real PABS-format combined summary (`getAssessmentsPabsSummary()`), sortable/filterable by municipality and wind signal, plus a "Review & Export CSV" modal previewing exactly what `/export-pabs` will download.
+  * Added a temporary `TEMP_PREVIEW_ROWS` hardcoded fallback so James could see the table populated before any real assessment existed — removed once real backend wiring was confirmed working (a 0-row real result is a legitimate outcome, not a bug, per `AssessmentService.calculate_for_bulletin()`'s eligibility rules).
+  * Added, then removed, a per-bulletin "Compute Assessments" trigger (`calculateAssessments()`) — removed per Fabio's correction that computation must combine a typhoon's whole TCB range into one result, not run per individual bulletin.
+  * Sidebar iterated through several shapes on Fabio's/his teammate's feedback: per-typhoon folders (too many, including duplicate names from a `typhoon_id` bulletin-title-parsing bug) → a single flat "All Bulletins" list → a typhoon list deduped by `typhoon_name` (not `typhoon_id`, to actually fix the duplicate-name display) → finally reference-only (no selection at all), since Fabio's final direction was that Compute always combines every typhoon into one result, matching the farmer-level table's own "all typhoons combined" behavior.
+  * Added a mocked "Exposure Summary — All Typhoons Combined" panel (Typhoon / Areas / Signal Number / Exposure (h) / Start Time / End Time columns, per Fabio's exact spec) behind a "Compute Exposure Summary" button in the top bar — explicitly marked "Mock preview — pending backend wiring" since Fabio said he's wiring the real combined endpoint himself.
+  * Added **`formatPabsCell()`** so the CSV preview modal's on-screen `AREA`/`AC` values match the CSV export's `float_format="%.2f"` exactly (the modal claims "exactly what the downloaded CSV will contain" — now genuinely true).
+
+### 5. File: `frontend/src/app/components/MonitoringModule.tsx`
+* Added **`ExposureSummaryModal`** + **`handleViewExposure()`**: a per-bulletin view (`POST /{tcb_id}/compute-exposure` via the new `computeExposure()`) showing affected areas, max signal, start/end time, exposure hours, and 6h+ eligibility — a real-data view, separate from Assessment's new mocked all-typhoons panel above.
+
+### Status / Next Steps
+* Assessment's Exposure Summary panel is frontend-mocked only (`MOCK_EXPOSURE_ROWS`) — Fabio said he'll wire it to a real combined-TCB backend endpoint himself; the frontend only needs `handleComputeExposure()` swapped to call it once that endpoint exists.
+* `IRID`, `P`, `S` columns remain undefined/blank in the PABS output — still no schema/doc source, deferred per earlier agreement with Fabio ("we will deal about it later").
+* `MonitoringModule.tsx` still uses `mockFarmers` for its stat cards (`totalFarms`, etc.) in this diff — a separate mock-data-removal pass noted elsewhere is not reflected in this file's current working-tree state; flagging so it isn't assumed done.
+* Two mockup CSVs were created outside the repo for manual testing (not part of this commit): `C:\Users\User\Desktop\pabs_format_mockup.csv` (reference PABS-format sample) and `C:\Users\User\Desktop\mockup_assessment_test_data.csv` (uploadable via `/api/upload/csv`, Talakag/Claveria boundaries, for testing real Compute Assessments end-to-end).
+* Not pushed yet — awaiting Fabio's/James's own push per `CLAUDE.md`'s git-handoff rules.
+
+---
+
+## [2026-07-29] - Merge: Summary-Tcb-Pabs-format into pabs-ingestion-gpx-matching
+
+Merged `origin/Summary-Tcb-Pabs-format` (PABS-format Assessment/Exposure Summary work,
+entry above) into `fabio/db/pabs-ingestion-gpx-matching`, per Fabio's request to
+consolidate the two branches. `origin/Summary-Tcb-Pabs-format` is being deleted on
+the remote after this merge is pushed.
+
+* Clean merge on all files except this one — both branches had independently
+  appended a changelog entry at the same location; resolved by keeping both,
+  in chronological order.
+* Not pushed yet.
+
+---
+
+## [2026-07-29] - Assessment & Reporting: Per-Typhoon Exposure Summary (replaces combined mock)
+
+Per Fabio's direction, replaced the mocked "Compute Exposure Summary — All Typhoons
+Combined" panel with a real, per-typhoon summary driven by clicking a typhoon in the
+sidebar, which was previously reference-only. Reuses the already-computed
+`tbl_area_exposure_summary` rows (populated once a typhoon's bulletins are done, not
+per-TCB) rather than triggering a new computation on click.
+
+### 1. File: `backend/app/api/bulletins.py`
+* Added **`GET /bulletins/typhoon/{typhoon_id}/summary`**: reads `AreaExposureSummary`
+  rows for a typhoon and returns `typhoon_name`, `areas_hit` (province/municipality/
+  max_signal_level/start_time/end_time/total_exposure_hours per boundary), overall
+  `max_signal_level`, overall `start_time`/`end_time` (min/max across areas), a derived
+  `exposure_duration_hours` (`end - start`, in hours), and `people_hit` — a count of
+  distinct farmers (`Farm.farmer_id`) whose `boundary_id` falls in one of the typhoon's
+  affected boundaries, regardless of whether a payout assessment has been computed for
+  them yet (per Fabio: "people hit" = spatial exposure, not assessment eligibility).
+  Does not trigger `ExposureCalculatorService.compute_for_typhoon()` — read-only.
+
+### 2. File: `frontend/src/lib/api.ts`
+* Added `TyphoonSummaryArea` and `TyphoonSummary` types, and `getTyphoonSummary()`
+  calling the new endpoint.
+
+### 3. File: `frontend/src/app/components/AssessmentModule.tsx`
+* Removed `MOCK_EXPOSURE_ROWS`, `ExposureSummaryRow`, `handleComputeExposure()`, and the
+  "Compute Exposure Summary" button/mock table (all frontend-only, per the 2026-07-29
+  PABS-format entry above).
+* Typhoon sidebar is no longer reference-only: cards are now buttons; clicking one
+  selects/deselects it (`selectedTyphoonId`) and fetches its summary via
+  `getTyphoonSummary()`. The `typhoons` memo now also carries a representative
+  `typhoon_id` per deduped name (first bulletin seen for that name), inheriting the
+  same known limitation as the existing name-based dedup if a typhoon's bulletins got
+  split across more than one `typhoon_id` by the bulletin-title parsing bug.
+* Added the new summary panel: stat tiles (Areas Hit, People Hit, Max Signal Number,
+  Exposure Time, Start, End) plus a per-area breakdown table, shown when a typhoon is
+  selected; states covered: loading, error, and "not computed yet" (empty
+  `areas_hit`). Added `formatDateTime()` helper for the ISO timestamps.
+* The farmer-level PABS combined table/badge/export below is unchanged — still
+  intentionally all-typhoons-combined, per Fabio's earlier direction; only the
+  typhoon-scoped exposure panel was in scope here.
+
+### Status / Next Steps
+* Not tested end-to-end yet (Fabio's local venv/frontend, per `CLAUDE.md`'s execution
+  rules) — needs `AreaExposureSummary` rows to actually exist for a typhoon (via
+  Monitoring's existing "Compute Exposure" action) to see a non-empty panel.
+* Not pushed yet.
+
+---
+
+## [2026-07-29] - Mock Data for Assessment & Reporting Usability Testing (Talakag + Claveria)
+
+Per Fabio's request, added standalone mock/test fixtures to exercise the Assessment &
+Reporting module (including the per-typhoon panel above) end-to-end without touching
+real data. `docs/Rice Risk Exposure Region X 04-15-2026.csv` was used only as the
+format reference for the CSV columns — none of its actual data was reused. Also
+re-added a "Compute Assessments" trigger (removed in the 2026-07-29 PABS-format entry
+above) since there was otherwise no way to turn the mock exposure data into real
+`RiskAssessment` payouts from the UI.
+
+### 1. New file: `backend/mock_data/mock_farmers_talakag_claveria.csv`
+* 12 fake farmer/policy rows (6 Talakag/San Isidro, 6 Claveria/Poblacion), matching
+  the CSV-upload column format read by `backend/app/api/upload.py`'s
+  `prepare_row_payload()` exactly (`Province, Municipality, Barangay, FarmersID,
+  RSBSA No., Surname, Firstname, Middlename, FARMID, Georef ID, AreaInsured,
+  Policy No., Program Type, Product Name, Effectivity Date, Expiry Date,
+  AmountofCover, Stage No., Stage, EstimatedDamage, RiskExposureAmount`).
+  `Effectivity Date`/`Expiry Date` (06/01/2026–12/31/2026) deliberately bracket the
+  mock typhoon's bulletin dates below. `Stage No.` cycles through 1/2/3
+  (Booting/Flowering/Maturity) so all three `RecsapMatrix` crop-stage rows are
+  reachable. Intended for upload via the existing Data Ingestion module's CSV
+  uploader (`POST /api/upload/csv`) — no code changes needed to use it.
+
+### 2. New files: `backend/mock_data/gpx/*.gpx` (12 files)
+* One small rectangular polygon boundary per mock farm, filenames following
+  `GpxFarmerMatcherService`'s `_TAIL_RE` pattern (`..._<FarmersID>_<FARMID>_<date>.gpx`)
+  so each auto-matches its corresponding CSV row's farmer/farm on upload via
+  `POST /api/upload/gpx`. Coordinates are approximate/illustrative points spread out
+  around Talakag and Claveria — not surveyed real boundaries.
+
+### 3. New file: `backend/mock_data/seed_mock_typhoon.py`
+* One-off script (raw `psycopg2`, same connection pattern as
+  `backend/backfill_admin_boundary_geom.py`) that inserts a fictional typhoon
+  ("MARISOL", 2026 — clearly not a real PAGASA name) with two
+  `TropicalCycloneBulletin` rows 12 hours apart and `TcbSignal` rows for Talakag
+  (signal 3) and Claveria (signal 2) on each, so
+  `ExposureCalculatorService.compute_for_typhoon()` has real bulletin/signal data to
+  aggregate into a 12-hour exposure window for both municipalities (matches
+  `tbl_recsap_matrix`'s 12h bucket). Deliberately does not insert
+  `AreaExposureSummary`/`RiskAssessment` rows itself — those come from running the
+  app's own "Compute Exposure Summary" (Monitoring) and new "Compute Assessments"
+  (Assessment & Reporting, see below) actions afterward, so the rest of the pipeline
+  is exercised for real. Safe to re-run (skips if the typhoon already exists).
+  Requires `tbl_admin_boundaries` rows for Talakag/Claveria to already exist (i.e.
+  `seed_database.py` already run).
+
+### 4. File: `frontend/src/lib/api.ts` / `frontend/src/app/components/AssessmentModule.tsx`
+* Re-added a **"Compute Assessments"** button (calls the existing `calculateAssessments()`
+  / `POST /assessments/calculate`), now inside the per-typhoon exposure panel added
+  above rather than the top bar — shown only once a typhoon's exposure summary has
+  at least one area hit. Picks that typhoon's latest bulletin (highest
+  `bulletin_count`) to pass as `bulletin_id`; per `AssessmentService.calculate_for_bulletin()`
+  this only affects the "as of" eligibility date, since the actual computation already
+  combines the whole typhoon's exposure data internally — unaffected by which bulletin
+  is passed, consistent with the original removal reason from the PABS-format entry
+  above. On success, refreshes the main PABS table via the existing `loadSummary()`.
+
+### Status / Next Steps
+* Not run/tested yet — per `CLAUDE.md`'s DB/venv/frontend execution rules, Fabio needs
+  to run the seed script and upload the CSV/GPX files himself; see chat for the exact
+  step-by-step handoff.
+* Mock data is intentionally isolated (fake IDs `900001–900012`, fictional typhoon name)
+  so it can be identified and deleted later without touching real records.
+* Not pushed yet.
+
+---
+
+## [2026-07-30] - Monitoring/Spatial/Calibration Real-Data Pass, Auto-Assessment on Parse
+
+**Branch:** `fabio/db/pabs-ingestion-gpx-matching` (James's frontend work + supporting backend changes, committed locally, not pushed yet). Does **not** touch `AssessmentModule.tsx` — that file was independently reworked by Fabio's own `425e129` commit on this branch (real per-typhoon exposure panel + `GET /bulletins/typhoon/{typhoon_id}/summary`), merged in separately from this entry.
+
+### 1. File: `backend/app/api/insurance.py` (new)
+* Added **`GET /insurance/summary`**: counts `InsuranceRecord` rows currently within their `effectivity_date`–`expiry_date` window against the total policy count. Backs Monitoring's new "Active Insurance Policies" stat card.
+
+### 2. File: `backend/app/main.py`
+* Registered `insurance_router` under `/api`.
+
+### 3. File: `backend/app/api/farms.py`
+* `list_farms()`: now also looks up each farm's most recent `InsuranceRecord` (by `effectivity_date desc`) and returns `policy_no`, `effectivity_date`, `expiry_date` (formatted `MM/DD/YYYY`) alongside the existing fields — backs the new "Effective Date"/"Expiry Date" columns in Spatial Analysis's Farm Records table.
+
+### 4. File: `backend/app/services/bulletin_parser.py`
+* **Behavior change, overrides an earlier explicit decision:** `scrape_and_save_all()` now calls `AssessmentService.calculate_for_bulletin(bulletin.typhoon_id, bulletin.tcb_id, db)` after **every** successfully parsed bulletin (previously only `ExposureCalculatorService.compute_for_typhoon()` ran, and only for a detected *final* bulletin). Since `calculate_for_bulletin()` already recomputes the exposure summary internally before checking payout eligibility, this is a strict superset of the old behavior, not just an addition.
+  * `_reconcile_active_typhoons()` updated the same way: on closing a typhoon that dropped off PAGASA's active list, it now looks up that typhoon's most recent bulletin and runs the same assessment computation (falling back to the old exposure-only call if no bulletin is found, which shouldn't happen in practice).
+  * **Why this overrides the prior decision:** the 2026-07-27 entry ("Final-Bulletin Detection") explicitly recorded Fabio's call to keep assessment/payout calculation a separate manual step even after auto-closing a typhoon. This entry reverses that — confirmed directly with the user, not done unilaterally — so that clicking "Parse Latest Bulletin" (or the scheduled background scrape) now makes results appear in Assessment & Reporting without an extra manual `POST /api/assessments/calculate` call. **Flagging for Fabio's review**, since he made the original manual-only call and may want it reverted or handled differently.
+
+### 5. File: `frontend/src/lib/api.ts`
+* Added `InsuranceSummary` type + `getInsuranceSummary()`.
+* `Farm` interface: added `policy_no`, `effectivity_date`, `expiry_date`.
+
+### 6. File: `frontend/src/app/components/MonitoringModule.tsx`
+* Removed remaining `mockFarmers`/`FarmerRecord` usage entirely (the 2026-07-29 entry above already flagged this file as not actually cleaned up despite an earlier todo item claiming it was):
+  * "Affected Farms" / "Est. Total Indemnity" stat cards now computed from real `getFarms()`/`getAssessments()`, counting only farms with a real computed assessment (`wind_velocity` set — excludes legacy CSV-import seed rows).
+  * "Growth Stage Distribution", "Farms by Signal Number", and "TCB Download Timeline" charts now computed from real crop-stage/signal/bulletin-date data instead of hardcoded arrays, each with an honest empty state.
+  * The "Farmers Under Signal No. X" list feeding `SARQuickViewModal` is now real farm data; the SAR *imagery* itself remains a simulated canvas render (no real Google Earth Engine integration exists anywhere in this codebase) — `SARQuickViewModal` reworked to take a `FarmRow` instead of the mock `FarmerRecord`.
+* Added a 5th stat card, **"Active Insurance"** (`X/Y` from the new `/insurance/summary` endpoint).
+* Removed the "System Status" panel (moved to Calibration & Settings, see below).
+* **Layout change:** root container changed from `overflow-auto` (whole-page scroll) to a bounded `flex flex-col overflow-hidden` — the page itself no longer scrolls. The PAGASA TCB Bulletins list is the only element that scrolls now (`flex-1 min-h-0 overflow-auto`, sticky header), instead of growing unbounded and pushing the charts below off-screen.
+
+### 7. File: `frontend/src/app/components/CalibrationModule.tsx`
+* Added a new **"System Status"** section (moved from Monitoring), showing a real Backend API connected/unreachable status — piggybacks on the `getParserSettings()` call this screen already makes on mount rather than firing an extra request just for a health check.
+
+### 8. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* Removed the "Data Import" CSV/GPX drag-drop panel entirely (per explicit confirmation that this removes the only upload UI in the app — CSV/GPX ingestion is still possible via the API directly, e.g. Swagger docs).
+* The former "Export Period of Exposure" button (client-side CSV download) is now an **"Upload CSV"** button in its place — opens a native file picker, uploads via the existing `uploadCsv()` API. The client-side export feature itself is gone from this screen.
+* "Filter map" changed from a `<select>` dropdown to a type-ahead search box: typing narrows a suggestion list of municipalities (prefix match), clicking one applies the filter; clearing the box resets to "All."
+* Added two new Farm Records table columns: "Effective Date", "Expiry Date" (from the `farms.py` change above).
+* Passes `focusMunicipality` to `GISLeafletMap` so picking a municipality also flies the map to it (see below).
+
+### 9. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* Added **`FlyToSelectedFarm`**: flies the map to whichever farm is selected (real GPX polygon bounds if surveyed, else its approximate marker position) — covers both clicking a farm on the map and clicking its row in the Farm Records table.
+* Added **`FlyToMunicipality`**: flies to a searched/selected municipality's real boundary outline (from the existing `region10-boundaries.geojson` context layer), floored at zoom 12 so it never pulls back further than that even for a large/sprawling municipality shape.
+* Removed the click-`Popup` on both surveyed (GPX polygon) and unsurveyed (approximate marker) farms — redundant with the existing "Selected Farm Info Panel" overlay, which already shows the same (and more) detail.
+* Clicking a farm now visibly highlights it with a real fill-color change (amber `#f59e0b`), not just a border-color/weight tweak as before.
+
+### 10. File: `backend/requirements-win.txt`
+* Added `APScheduler==3.11.0` — was present in `requirements.txt` but missing from the Windows-specific file entirely, causing `ModuleNotFoundError: No module named 'apscheduler'` on a fresh Windows venv setup (surfaced when moving the project to a new drive location and reinstalling).
+
+### Status / Next Steps
+* Merged into `fabio/db/pabs-ingestion-gpx-matching` on top of `425e129` (Fabio's per-typhoon exposure summary + mock test data). The predicted `api.ts` conflict auto-merged cleanly (both sides only added new types/functions); the only manual resolution needed was combining a `react-leaflet` import line in `GISLeafletMap.tsx` (both sides added a different new import — `WMSTileLayer` for Fabio's GeoServer overlay, `useMap` for this entry's fly-to-farm/fly-to-municipality) and this changelog file itself.
+* Auto-assessment-on-parse (item 4 above) needs Fabio's explicit sign-off — implemented per direct user request during testing, not per his own decision.
+* Not pushed yet — awaiting the user's own push per `CLAUDE.md`'s git-handoff rules.
+
+---
+
+## [2026-07-30] - Wire Up GPX Upload UI (Spatial Analysis module)
+
+Fabio found only CSV upload in the live UI when trying to load the mock GPX boundary
+files from the Talakag/Claveria test data. Investigation found `uploadGpx()` in
+`frontend/src/lib/api.ts` had zero callers anywhere in the frontend — the only GPX
+file input that ever existed was a `<input type="file" accept=".gpx">` in the unused,
+never-imported `frontend/src/app/components/SpatialModule.tsx` (superseded by
+`SpatialAnalysisModule.tsx`, which `App.tsx` actually mounts), and even that dead
+input had no `onChange` handler wired to anything.
+
+### 1. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* Added an **"Upload GPX"** button in the map toolbar, right next to the existing
+  "Upload CSV" one, with its own hidden `<input type="file" accept=".gpx" multiple>`.
+* Added **`handleGpxFilesSelected()`**: uploads each selected file sequentially (not
+  in parallel, so a large batch doesn't hammer the backend at once) via the existing
+  `uploadGpx()` — farmer/farm auto-detected from filename by
+  `GpxFarmerMatcherService`, same as before. Reuses the existing `uploadStatus`
+  banner, reporting a combined success/failure count across the batch, and calls
+  `refreshFarms()` afterward so the "GPX Boundary" column reflects newly-attached
+  geometry immediately.
+
+### Status / Next Steps
+* Not tested end-to-end yet (Fabio's local frontend, per `CLAUDE.md`'s execution
+  rules) — next step is uploading the 12 mock GPX files from
+  `backend/mock_data/gpx/` through this new button.
+* Not pushed yet.
+
+---
+
+## [2026-07-30] - Fix: policy_no Unique Constraint Wrongly Excluded Batch-Policy Farmers
+
+Fabio noticed some farmers from `docs/Rice Risk Exposure Region X 04-15-2026.csv`
+showed a blank crop stage in the app UI. Traced to `tbl_insurance_records.policy_no`
+being `UNIQUE` — but that CSV has one Policy No. legitimately covering many different
+farmers (e.g. Policy No. `1761604` spans 10 distinct farmers across rows 4-13,
+`1761606` spans 14 across rows 82-95): a batch/program policy, not one-farmer-one-policy.
+Confirmed with Fabio: this is real, not a source-data error. The old
+`_ingest_row()` duplicate check treated "policy_no already exists" as "already
+ingested, skip" — so only the *first* farmer under each shared Policy No. ever got an
+`InsuranceRecord` (and therefore the crop-stage-seeding `RiskAssessment` right after
+it); every other farmer sharing that Policy No. silently got a Farm/Farmer row with no
+Insurance/RiskAssessment at all, reported only as a `rows_skipped` count with no
+indication why.
+
+### 1. File: `backend/app/models/models.py`
+* `InsuranceRecord.policy_no`: removed `unique=True`. Added
+  `__table_args__ = (UniqueConstraint("policy_no", "farm_id", name="uq_insurance_records_policy_no_farm_id"),)`
+  — the real per-row unique identity is (policy_no, farm_id), not policy_no alone.
+
+### 2. File: `backend/init_schema.sql`
+* `tbl_insurance_records.policy_no`: `VARCHAR(50) UNIQUE NOT NULL` → `VARCHAR(50) NOT NULL`,
+  with a new table-level `CONSTRAINT uq_insurance_records_policy_no_farm_id UNIQUE (policy_no, farm_id)`.
+
+### 3. File: `backend/app/api/upload.py`
+* `_ingest_row()`'s duplicate-detection query now filters on both `policy_no` AND
+  `farm_id == farm.farm_id`, not `policy_no` alone — different farmers sharing a
+  policy number now each get their own `InsuranceRecord`/`RiskAssessment` instead of
+  being silently skipped after the first.
+
+### 4. File: `backend/seed_database.py`
+* `ON CONFLICT (policy_no) DO NOTHING` → `ON CONFLICT (policy_no, farm_id) DO NOTHING`
+  — required to match the new composite constraint; the old target no longer exists
+  once the schema changes, and `ON CONFLICT` errors if its target doesn't match an
+  actual constraint.
+
+### Status / Next Steps
+* Fabio applying a non-destructive `ALTER TABLE` himself (per `CLAUDE.md`'s DB-command
+  handoff rule) rather than a full `init_schema.sql` rewipe, to preserve existing data
+  (MARISOL typhoon, mock CSV/GPX farmers already loaded) — see chat for the exact
+  command handed to him.
+* After the ALTER TABLE, re-uploading `docs/Rice Risk Exposure Region X...csv` should
+  backfill `InsuranceRecord`/`RiskAssessment` (crop stage) for every farmer who was
+  previously silently skipped — their Farm/Farmer rows already exist from the earlier
+  upload, so nothing needs deleting first.
+* Not pushed yet.
+
+---
+
+## [2026-08-03] - Login Page Static Layout
+
+### 1. File: `frontend/src/app/components/LoginScreen.tsx`
+* Root container (`LoginScreen`) changed from `min-h-screen` to `h-screen overflow-hidden` — the login page no longer grows taller than the viewport and scrolls; it's now fixed to viewport height.
+
+### Status / Next Steps
+* Cherry-picked directly onto `develop` from `fabio/db/pabs-ingestion-gpx-matching` at the user's request.
+
+
+## [2026-08-03] - Typhoon-Wide TCB Summarization Gated on "F" Marker + is_active Decoupled from TCB Parsing
+
+Two related decisions from Fabio: (1) farms must be cross-referenced against one
+typhoon-wide summary once a typhoon's bulletins are confirmed complete, not
+re-cross-referenced after every single TCB — reverting the 2026-07-30 "Auto-
+Assessment on Parse" entry's "run on every bulletin" behavior back to the
+original 2026-07-27 "only on the final bulletin" design, this time all the way
+through to the farm/payout assessment step, not just the exposure summary.
+(2) `Typhoon.is_active` ("is there a current typhoon") must no longer be decided
+by TCB parsing at all (neither the "F" marker nor reconciliation against
+PAGASA's bulletin-PDF index) — it's now driven exclusively by a new scraper
+reading PAGASA's public severe-weather-bulletin status page
+(https://www.pagasa.dost.gov.ph/tropical-cyclone/severe-weather-bulletin) for a
+recognized cyclone-category word. The "F" marker's only remaining job is
+gating when the exposure summary/assessment computation runs.
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* `scrape_and_save_all()`: the auto-run of `AssessmentService.calculate_for_bulletin()`
+  is now gated on `parsed_data.get("is_final")` — only a trailing-"F" bulletin
+  triggers it, not every parsed bulletin. Removed the `cls._reconcile_active_typhoons(links, db)`
+  call at the end of the method entirely (see below).
+* Removed `_reconcile_active_typhoons()` and its `ACTIVE_LINK_NAME_RE` filename
+  regex — both fully superseded by `PagasaStatusService` (new file, below), which
+  reads PAGASA's own status page instead of inferring activity from which TCB
+  PDFs happen to be listed.
+* `save_bulletin_to_db()`: no longer flips `Typhoon.is_active` on a final ("F")
+  bulletin. The "Get or Create Typhoon" block is extracted into a new
+  `get_or_create_typhoon(name, reference_time, db)` classmethod (same 30-day-
+  window name-matching logic, unchanged), reused by `PagasaStatusService` so
+  both the TCB side and the status-page side of PAGASA agree on which `Typhoon`
+  row a given name refers to. A newly-created `Typhoon` now defaults to
+  `is_active=False` (was `True`) — `PagasaStatusService` is the sole source of
+  truth for that flag now and typically confirms/sets it `True` moments later
+  in the same scrape cycle.
+* `PagasaScrapeError`'s docstring generalized (it's now raised by, and shared
+  with, `PagasaStatusService` too) — no behavior change.
+
+### 2. File: `backend/app/services/pagasa_status_scraper.py` (new)
+* Added **`PagasaStatusService`**: `fetch_active_storm_names()` fetches
+  PAGASA's severe-weather-bulletin status page and returns the uppercased
+  name of every cyclone currently listed there. Scoped specifically to
+  `<a class="swb">` tab-label elements (confirmed against the live page —
+  each active cyclone is a tab, e.g. `<a class="swb">Tropical Depression
+  &quot;Luis&quot;</a>`) rather than scanning the whole page text, so a stray
+  "typhoon" mention elsewhere (nav/footer/unrelated article) can't cause a
+  false positive — the same failure mode `bulletin_parser.py`'s own category
+  regex was previously rewritten to avoid. Category word list includes
+  "Super Typhoon" (bulletin_parser.py's TCB-title regex doesn't have this
+  case — no real sample bulletin carrying it was available when that regex
+  was written). Raises `PagasaScrapeError` on an unreachable page, same
+  distinction `fetch_active_bulletin_links()` already makes.
+  `sync_active_typhoons(active_names, db)` sets `Typhoon.is_active = True`
+  for each resolved name (via the shared `get_or_create_typhoon`) and `False`
+  for every other currently-active `Typhoon` — an empty list is a real signal
+  that correctly closes everything.
+
+### 3. File: `backend/app/api/bulletins.py`
+* `POST /parse`: after `scrape_and_save_all()`, now also calls
+  `PagasaStatusService.fetch_active_storm_names()` +
+  `.sync_active_typhoons()` in its own try/except (a status-page failure
+  doesn't hide a successful bulletin parse, or vice versa).
+
+### 4. File: `backend/app/core/scheduler.py`
+* `run_scheduled_scrape()`: now also runs the `PagasaStatusService` status
+  sync after the TCB scrape, in its own try/except block, so a failure in
+  either step doesn't skip or hide the other.
+
+### 5. File: `backend/app/api/typhoons.py` (new)
+* Added **`GET /typhoons/active`**: returns every `Typhoon` currently
+  `is_active=True` (per `PagasaStatusService`) as
+  `{typhoon_id, name, year}`. No `typhoons` router existed before this.
+  Registered in `backend/app/main.py`.
+
+### 6. File: `frontend/src/lib/api.ts`
+* Added `ActiveTyphoon`/`ActiveTyphoonsResult` types and `getActiveTyphoons()`
+  calling the new endpoint.
+
+### 7. File: `frontend/src/app/components/MonitoringModule.tsx`
+* The "Active Typhoon" stat card previously showed `bulletins[0]?.typhoon_name`
+  (the typhoon owning whichever bulletin row had the highest `bulletin_count`
+  ever ingested — not actually "active" in any meaningful sense, and unrelated
+  to `Typhoon.is_active`, which nothing in the frontend read at all). Now
+  fetches `getActiveTyphoons()` on load and after "Parse Latest Bulletin",
+  and shows the real active-typhoon name(s) (joined by ", ", or "—" if none).
+
+### 8. Files: `backend/tests/test_bulletin_parser.py`, `backend/tests/test_pagasa_status_scraper.py` (new)
+* `test_bulletin_parser.py`: updated `test_creates_new_typhoon_when_no_bulletin_within_30_days`
+  to assert `is_active=False` on the freshly-created row. Replaced
+  `test_save_bulletin_to_db_marks_typhoon_inactive_when_final` with
+  `test_save_bulletin_to_db_does_not_touch_is_active_even_when_final` (asserts
+  the opposite of the old behavior). Renamed/repointed
+  `test_final_bulletin_triggers_exposure_summary` →
+  `test_final_bulletin_triggers_assessment_calculation` and
+  `test_non_final_bulletin_does_not_trigger_exposure_summary` →
+  `test_non_final_bulletin_does_not_trigger_assessment_calculation` to patch
+  `AssessmentService.calculate_for_bulletin` (what the code now actually
+  gates) instead of `ExposureCalculatorService.compute_for_typhoon`. Removed
+  `ReconcileActiveTyphoonsTests` entirely (tested the now-deleted
+  `_reconcile_active_typhoons`). These three renamed/patched tests were
+  asserting pre-2026-07-30 behavior that the code had already stopped
+  matching (the unconditional-call change never updated them) — they were
+  almost certainly red before this entry; this both fixes and repurposes them.
+* `test_pagasa_status_scraper.py` (new): covers `fetch_active_storm_names()`
+  (HTTP/network error handling, `.swb`-tab extraction, multiple concurrent
+  tabs, "Super Typhoon", and the false-positive guard for a category word
+  appearing outside a `.swb` tab) and `sync_active_typhoons()` (activates a
+  matched name, closes unmatched typhoons, leaves an already-active match
+  untouched and excluded from the closing pass, closes everything on an
+  empty list).
+
+### Status / Next Steps
+* Not run against Fabio's venv yet — needs `pytest` for
+  `test_bulletin_parser.py` and the new `test_pagasa_status_scraper.py`, and
+  `npm run build`/`npm run dev` to confirm the frontend changes compile and
+  the Active Typhoon card renders correctly against a live backend.
+* The severe-weather-bulletin page's exact markup when **no** cyclone is
+  active is unconfirmed — a live fetch during this work only showed the
+  active-storm case (Tropical Depression "Luis" was genuinely active at the
+  time). `fetch_active_storm_names()`'s keyword-presence design is robust to
+  this (no `.swb` tabs / no recognized category word → `[]`, same as "nothing
+  active"), but it's worth Fabio double-checking the card shows "—" correctly
+  the next time PAR has no active system.
+* Not pushed yet.
+
+
+## [2026-08-03] - Mock Farm Data: Realistic Polygons + Spread Across More of Region X
+
+Fabio flagged the 12 mock farm GPX boundaries as inaccurate: each was a perfect
+uniform 0.0030°×0.0030° axis-aligned square (~11 ha, identical for all 12,
+marching in a diagonal grid) rather than an irregular real-world plot shape, and
+all 12 sat in just two municipalities (Talakag, Claveria). Cross-checking against
+the real boundary polygons in `frontend/public/data/region10-boundaries.geojson`
+also surfaced that farms 900001-900006's old square centers weren't even inside
+the real Talakag polygon at all -- a second, independent inaccuracy beyond shape.
+
+### 1. Files: `backend/mock_data/gpx/*.gpx` (all 12 rewritten)
+* Every farm's boundary is now an irregular quadrilateral (randomly jittered
+  corners, trapezoid-like -- not a uniform square) instead of the old identical
+  squares. Each polygon's area now roughly matches that farm's real
+  `AreaInsured` value from the CSV (1.2-3.0 ha) instead of the old uniform
+  ~11 ha. Every polygon's centroid is verified (via Shapely, against the real
+  municipality polygons in `region10-boundaries.geojson`) to actually fall
+  inside its claimed municipality -- confirmed the old Talakag placements did
+  not. Farms `900004`/`900005`/`900006` relocated from Talakag to Manolo
+  Fortich (Bukidnon), and `900010`/`900011`/`900012` from Claveria to City of
+  Gingoog (Misamis Oriental), per Fabio's request to spread the mock dataset
+  across more of Region X rather than just the original two municipalities --
+  both are real, already-seeded municipalities (`psgc_region10_boundaries.csv`).
+  Coordinates were computed via a one-off scratch script (not committed --
+  pure geometry/area-matching math, no app or DB dependency) and hand-verified
+  valid/simple/in-boundary before being written; not run through the actual
+  upload pipeline yet.
+
+### 2. File: `backend/mock_data/mock_farmers_talakag_claveria.csv`
+* Rows for FarmersID `900004`-`900006` and `900010`-`900012`: `Municipality`/
+  `Barangay` updated to match the GPX relocation above (`Talakag`/`San Isidro`
+  → `Manolo Fortich`/`Alae`; `Claveria`/`Poblacion` → `City of Gingoog`/
+  `Agay-ayan`); `Province` unchanged (both new municipalities are in the same
+  province as their old one). `Georef ID`'s embedded location code updated to
+  match (`R10-BUK-TAL-*` → `R10-BUK-MFO-*`, `R10-MIS-CLV-*` → `R10-MIS-GIN-*`)
+  so it doesn't keep referencing the old municipality. All other columns
+  (AreaInsured, AmountofCover, Stage, policy/RSBSA/farm IDs, etc.) untouched.
+  Filename kept as-is despite no longer being Talakag/Claveria-only, to avoid
+  a disruptive rename across every reference to it.
+
+### 3. File: `backend/mock_data/seed_mock_typhoon.py`
+* `BULLETINS[0]["signals"]` and `BULLETINS[1]["signals"]`: added a
+  `"Manolo Fortich"` entry alongside each existing `"Talakag"` entry (same
+  signal_level=3) and a `"City of Gingoog"` entry alongside each `"Claveria"`
+  entry (same signal_level=2), so farms relocated in #1/#2 above still get
+  exposure/assessment test coverage. Docstring and closing print statements
+  updated to mention both new municipalities instead of just the original two.
+
+### Status / Next Steps
+* Not run against Fabio's venv/DB yet. To pick this up: reset the DB (see
+  `.claude/BACKEND_DATABASE_WORKFLOW.md` §4), re-run `seed_database.py` +
+  `backfill_admin_boundary_geom.py`, re-upload the CSV + all 12 GPX files
+  (Data Ingestion module), run `mock_data/seed_mock_typhoon.py`, then
+  Monitoring → Compute Exposure Summary and Assessment & Reporting → Compute
+  Assessments for typhoon MARISOL -- same sequence as before, just now
+  spanning 4 municipalities instead of 2.
+* Not pushed yet.
+
+---
+
+## [2026-08-03] - Fix: PAGASA Bulletin "Issued At" Timestamp Mislabeled as UTC
+
+Fabio flagged that bulletin issue times were showing wrong values in the
+Monitoring module. Root cause: PAGASA states every bulletin's "Issued at"
+time in Philippine Standard Time (PHT/UTC+8), but `parse_bulletin_text()`
+labeled the parsed wall-clock value as `timezone.utc`, shifting the stored
+absolute instant 8 hours away from the real one. `TropicalCycloneBulletin`'s
+`issued_at`/`expires_at` columns were also mapped as timezone-naive
+`DateTime` in the ORM despite the DB schema (`init_schema.sql`) defining them
+as `TIMESTAMPTZ`. Separately, the frontend was rendering the raw ISO string
+(with its `+08:00` offset) directly instead of a formatted local time.
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* Added module-level `PHT = timezone(timedelta(hours=8))` constant (the
+  Philippines observes no DST, so a fixed offset is correct).
+* `parse_bulletin_text()`: the "Issued at" datetime is now tagged
+  `tzinfo=PHT` instead of `tzinfo=timezone.utc`, so the stored `issued_at`
+  represents the correct absolute instant.
+
+### 2. File: `backend/app/models/models.py`
+* `TropicalCycloneBulletin.issued_at` / `.expires_at`: changed from
+  `Column(DateTime, ...)` to `Column(DateTime(timezone=True), ...)` to match
+  the actual `TIMESTAMPTZ` columns in `init_schema.sql`.
+
+### 3. File: `backend/tests/test_bulletin_parser.py`
+* Imports `PHT` from `bulletin_parser` instead of using bare `timezone.utc`.
+* `test_parse_bulletin_text_against_real_sample_pdf()`: updated the expected
+  `issued_at` value's tzinfo from `timezone.utc` to `PHT` to match the fix.
+
+### 4. File: `frontend/src/app/components/MonitoringModule.tsx`
+* Added `formatIssuedAt()`: formats an `issued_at` ISO string via
+  `Intl.DateTimeFormat` (`timeZone: "Asia/Manila"`) into a readable local
+  date/time string, returning `"Unknown"` for null/invalid input.
+* Replaced all 6 raw `bulletin.issued_at` / `b.issued_at` /
+  `selectedBulletin.issued_at` render sites (TCB viewer modal header/detail
+  grid, bulletin list table row, selected-bulletin detail panel, and both
+  `.txt` export builders) with `formatIssuedAt(...)` calls. Left the
+  timeline-bucketing logic (`bulletinTimelineData`, which slices the raw ISO
+  string by day) untouched -- that's data grouping, not display.
+
+### Status / Next Steps
+* Verified: `python -m pytest tests/test_bulletin_parser.py -v` -- 23 passed.
+* Frontend visual check still pending (needs `npm run dev`).
+* Not pushed yet.
+
+---
+
+## [2026-08-03] - Bulletin List: Chronological Ordering + Sortable Columns
+
+Fabio flagged that the PAGASA TCB Bulletins table was ordered by "download
+stack" (insertion/bulletin_count order) rather than chronologically, and
+asked for it to be sortable.
+
+### 1. File: `backend/app/api/bulletins.py`
+* `list_bulletins()`: changed `ORDER BY` from `bulletin_count.desc()` to
+  `issued_at.desc()`. `bulletin_count` resets to 1 per typhoon, so ordering
+  by it interleaved typhoons out of true chronological order (e.g. an old
+  typhoon's bulletin #21 would outrank a newer typhoon's #3 issued more
+  recently). Newest-issued-first remains the default direction.
+
+### 2. File: `frontend/src/app/components/MonitoringModule.tsx`
+* Added `BulletinSortField` / `SortDir` types and `bulletinSortField`
+  (default `"issued_at"`) / `bulletinSortDir` (default `"desc"`) state,
+  matching the default chronological order now returned by the backend.
+* Added `sortedBulletins` (`useMemo`): client-side stable sort over
+  `bulletin_count`, `typhoon_name`, `issued_at` (parsed via `Date.parse`,
+  not string comparison), `category`, `max_sustained_winds`, or `gustiness`.
+  Kept separate from the raw `bulletins` array so sorting the table doesn't
+  change what `latestBulletin = bulletins[0]` refers to.
+* Added `handleBulletinSort()`, `BulletinSortIcon`, and `bulletinSortableCols`,
+  and made the bulletin table's column headers (`Bulletin`, `Typhoon`,
+  `Issued`, `Category`, `Max Winds`, `Gust`) clickable to toggle sort
+  field/direction -- mirrors the existing clickable-header +
+  `ChevronUp`/`ChevronDown` pattern already used in `AssessmentModule.tsx`
+  and `SpatialAnalysisModule.tsx`, not a new UI pattern. The bulletin table
+  body now renders `sortedBulletins` instead of `bulletins`.
+
+### Status / Next Steps
+* Not run against Fabio's venv/frontend dev server yet -- needs a visual
+  check in the Monitoring module (click each column header, confirm asc/desc
+  toggle and icon state).
+* Not pushed yet.
+
+---
+
+## [2026-08-03] - Remove Duplicate `GET /api/assessments` Route
+
+Long-flagged known issue (first noted in the Sprint 3/4 merge entries, "known
+duplication, not resolved here"): `backend/app/main.py` had an ad hoc
+`GET /api/assessments` (no trailing slash) alongside the real
+`GET /api/assessments/` route in `backend/app/api/assessments.py`. FastAPI
+treated them as distinct paths so both coexisted without erroring, but they
+returned different response shapes from different queries.
+
+### 1. File: `backend/app/main.py`
+* Removed `get_all_assessments()` and its `@app.get("/api/assessments")`
+  route. Confirmed dead code first: grepped `frontend/`, `backend/`, `docs/`,
+  and `.claude/` for any caller of the bare path or the function name --
+  `frontend/src/lib/api.ts` only ever calls the trailing-slash router route
+  (`/api/assessments/`, `/api/assessments/calculate`, etc.), and nothing else
+  in the repo referenced the ad hoc one. `models` import left in place --
+  still used elsewhere in the file (`models.ParserSettings`, `models.Farm`
+  in `test_database_connection()`).
+
+### Status / Next Steps
+* Pure deletion, no behavior change for any working code path -- no test
+  suite run needed to verify.
+* Not pushed yet.
+
+---
+
+## [2026-08-03] - Login Page Static Layout
+
+### 1. File: `frontend/src/app/components/LoginScreen.tsx`
+* Root container changed from `min-h-screen` to `h-screen overflow-hidden` --
+  the login page no longer grows taller than the viewport and scrolls; it's
+  fixed to viewport height.
+* Trimmed vertical spacing throughout (header padding, logo/title margins,
+  demo-credentials box, register link, footer note) so the full card fits
+  within typical viewport heights without clipping -- flagged by Fabio after
+  the initial `overflow-hidden` change cut off the bottom of the card on his
+  screen.
+* Removed the "A" logo square above the "AgriSureGIS" title entirely (kept
+  just the text) -- per Fabio's explicit request, both to match his intended
+  look and to free up more vertical space.
+* Center content wrapper (`flex-1 min-h-0 overflow-y-auto`) is a safety net
+  for unusually short viewports -- normally the trimmed spacing means it
+  fits without any scrolling at all.
+
+### Status / Next Steps
+* Verified working directly with the user -- full card (through Demo
+  Credentials and the Register link) renders without clipping and without a
+  page scrollbar.
+* Pushed to `develop`.
+
+---
+
+## [2026-08-03] - Login Page: Viewport-Relative Spacing (Fabio Feedback Round 2)
+
+Fabio reported the previous fixed-spacing fix still showed a scrollbar on his
+screen ("e flexible kay lahi ug result sa lahi nga screen res" -- fixed
+pixel/rem spacing gives different results across different screen
+resolutions).
+
+### 1. File: `frontend/src/app/components/LoginScreen.tsx`
+* Replaced fixed padding/margin values throughout the login card (top bar,
+  title block, card header, role selector, form fields, submit button, demo
+  hint, register link, footer note) with `clamp(min, Nvh, max)` arbitrary
+  values -- spacing now scales with viewport height instead of being tuned
+  for one specific screen size, so it compresses automatically on shorter
+  screens rather than triggering the `overflow-y-auto` scroll fallback.
+
+### Status / Next Steps
+* Not yet re-verified on Fabio's actual screen -- needs his confirmation
+  after this change.
+* Pushed to `develop`.
+
+---
+
+## [2026-08-03] - Spatial/Data Import: "Active Insurance Only" Filter
+
+### 1. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* Added `activeInsuranceOnly` state and a toggle button ("Active Insurance
+  Only", `ShieldCheck` icon) in the Farm Records table header, styled to
+  match the existing SAR/GEE toggle button convention.
+* Added `isActiveInsurance()` helper: client-side filter mirroring the exact
+  "active" definition already used by `GET /api/insurance/summary`
+  (`backend/app/api/insurance.py`) -- today's date falls within
+  `effectivity_date`-`expiry_date`, inclusive, both non-null. No backend
+  change needed since `Farm` rows already carry both date fields.
+* `filteredFarms` now also filters on `activeInsuranceOnly` alongside the
+  existing municipality filter, before sorting.
+* Dates from the API are formatted as `MM/DD/YYYY` (`backend/app/api/farms.py`
+  lines 49-50), not ISO -- initial version of `isActiveInsurance()` wrongly
+  compared them as ISO strings and silently matched nothing. Fixed by adding
+  `parseMDY()` to parse into `Date` objects before comparing, catchable only
+  by testing against live data (flagged by Fabio).
+
+### Status / Next Steps
+* Verified working directly with the user against the live `/api/farms/`
+  data -- correctly isolates farms whose policy window covers today.
+* Investigated (read-only, no changes made) a ~15-month effectivity-to-expiry
+  span on farm_id 19's policy that looked suspicious for a per-season
+  typhoon product -- traced to unvalidated CSV import pass-through
+  (`backend/app/api/upload.py`, `_parse_date()`/`prepare_row_payload()` have
+  no duration sanity check), not a bug in this filter or in date parsing.
+  Fabio deferred adding import validation to a separate future task.
+* Not yet pushed.
+
+---
+
+## [2026-08-03] - Assessment & Reporting: "View Areas Affected" Modal
+
+### 1. File: `frontend/src/app/components/AssessmentModule.tsx`
+* Added `AreasAffectedModal` component: fetches `getBulletinSignals(tcbId)` for
+  every TCB belonging to the selected typhoon and merges them into a unique,
+  all-areas list (by highest signal level) -- unlike the pre-existing
+  `typhoonSummary.areas_hit` (backed by `tbl_area_exposure_summary`), this
+  does not drop areas whose name failed to match an `AdminBoundary` row in
+  `ExposureCalculatorService` (`backend/app/services/exposure_calculator.py:44-47`
+  silently `continue`s on unmatched names). Where a computed exposure match
+  exists it's shown (hours/start/end); where not, the area still appears with
+  its signal level and `--` for exposure fields.
+* Replaced the always-inline typhoon exposure summary card
+  (previously `AssessmentModule.tsx:353-433`) with a compact bar shown on
+  typhoon selection, holding a new "View Areas Affected" button (opens the
+  modal) alongside the existing "Compute Assessments" button -- keeps the
+  main assessment table uncluttered by default per Fabio's request to
+  "isolate it to [a] window."
+* No backend or API changes -- reuses the existing
+  `GET /api/bulletins/{tcb_id}/signals` and
+  `GET /api/bulletins/typhoon/{typhoon_id}/summary` endpoints.
+
+### Status / Next Steps
+* Verified working directly with the user -- button and modal render and
+  open correctly.
+* Investigated (read-only, no changes made) why the modal shows "no areas
+  listed" for the typhoons Fabio tested: confirmed via live API that
+  `tbl_tcb_signals` has zero rows for all 80 bulletins currently in the dev
+  DB. Root cause: `AdminBoundary` (used for province+municipality substring
+  matching in `bulletin_parser.py:342-365`) is seeded for Bukidnon +
+  Misamis Oriental only, while the PAGASA scraper pulls bulletins
+  nationwide -- storms that never track through Region X correctly produce
+  zero signal rows (matches a checked-in real test case,
+  `docs/TCB#11_kiyapo.pdf`, a Luzon-only storm asserting `signals == {}`).
+  This is a pre-existing scope/matching limitation in the bulletin parser,
+  not a bug introduced by this modal. Fabio deferred further investigation
+  (e.g. checking a real bulletin's raw text for a genuine matching miss) to
+  a separate future task.
+* Not yet pushed.
+
+---
+
+## [2026-08-03] - Nationwide TCB Signal Extraction & Per-Level Areas Display
+
+Fabio's follow-up to the "View Areas Affected" modal: the modal was correctly
+scoped to Region X only (per the original parser design), but Fabio wants a
+GIS specialist to see a typhoon's full national footprint regardless of
+whether it reaches Mindanao. Separately, testing this surfaced a real display
+bug in the existing TCB Viewer modal (Monitoring module) where areas under
+different signal levels were merged into one misleading list.
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* `parse_bulletin_text()`: TCWS table extraction (section 5) now reads all
+  three island columns (Luzon, Visayas, Mindanao), not just Mindanao. Return
+  shape of `signals` changed from `dict[level, str]` to
+  `dict[level, dict[island_group, str]]` (island_group 0=Luzon, 1=Visayas,
+  2=Mindanao).
+* Added `_split_named_areas()`: best-effort split of a TCWS cell's free-text
+  area list into province/region-level phrases for Luzon/Visayas (no
+  `AdminBoundary` data exists to validate matches outside Region X) — strips
+  parenthetical municipality detail and the fixed "Warning lead time: .../
+  Range of wind speeds: .../ Potential impacts of winds: ..." boilerplate
+  block that follows every cell (found via live-testing against a real
+  PAGASA scrape — it was leaking into the split as bogus "area" entries),
+  then splits on commas. Caps each phrase at 100 chars to fit
+  `TcbSignal.area_name`'s existing `varchar(100)` — no schema change needed.
+* `save_bulletin_to_db()`: Mindanao (`island_group=2`) matching against
+  `AdminBoundary` is unchanged (still feeds exposure/indemnity calculations,
+  stays precise). Luzon/Visayas now get `TcbSignal` rows too, via
+  `_split_named_areas()`, informational only.
+* Verified end-to-end against a live PAGASA scrape (after Fabio reset
+  `tbl_tcb_signals`/`tbl_tropical_cyclone_bulletins`/`tbl_typhoons` and
+  re-ran `POST /api/bulletins/parse` twice — once to catch the boilerplate
+  bug, once after the fix): KIYAPO Bulletin NR. 11 (`docs/TCB#11_kiyapo.pdf`,
+  tcb_id 167) produced clean Luzon area names matching the source PDF exactly
+  (e.g. "Batanes", "the northern portion of Cagayan including Babuyan
+  Islands", "Isabela", "Quirino", ...).
+
+### 2. File: `backend/tests/test_bulletin_parser.py`
+* Updated `test_parse_bulletin_text_extracts_mindanao_signals_from_table`
+  (renamed `..._extracts_signals_from_all_island_columns`) and
+  `test_parse_bulletin_text_against_real_sample_pdf` for the new nested
+  `signals` shape — KIYAPO's real Luzon text is now asserted present
+  (previously asserted as an empty dict, which was correct under the old
+  Mindanao-only scope but no longer reflects what the parser captures).
+  Updated `test_save_bulletin_to_db_creates_bulletin_and_signals` similarly.
+* Added `test_split_named_areas_strips_parens_and_splits_on_commas`,
+  `test_split_named_areas_strips_warning_lead_time_boilerplate` (regression
+  test for the boilerplate leak found via live testing), and
+  `test_save_bulletin_to_db_creates_best_effort_luzon_visayas_signals`.
+* Not yet run by Fabio against this exact final version — verified instead
+  via the live end-to-end scrape described above.
+
+### 3. File: `frontend/src/app/components/AssessmentModule.tsx`
+* `AreasAffectedModal`: merge key now includes `island_group` (not just
+  `area_name`) so same-named phrases on different islands can't collide.
+  Exposure-match lookup restricted to `island_group === 2` (Mindanao) only,
+  since exposure/indemnity data never exists for Luzon/Visayas. Added an
+  "Island Group" column to the table and an `ISLAND_GROUP_LABELS` lookup.
+  Info banner text updated to explain Luzon/Visayas areas are
+  situational-awareness only, not tied to insurance eligibility.
+
+### 4. File: `frontend/src/app/components/MonitoringModule.tsx`
+* `TCBViewerModal` previously computed one `highestSignal` (max across all
+  signal rows) and merged every area from every signal level into one flat
+  list shown under that single header — a Signal No. 1 area and a Signal
+  No. 3 area for the same bulletin looked identical. Found while showing
+  Fabio the FRANCISCO TCB No. 7 example (which genuinely only had Signal
+  No. 1 data — not a bug, just prompted the review that found this one).
+* Added `groupAreasBySignalLevel()` and `signalLevelColor()` helpers. Areas
+  are now grouped into one section per signal level actually present in the
+  data, sorted highest-to-lowest, each with its own "Signal No. X" header
+  and color. Also fixes a latent color bug where signal levels 4/5 fell
+  through to the default (green, "low severity") color since the old ternary
+  only special-cased levels 2 and 3.
+* `handleDownloadTCB()`'s exported `.txt` summary updated to the same
+  grouped-by-level structure for consistency.
+* The top headline box (category + highest signal + winds/gusts) is
+  unchanged — kept as an at-a-glance bulletin-level summary.
+
+### Status / Next Steps
+* Verified working directly with the user in the browser for both the
+  Assessment "View Areas Affected" modal (island group column) and the
+  Monitoring "TCB Viewer" modal (per-level grouping).
+* Pushed to `develop`.
+
+---
+
+## [2026-08-04] - Bulletin Title Parsing: Missing Categories & Smart Quotes
+
+Fabio asked why the app "does not parse the latest bulletins." Root cause
+traced by fetching PAGASA's live bulletin index directly and inspecting the
+actual PDF behind the newest bulletin the app had misfiled: LUIS weakened
+into a Low Pressure Area, and its final bulletin's title
+("Low Pressure Area (formerly "LUIS")") didn't match any of the four
+category keywords `parse_bulletin_text()` recognized, so it silently fell
+back to a literal `"UNKNOWN"` typhoon name/category — forking that and any
+other similarly-titled bulletin onto one fake shared "UNKNOWN" Typhoon row
+instead of reuniting with the real one. The bulletin *was* being fetched and
+numbered correctly; it just became invisible under the real typhoon's name
+in the UI.
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* `parse_bulletin_text()`: added `SUPER TYPHOON` to the recognized category
+  alternation (a real PAGASA category above Typhoon, previously missing
+  entirely).
+* Added a fallback `lpa_match` regex (tried only when the main category
+  regex doesn't match) for the `Low Pressure Area (formerly "NAME")` title
+  format PAGASA uses on a storm's final bulletin once it weakens below
+  tropical depression strength — extracts `NAME` as the typhoon name so it
+  reunites with the storm's existing Typhoon row, with category set to
+  `"Low Pressure Area"`.
+* First version of this fix used a `["']?` quote character class and still
+  silently failed against the real bulletin -- confirmed via `pdftotext`
+  that PAGASA renders Unicode "smart quotes" (`“`/`”`), not straight ASCII
+  quotes, around the former name. Broadened the quote class (shared `QUOTES`
+  constant, used in both the main title regex and the new LPA fallback) to
+  cover straight and curly single/double quotes (straight `"`/`'` plus their
+  curly counterparts).
+* Verified end-to-end via a live PAGASA scrape (after Fabio reset
+  `tbl_tcb_signals`/`tbl_tropical_cyclone_bulletins`/`tbl_typhoons` twice —
+  once per fix iteration): all 83 bulletins now group under their real
+  typhoon names with zero `UNKNOWN`/garbled entries. LUIS went from stuck at
+  12 bulletins to the correct 13 (its real final "Low Pressure Area"
+  bulletin); JOSIE went from 2 to the correct 3; BAVI (previously entirely
+  missing) now appears correctly as "Super Typhoon".
+
+### 2. File: `backend/tests/test_bulletin_parser.py`
+* Added `test_parse_bulletin_text_extracts_super_typhoon_category`,
+  `test_parse_bulletin_text_recognizes_low_pressure_area_formerly_title`
+  (uses real Unicode smart quotes, matching the actual PDF — a straight-quote
+  version of this same test would have passed against the first, still-buggy
+  fix and missed the regression),
+  `test_parse_bulletin_text_recognizes_low_pressure_area_with_straight_quotes`,
+  and `test_parse_bulletin_text_unrecognized_title_still_falls_back_to_unknown`
+  (keeps the `UNKNOWN` fallback covered for genuinely unparseable titles).
+* Not yet run by Fabio against this exact final version — verified instead
+  via the live end-to-end scrape described above.
+
+### Status / Next Steps
+* Only affects newly parsed bulletins going forward; already-mis-filed
+  historical data required the two reset+rescrape cycles performed during
+  this session to clean up (done).
+* Pushed to `develop`.
+
+---
+
+## [2026-08-04] - Mock Data: Typhoon ALBRITCH + Bukidnon Farmers
+
+Fabio asked for a self-contained mock dataset for testing: a fictional
+typhoon with 10 bulletins seeded directly (no PAGASA scraping), plus 3
+farmers/10 farms in real Bukidnon locations. Follows the existing
+`mock_farmers_talakag_claveria.csv` / `seed_mock_typhoon.py` precedent.
+
+### 1. File: `backend/mock_data/mock_farmers_albritch_bukidnon.csv`
+* 10 rows in the same PABS export column format as the existing mock CSV.
+  Real Bukidnon municipalities/barangays confirmed against
+  `app/data/psgc_region10_boundaries.csv`: Karylle Maagad (2 farms,
+  Lantapan), Fabio Tugonon (3 farms, Impasug-ong), James Gayla (5 farms,
+  2 in City of Malaybalay + 3 in Maramag). Policy numbers
+  `POL-MOCK-92001`-`92010`, farmers_id shared per farmer across their
+  multiple farm rows. Effectivity 06/01/2026-12/31/2026 (matches the
+  existing mock CSV's ~7-month window, deliberately not the ~15-month span
+  flagged as a data-quality issue earlier this session).
+* Uploaded via `POST /api/upload/csv` -- all 10 rows inserted successfully
+  (`farm_id` 580-589).
+
+### 2. File: `backend/mock_data/seed_mock_typhoon_albritch.py`
+* Same pattern as `seed_mock_typhoon.py` (direct psycopg2 insert, bypasses
+  `BulletinParserService`/the PAGASA scrape pipeline entirely per Fabio's
+  "skip the scraping" request). Creates Typhoon "ALBRITCH" (2026) + 10
+  bulletins at 6-hour intervals, tracking westward across Bukidnon with a
+  realistic TD -> TS -> STS -> Typhoon (peak, 155 km/h) -> STS -> TS -> TD
+  -> Low Pressure Area intensity arc -- the final bulletin's title/category
+  mirrors the real "Low Pressure Area (formerly ...)" pattern found in
+  `TCB#13_luis.pdf` earlier this session. Signals cover Lantapan,
+  Impasug-ong, City of Malaybalay, and Maramag (the same 4 municipalities
+  as the mock farmers CSV) with `island_group=2` (Mindanao) -- corrects a
+  placeholder value of `3` used in the older `seed_mock_typhoon.py`, which
+  predates the real island_group convention established in
+  `bulletin_parser.py` this session.
+* Run by Fabio in his venv (`python mock_data/seed_mock_typhoon_albritch.py`)
+  -- created typhoon_id 51, tcb_id 409-418.
+* Verified end-to-end: `POST /api/bulletins/{tcb_id}/compute-exposure` ->
+  all 4 municipalities show Signal 4, 42-48h exposure, `is_eligible_6hr`.
+  `POST /api/assessments/calculate` -> 4 of 10 policies got a computed
+  indemnity payout (assessment_id 590-593, ₱10,752-₱17,920); the other 6
+  hit a pre-existing gap in `tbl_recsap_matrix`/`tbl_indemnity_factor_matrix`
+  seed coverage (not every crop-stage x signal x 24h-bucket combination has
+  a matrix row) -- flagged to Fabio, not fixed, since it's a real data gap
+  unrelated to this mock scenario and out of scope for what was asked.
+
+### Status / Next Steps
+* Not yet pushed.
+
+---
+
+## [2026-08-04] - Assessment Table Now Actually Filters by Selected Typhoon
+
+Fabio caught this using the new ALBRITCH mock data: selecting "Typhoon LUIS"
+in the left sidebar left ALBRITCH's already-computed rows showing in the
+main table, with no indication they belonged to a different typhoon --
+confusing for a GIS specialist trying to tell what's actually affected by
+which storm.
+
+### 1. File: `frontend/src/app/components/AssessmentModule.tsx`
+* Root cause: `filtered` (the main table's row source) was never filtered
+  by `selectedTyphoonId` at all -- the left sidebar's typhoon selection only
+  ever scoped the "View Areas Affected" modal and "Compute Assessments"
+  button, never the table itself, despite visually looking like a table
+  filter.
+* Added `selectedTyphoonName` (resolved from `typhoons` by id) and a new
+  `.filter(r => selectedTyphoonName === null || r.TYPHOON_NAME ===
+  selectedTyphoonName)` step in `filtered`. Matches by name (a plain string
+  field on `PabsAssessmentRow`) rather than typhoon_id, consistent with how
+  `typhoons` itself is already deduped by name to route around the known
+  bulletin-title-parsing quirk that can split one real typhoon across
+  multiple `typhoon_id` rows.
+* Top badge now reads "Typhoon {name} only" instead of always "All typhoons
+  combined" when a typhoon is selected.
+* Added a distinct empty-state message ("No assessments computed yet for
+  Typhoon {name}") for the case where a typhoon is selected but has zero
+  matching rows, instead of silently falling through to a zeroed-out table.
+* CSV export/preview (`CSVPreviewModal`) already consumes `filtered`, so it
+  automatically respects the same typhoon scoping now too.
+
+### Status / Next Steps
+* Verified working directly with the user in the browser.
+* Not yet pushed.
+
+---
+
+## [2026-08-07] - Environment Recheck: uvloop Marker, DB Config Wiring
+
+Fabio asked for a recheck that Postgres/venv/npm are set up correctly.
+Read-only inspection found: `.venv` already has all `requirements-win.txt`
+packages installed (Postgres port 5432 reachable; GeoServer port 8080 is
+not, which is expected/optional per `.claude/ENV_GUIDE.md`); frontend
+`node_modules` already installed. Found two real gaps, fixed here.
+
+### 1. File: `backend/requirements.txt`
+* Fabio had already changed `uvloop==0.22.1` to
+  `uvloop==0.22.1; sys_platform != "win32"` (uvloop doesn't support Windows;
+  `backend/requirements-win.txt` already excluded it entirely). Committing
+  it now — confirmed it matches the actual `.venv` (no uvloop installed).
+
+### 2. File: `backend/app/core/database.py`
+* `SQLALCHEMY_DATABASE_URL` was fully hardcoded in source, including a
+  plaintext password, despite `.claude/ENV_GUIDE.md` documenting a
+  `DATABASE_URL` env var and its own "Key Security Rule" saying never to put
+  DB passwords in the codebase. `python-dotenv` was already installed
+  (listed in both requirements files) but never imported anywhere in the
+  backend.
+* Added `load_dotenv()` + `os.getenv("DATABASE_URL", <old hardcoded value>)`
+  so `backend/.env` (once Fabio creates one) overrides the connection
+  string; the previous hardcoded value stays as the fallback default so
+  behavior is unchanged until `.env` exists.
+
+### 3. File: `backend/.env.example` (new)
+* Did not exist on disk at all — `.claude/ENV_GUIDE.md` instructs copying
+  it to `backend/.env` but there was nothing to copy. Added placeholders
+  for `DATABASE_URL`, `PAGASA_SCRAPE_URL`, `SMTP_HOST`, `SMTP_USER`,
+  `SMTP_PASSWORD` (the backend-side vars from `ENV_GUIDE.md`'s table — the
+  `VITE_*` frontend vars already have their own `frontend/.env.example`).
+
+### Status / Next Steps
+* Not yet pushed. Fabio still needs to create `backend/.env` himself with
+  the real `DATABASE_URL` (and confirm the `agrisure_db`
+  database/`agrisure_admin` user/PostGIS extension actually exist — not
+  verifiable from this environment, needs his `psql` access).
+
+---
+
+## [2026-08-07] - CSV Ingestion Performance Fix (Stall on Large Files)
+
+Reported symptom: CSV ingestion "takes an unusually long time" and "appears
+to stall before finishing," evidenced by a Network-tab screenshot where the
+`csv` upload request sat Pending indefinitely while unrelated background
+requests (the 60s bulletin poll in `App.tsx`) kept completing normally --
+proving the backend process itself wasn't hung, just the ingestion request.
+
+**Root cause:** `tbl_farms.csv_farm_reference` and
+`tbl_admin_boundaries (province, municipality, barangay)` had no DB index,
+but `upload_csv()`'s per-row loop queried them on every row not already in
+its in-process cache. Since `csv_farm_reference` is normally unique per
+row, almost every row triggered a full sequential scan of `tbl_farms` --
+and that table grows by one row for every farm this same upload has
+already inserted, making a large, mostly-new-farms CSV import an
+effectively O(n²) scan. On the real ~23,917-row PABS export this is what
+actually produced the "stall"; on top of that, the loop did up to ~10 DB
+round trips per row (SAVEPOINT + up to 4 SELECTs + up to 4 flushes +
+RELEASE) with zero logging anywhere, so a merely-slow ingest and a truly
+dead one looked identical from the outside.
+
+### 1. File: `backend/app/api/upload.py`
+* Added **`_prefetch_caches()`**: bulk-loads everything the upload's rows
+  are going to look up *before* the per-row loop starts -- the whole
+  `tbl_admin_boundaries` table (small, bounded by one PSGC region) in one
+  query, plus `tbl_farmers_profile`/`tbl_farms` rows matching the CSV's own
+  `farmers_id`/`rsbsa_no`/`csv_farm_reference` values via chunked
+  `WHERE ... IN (...)` queries (`_PREFETCH_CHUNK_SIZE = 1000` per chunk, via
+  new helper **`_chunked()`**). `_ingest_row()` itself is unchanged -- it
+  already checked the cache before falling back to a per-row `SELECT`, so
+  pre-populating that same cache is what removes the scan from the hot path
+  without touching row-level insert/skip/dedup semantics.
+* **`upload_csv()`**: now parses every row into a payload up front (a
+  parse-only failure is recorded immediately, with no SAVEPOINT spent on
+  it), calls `_prefetch_caches()` once, then runs the existing per-row
+  SAVEPOINT/insert/skip loop against the pre-populated caches. Added
+  `logger.info` at ingestion start (filename + row count), prefetch
+  completion (counts per cache), every 1000 rows during the loop (elapsed
+  time, rows/sec, running inserted/skipped/failed counts,
+  `_PROGRESS_LOG_EVERY`), and at completion (total elapsed time + final
+  counts); added `logger.warning` per failed row and `logger.exception` on
+  an unhandled-exception rollback. Response shape (`UploadCsvResult`) is
+  unchanged.
+
+### 2. File: `backend/init_schema.sql`
+* Added `idx_farms_csv_farm_reference` and
+  `idx_admin_boundaries_province_municipality_barangay` indexes (fresh-install
+  schema only -- see Status/Next Steps for the live-DB command).
+
+### 3. File: `backend/tests/test_upload_csv_ingestion.py`
+* Extended the mocked-DB test harness (`_FakeTable`, `_FakeQuery`,
+  `_extract_filter`) to also support `.all()` and `.filter(Model.column.in_(...))`,
+  since `_prefetch_caches()` now issues those in addition to the
+  `.filter(...).first()` calls the harness already simulated.
+* Updated `test_repeated_boundary_across_many_rows_is_only_queried_once` and
+  `test_same_rsbsa_no_across_rows_is_only_queried_once`: expected DB query
+  count changed from 1 to 2 (one upfront prefetch call + one real per-row
+  fallback on the first genuinely-new value) -- still asserts the count
+  doesn't scale with the number of repeated rows, just with a different
+  constant.
+* Added **`test_large_file_all_rows_accounted_for_with_no_duplicates()`**:
+  ingests 1,550 rows (1,500 distinct + 50 exact re-uploads of earlier rows)
+  to exercise the chunked prefetch across multiple `_PREFETCH_CHUNK_SIZE`
+  batches and confirm row accounting (`processed == inserted + skipped +
+  failed`) and dedup/no-duplication behavior still hold at that scale.
+
+### Status / Next Steps
+* **Fabio, DB Admin action needed:** the two new indexes only apply to a
+  fresh `init_schema.sql` run. To speed up ingestion against the database
+  that already exists, run this directly (non-destructive, safe to run
+  regardless of order relative to anything else):
+  ```sql
+  CREATE INDEX IF NOT EXISTS idx_farms_csv_farm_reference ON tbl_farms (csv_farm_reference);
+  CREATE INDEX IF NOT EXISTS idx_admin_boundaries_province_municipality_barangay
+      ON tbl_admin_boundaries (province, municipality, barangay);
+  ```
+* **Verified by Fabio (2026-08-07):** `pytest backend/tests/test_upload_csv_ingestion.py
+  backend/tests/test_csv_upload.py -v` → **19 passed**. The mocked-DB harness
+  changes were written by reasoning through SQLAlchemy's expression internals
+  (`Column.in_()` → `BinaryExpression.operator is sqlalchemy.sql.operators.in_op`,
+  confirmed by reading the installed SQLAlchemy source) rather than by
+  executing them, since this environment can't run Python against the
+  project -- Fabio's run is what actually confirms they're correct.
+* **Measured (Fabio, 2026-08-07, local dev machine, indexes applied):**
+  `backend/scripts/benchmark_csv_ingestion.py --rows 24000` → all 24,000 rows
+  brand-new (no pre-existing farmers/farms to hit the prefetch cache, i.e. the
+  worst case for row-by-row insert overhead) → **272.2s, 88.2 rows/sec,
+  24,000 inserted / 0 skipped / 0 failed**. No true "before" (pre-fix, no
+  index) number was captured -- reverting the code/index to measure it
+  wasn't worth the risk on a real environment -- but this confirms the
+  process now runs to completion in minutes rather than hanging/stalling on
+  a file at the real ~23,917-row PABS export's scale, with correct,
+  complete, non-duplicated row accounting throughout.
+* First benchmark attempt failed for an unrelated reason worth recording:
+  the script's synthetic `FarmersID` values initially exceeded
+  `tbl_farmers_profile.farmers_id`'s `VARCHAR(20)` limit, so Postgres
+  correctly rejected all 24,000 rows with `StringDataRightTruncation` --
+  fixed by shortening the generated IDs. Notably, that all-failure run still
+  completed in 69.9s (343 rows/sec) with zero hang, since a rejected insert
+  is just a cheap per-row SAVEPOINT rollback.
+* Remaining limitation: 88.2 rows/sec is still one-row-at-a-time
+  SAVEPOINT+INSERT+flush, just no longer with an O(n²) unindexed scan on
+  top. If CSVs grow substantially past ~25k rows, the next lever is
+  switching per-row inserts to `bulk_insert_mappings`/`COPY`, which would
+  require redesigning the per-row-failure-isolation architecture the
+  existing tests depend on -- left out of scope for this fix.
+
+---
+
+## [2026-08-07] - Farm Records table: fix N+1 query + smooth loading UX
+
+### 1. File: `backend/app/api/farms.py`
+* **Changes to Functions:**
+  * Rewrote **`list_farms()`**: replaced the per-farm `InsuranceRecord` query
+    (plus lazy-loaded `Farm.farmer`/`Farm.boundary`, which also default to
+    one query per row) with `joinedload(Farm.farmer)`/`joinedload(Farm.boundary)`
+    on the initial query and a single bulk `InsuranceRecord` fetch reduced to
+    "most recent per farm" in Python via `dict.setdefault()` on a
+    `farm_id, effectivity_date DESC`-ordered result set. Cuts the endpoint
+    from ~1 + up to 3-per-farm queries (~1,770 for the current 589 farms) to
+    2 queries total, regardless of farm count. Response shape (`{"status",
+    "data"}`) and every field are unchanged.
+
+### 2. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* **Changes to Functions/Rendering:**
+  * Added a `visibleRowCount` state + `useEffect` that grows the number of
+    rendered Farm Records rows in `ROW_BATCH_SIZE` (50) increments via
+    `requestAnimationFrame`, re-triggered on `filteredFarms.length` changes.
+    The table now paints its first ~50 rows immediately after data loads and
+    fills in the rest across a few frames instead of mounting all rows (589
+    currently) in one blocking paint. The full dataset is fetched in one
+    call as before (unchanged) — needed since the map (`GISLeafletMap`),
+    municipality filter, and sort all read from the same `farmRows`/
+    `filteredFarms` arrays and require the complete set to stay correct;
+    only the row *paint* is staggered, not the fetch.
+  * Replaced the empty `<tbody>` shown while `isLoadingFarms` is true with
+    `SKELETON_ROW_COUNT` (10) placeholder `<tr>` rows using the
+    previously-unused `Skeleton` primitive (`ui/skeleton.tsx`), one per
+    column (`TABLE_COLUMN_COUNT` = 12), instead of a blank table body with
+    only the header pill reading "Loading…".
+* **Why:** the "Active Typhoon"/"Farm Records" screen would sit blank/frozen
+  until the entire (previously N+1-slow) farms response arrived, then mount
+  all rows in a single React commit. Fixing the backend query removes the
+  actual wait; the frontend batching/skeleton changes smooth out the
+  remaining paint so the table doesn't visibly block even on a fast
+  response. Considered true pagination/infinite-scroll first, but rejected
+  it — it would've left the map and municipality/sort filters incomplete
+  until the user finished scrolling the table, since they all read the same
+  in-memory farm list.
+
+---
+
+## [2026-08-07] - Farm Records table: revert row-reveal animation
+
+### 1. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* **Changes to Functions/Rendering:**
+  * Removed the `visibleRowCount` state and its `requestAnimationFrame`
+    growth effect added earlier the same day; the table body now renders
+    `filteredFarms` directly again (no `.slice(0, visibleRowCount)`), and
+    the now-unused `ROW_BATCH_SIZE` constant was removed with it.
+  * The `isLoadingFarms` skeleton placeholder rows (`SKELETON_ROW_COUNT`,
+    `TABLE_COLUMN_COUNT`, `ui/skeleton.tsx`) are unchanged and still shown
+    while the initial fetch is in flight.
+* **Why:** Fabio reported the batch-reveal animation itself was visible as
+  rows "moving" every time the screen opened. The animation was meant to
+  smooth out mounting hundreds of `<tr>`s at once, but for this dataset size
+  the visible motion it introduced was worse than the jank it was solving —
+  reverted to a single static render once data arrives, keeping only the
+  backend N+1 fix and the loading-state skeleton from the prior entry.
+
+---
+
+## [2026-08-07] - Farm Records table: remove loading skeleton too
+
+### 1. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* **Changes to Functions/Rendering:**
+  * Removed the `isLoadingFarms` skeleton `<tr>` block (`SKELETON_ROW_COUNT`,
+    `TABLE_COLUMN_COUNT`, the `Skeleton` import from `ui/skeleton.tsx`) added
+    two entries above. The table body now renders only `filteredFarms.map(...)`
+    — an empty `<tbody>` while loading (with the header pill reading
+    "Loading…", unchanged), then the full table in one static pass once data
+    arrives. This is now functionally identical to the file's pre-2026-08-07
+    rendering; the only surviving change from today is the backend N+1 fix
+    in `farms.py`.
+* **Why:** the right-aligned numeric columns (Area (ha), Exp (h), Est.
+  Payment) render a full-width skeleton bar while loading vs. short
+  right-anchored text once loaded, which read as text jumping from left to
+  right on every screen open — the same "I want it static" complaint as the
+  row-reveal animation. Rather than patch the skeleton's alignment per
+  column, removed the skeleton loading state entirely to guarantee no visual
+  motion between the loading and loaded states.
+
+---
+
+## [2026-08-07] - Farm Records table: no header-over-blank-body loading state
+
+### 1. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* **Changes to Rendering:**
+  * Wrapped the `<table>` (header + body) in `{isLoadingFarms ? (...) : (...)}`
+    inside the scrollable panel `<div>`. While loading, that panel now shows
+    a single centered "Loading farm records…" message instead of the table
+    shell; the `<table>` (with its `<thead>`/`<tbody>`) only mounts once
+    `isLoadingFarms` is false, fully populated.
+* **Why:** even with no skeleton or animation, the green `<thead>` was still
+  rendering immediately with an empty `<tbody>` beneath it while loading —
+  visually indistinguishable from a broken/empty table, and a different
+  "shape" than the loaded state. Fabio compared the before/after screenshots
+  directly and wanted them structurally consistent: no header sitting over
+  blank rows. Swapping the whole table for a loading message (rather than
+  showing a partial table) removes that mismatched mid-state entirely — one
+  atomic swap from "loading" to "fully loaded table," nothing in between.
+
+---
+
+## [2026-08-07] - Monitoring stat card: fix "Active Typhoon" wrapping to two lines
+
+### 1. File: `frontend/src/app/components/MonitoringModule.tsx`
+* **Changes to Rendering (Fabio's own edit, logged here for the record):**
+  * `statCards`: the "Active Typhoon" card's fallback value changed from
+    `"—"` to `"N/A"`, and its icon shrunk from `size={18}` to `size={14}`, so
+    the fallback text fits on one line within the card instead of wrapping.
+
+### 2. File: `.claude/settings.json`
+* **New file:**
+  * Adds `{"permissions": {"defaultMode": "bypassPermissions"}}` as the
+    project-level Claude Code permission default.
+
+---
+
+## [2026-08-08] - Farm Records: paginated first load with infinite scroll +
+## default active-insurance-only filter
+
+Reported symptom (screenshot): opening the Spatial Analysis screen blocks
+the whole "Farm Records" panel behind a single "Loading farm records…"
+message until the entire `GET /api/farms/` response has arrived, with
+nothing visible in the meantime -- Fabio wanted the table to show *some*
+real data immediately and load the rest as the user scrolls, rather than
+one all-or-nothing fetch.
+
+This directly follows the three same-day reverts logged under
+`[2026-08-07] - Farm Records table: ...` above -- those attempts only
+re-staggered the *paint* of an already-fully-fetched array (row-reveal
+animation, then skeleton rows) and were reverted for visible layout jank.
+This entry changes how much data is actually in flight over the network
+instead, which is why it lands differently.
+
+### 1. File: `backend/app/api/farms.py`
+* **Changes to Functions:**
+  * `list_farms()` gains three optional query params: `limit: int | None`
+    (`Query(None, ge=1, le=1000)`), `offset: int` (`Query(0, ge=0)`), and
+    `active_only: bool` (`Query(False)`).
+  * **Backward compatibility (required):** `MonitoringModule.tsx` also calls
+    `getFarms()` with no args and expects the full unpaginated array back.
+    Omitting `limit` runs the exact same unmodified query as before -- no
+    `.offset()`/`.limit()`, no extra `COUNT` query -- so that caller sees
+    zero behavior change.
+  * When `limit` is given: `.offset(offset).limit(limit)` is applied to the
+    existing farms query, plus one additional `COUNT` query for `total`. The
+    bulk `InsuranceRecord` fetch is left structurally unchanged -- it already
+    scopes to `farm_ids` from whichever `farms` list resulted, so it
+    naturally becomes page-scoped. Still 2 real query executions per page
+    (farms + insurance), a 3rd (`COUNT`) only when paginated -- no N+1
+    reintroduced.
+  * When `active_only=True`: restricts the farms query to farms with at
+    least one `InsuranceRecord` currently bracketing today
+    (`effectivity_date <= today <= expiry_date`, via a
+    `Farm.farm_id.in_(subquery)` filter) -- the same "active" definition
+    `SpatialAnalysisModule.tsx`'s `isActiveInsurance()` already applies
+    client-side, now pushed into the query so an all-inactive farm is never
+    fetched at all. The subquery is embedded in the farms query's WHERE
+    clause (not separately executed), so it doesn't add a real query
+    round-trip.
+  * Response gains `total`, `limit`, `offset`, `has_more` fields (additive --
+    existing callers only read `.data`). `has_more = offset + len(data) <
+    total` when paginated; unpaginated responses get `total=len(data)`,
+    `limit=None`, `offset=0`, `has_more=False` for shape consistency.
+  * Docstring updated to describe the new params and restate the
+    "2 (+1 COUNT) queries per page" guarantee.
+
+### 2. File: `frontend/src/lib/api.ts`
+* **Changes to Functions:**
+  * `getFarms()` now takes an optional `{ limit?, offset?, active_only? }`
+    param and returns the widened `GetFarmsResult` (adds `total`/`limit`/
+    `offset`/`has_more`). Called with no args, as `MonitoringModule.tsx`
+    still does, it hits `/api/farms/` with no query string -- unchanged
+    behavior.
+
+### 3. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* **Changes to Functions/Rendering:**
+  * Added **`mergeFarmsPage()`**: upserts a freshly-fetched page into the
+    existing `farms` array by `farm_id` (new ids appended, existing ids
+    updated in place) instead of replacing the array outright. This is what
+    lets pagination grow the table incrementally *and* lets a CSV/GPX- or
+    filter-triggered refetch update stale rows without the visible row count
+    ever dropping mid-refresh -- old rows simply stay until fresh data for
+    that same farm arrives.
+  * Added **`fetchNextPage(reason)`**: the single place (besides the initial
+    page-1 call) that issues a `GET /api/farms/` request, guarded by a
+    shared `fetchInFlightRef`/`nextOffsetRef` pair so the scroll trigger and
+    the background-completion loop never double-request the same page.
+    Tracks a `generationRef` counter so a page fetch already in flight when a
+    restart happens (CSV/GPX upload, or the Active-Insurance toggle) is
+    discarded on resolve instead of corrupting the new sequence's cursor.
+  * Added **`runBackgroundCompletion()`**: after page 1 lands, keeps fetching
+    subsequent pages at a deliberately unhurried pace (`sleep(300ms)`
+    between pages) so `GISLeafletMap`'s markers and the municipality filter's
+    suggestion list become complete shortly after first paint, without
+    competing for bandwidth/DB load against a user actively scrolling.
+  * Added **`loadFarmsFromStart(reason)`**: (re)starts the fetch sequence
+    from page 1 -- used on mount, on CSV/GPX upload (`refreshFarms()`, now a
+    thin wrapper around this), and whenever the Active-Insurance toggle
+    changes. Existing `farms` data is left untouched; `mergeFarmsPage` folds
+    new pages in, so the table never blanks or shrinks mid-refresh.
+  * Infinite scroll: a sentinel `<tr>` (spans all 12 columns, fixed height,
+    shows "Loading more…" only while `isFetchingNextPage`) is appended after
+    the table body while `hasMore`, observed via `IntersectionObserver`
+    rooted at the table's existing scroll container -- fetches the next page
+    once scrolled near the bottom. Chosen over a hand-rolled scroll-position
+    listener since it's the first infinite-scroll implementation in the
+    codebase and doesn't require reasoning about exact scroll geometry.
+  * Loading-state split into three flags, replacing the old single
+    `isLoadingFarms`: **`isLoadingFirstPage`** (nothing loaded yet -- the one
+    case where the whole table panel still swaps to the "Loading farm
+    records…" message, unchanged from the 2026-08-07 revert's end state),
+    **`isRefreshing`** (a CSV/GPX/toggle-triggered refetch is in flight --
+    header pill reads "Refreshing…", table stays fully visible throughout,
+    no blank state), and **`isFetchingNextPage`** (scroll-triggered next-page
+    fetch in flight -- drives only the small sentinel-row indicator).
+  * `activeInsuranceOnly` now **defaults to `true`** (was `false`) and is
+    threaded into every paginated fetch via `active_only`, not just the
+    existing client-side filter on `filteredFarms` (left in place unchanged,
+    as a harmless safety net). Toggling it calls `loadFarmsFromStart` to
+    restart pagination under the new filter value; farms fetched under a
+    prior filter state are never purged from the cache, they're just
+    correctly hidden/shown by the existing client-side filter -- so
+    switching back doesn't require re-fetching farms already seen once.
+  * Accepted, explicitly-flagged side effect: for a non-default sort (e.g.
+    by "Farmer"), rows can visibly reorder as background pages land -- real
+    data changing, not animation, matching what was already accepted for the
+    table growing during first load.
+
+### 4. File: `backend/tests/test_farms_api.py` (new)
+* Added `ListFarmsUnpaginatedTests`, `ListFarmsPaginationTests`,
+  `ListFarmsActiveOnlyTests`, `ListFarmsResponseShapeTests` -- direct-call
+  tests against `list_farms()` using a purpose-built `_ChainableQuery` fake
+  (mirrors the `.options()/.order_by()/.filter()/.offset()/.limit()` chain
+  the endpoint actually uses, with `.all()`/`.count()` call counters), same
+  direct-call-with-mocked-`Session` style as `test_upload_gpx_api.py`.
+  Covers: unpaginated backward compatibility (no `.offset()`/`.limit()`, no
+  extra `COUNT`), pagination applying `.offset()`/`.limit()` correctly,
+  `has_more` at the start/middle/last page, the insurance bulk-fetch staying
+  scoped to the current page's `farm_ids` only, exactly 2 (+1 `COUNT` when
+  paginated) query executions, `active_only` filtering by the
+  effectivity/expiry date bracket and being a no-op when omitted, and the
+  existing "most recent insurance record per farm" reduction still working
+  after the refactor. FastAPI's `Query(..., ge=..., le=...)` bound
+  validation is Pydantic/routing-layer behavior and isn't exercised by these
+  direct-call tests -- consistent with the rest of this test suite, which
+  has no `TestClient`-based tests anywhere.
+
+### Status / Next Steps
+* **Bug found and fixed via Fabio's first test run (2026-08-08):**
+  `Farm.farm_id.in_(active_farm_ids)` raised `sqlalchemy.exc.ArgumentError`
+  ("IN expression list, SELECT construct, or bound parameter object
+  expected") -- in SQLAlchemy 2.x, a bare ORM `Query` object (what
+  `db.query(InsuranceRecord.farm_id).filter(...).distinct()` returns) is not
+  a valid `.in_()` operand; it must be converted to a `ScalarSelect` first.
+  Fixed by appending `.scalar_subquery()` to `active_farm_ids` in
+  `farms.py`. This would have failed on every real `active_only=true`
+  request, not just the tests -- caught before this ever reached Fabio's
+  running dev server. `test_farms_api.py`'s active-only tests were updated
+  to match: the `InsuranceRecord.farm_id` branch of the test's fake
+  `db.query()` router now returns a real, unbound (`session=None`)
+  SQLAlchemy `Query` (needed for `.scalar_subquery()` to produce a genuine
+  construct `Farm.farm_id.in_(...)` will accept) instead of the test's own
+  `_ChainableQuery` fake, and the date-bracket assertion compiles the
+  resulting filter criterion to SQL text (`literal_binds=True`) rather than
+  introspecting the fake chain's call log.
+* **Verified by Fabio (2026-08-08):** `pytest backend/tests/test_farms_api.py -v`
+  → all 10 tests pass after the `.scalar_subquery()` fix above.
+* Not run against a live database or the frontend yet -- Fabio still needs
+  to click through the Spatial Analysis screen locally (fresh load,
+  scroll-to-bottom, leave it idle to watch background completion, toggle
+  Active Insurance Only, and a CSV/GPX upload) to confirm the UX matches the
+  plan's verification checklist.
+* `PAGE_SIZE = 100` and the 300ms background-completion delay are fixed
+  constants for this pass (not configurable), per Fabio's direction.
+* The municipality filter's suggestion list intentionally has no "still
+  loading full list…" indicator -- it silently grows as background pages
+  land, consistent with how the table itself grows silently, per Fabio's
+  direction.
+
+---
+
+## [2026-08-08] - Farm Records: lift the fetch to app-level, shared with
+## Monitoring's stats
+
+Follow-up to the entry directly above, raised by Fabio during the frontend
+walkthrough: farm records should start loading the moment the app opens
+(right after login), not wait until the user navigates into the Spatial
+Analysis tab. `SpatialAnalysisModule` only mounts when `activeModule ===
+"spatial"` (`App.tsx`), so the whole pagination pipeline built above never
+even started until then.
+
+This surfaced a real conflict worth recording: `MonitoringModule` (the
+actual default landing tab) already ran its own separate, unpaginated
+`getFarms()` call on mount, and its stat cards (Total Farms, Affected Farms,
+Total Area, Total Indemnity, per-signal distribution) need the *complete*
+farm dataset to be correct. Naively sharing SpatialAnalysisModule's
+`active_only`-gated fetch as-is would have made those stats silently
+undercount whenever the Spatial screen's toggle was left on its new default.
+Resolved (confirmed with Fabio) by making the shared fetch always walk to
+100% completion in two phases -- active-insurance farms first, then
+everything else -- so Monitoring's stats are always eventually accurate and
+Spatial's toggle becomes a pure client-side display filter with no fetch
+behind it at all.
+
+### 1. File: `frontend/src/lib/useFarmsData.ts` (new)
+* Added **`useFarmsData(enabled)`**: the shared farms data source, lifted out
+  of `SpatialAnalysisModule.tsx`'s previous self-contained implementation.
+  Starts fetching once `enabled` flips true (App.tsx passes `!!currentUser`,
+  so it starts right after login, before any tab-specific module mounts) and
+  keeps running regardless of which tab is active.
+  * Fetches in two phases via a `phaseRef` (`"active" | "all" | "done"`):
+    phase `"active"` pages through `active_only=true` first (fast, matches
+    what the Spatial table's default view needs); once that's exhausted,
+    phase `"all"` restarts pagination from offset 0 with `active_only=false`
+    to fill in the remainder. The two phases' offsets aren't directly
+    comparable (different WHERE clauses shift what falls at a given offset),
+    so phase `"all"` does re-fetch farms phase `"active"` already merged in
+    -- harmless no-ops via `mergeFarmsPage`'s upsert semantics, traded for
+    not needing to track which specific farm_ids were already seen.
+  * Kept **`mergeFarmsPage()`** (moved from `SpatialAnalysisModule.tsx`,
+    unchanged) and the same shared-lock/generation-counter pattern
+    (`fetchInFlightRef`, `generationRef`) from the entry above, now scoped to
+    this hook instead of one component.
+  * Returns `{ farms, isLoadingFirstPage, isRefreshing, isFetchingMore,
+    hasMore, isComplete, loadError, refresh, requestMore }` --
+    `isComplete` is new (true once phase `"all"` exhausts, i.e. the complete
+    dataset has landed) for any future consumer that wants to know when
+    aggregate stats are guaranteed fully accurate; not consumed yet.
+  * `isFetchingNextPage` (Spatial-only naming) collapsed into
+    **`isFetchingMore`**, since the reason a page fetch is happening (scroll
+    vs. background pace) no longer needs separate UI treatment once shared
+    across screens -- both drive the same "Loading more…" sentinel.
+
+### 2. File: `frontend/src/app/App.tsx`
+* **Changes to Functions:**
+  * Added `const farmsData = useFarmsData(!!currentUser)`, called
+    unconditionally above the `if (!currentUser) return <LoginScreen/>`
+    early-return (required -- hooks can't be called conditionally), so the
+    fetch starts the instant `currentUser` is set by `handleLogin()`.
+  * Passes `farmsData` as a new prop to both `<MonitoringModule>` and
+    `<SpatialAnalysisModule>`.
+
+### 3. File: `frontend/src/app/components/MonitoringModule.tsx`
+* **Changes to Functions/Rendering:**
+  * Removed its own `farms` state and the `getFarms()` call from its mount
+    effect; `farms` is now `farmsData.farms`, read from the new required
+    `farmsData: FarmsData` prop. `totalFarms`/`affectedFarms`/`totalArea`/
+    `totalIndemnity` and the signal-distribution chart are otherwise
+    unchanged -- they already just read from `farms`/`farmRows`, so they now
+    grow live as the shared background completion progresses, same
+    "silently grows" philosophy already accepted for the Spatial table.
+  * `assessments`/`insuranceSummary`/`activeTyphoons` fetching is unchanged
+    (out of scope for this entry -- only the farms fetch was duplicated).
+
+### 4. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* **Changes to Functions/Rendering:**
+  * Removed everything the entry above added for its *own* fetch/pagination
+    machinery (`farms`/`isLoadingFirstPage`/`isRefreshing`/
+    `isFetchingNextPage`/`hasMore` state, `nextOffsetRef`/`hasMoreRef`/
+    `fetchInFlightRef`/`activeOnlyRef`/`generationRef`, `fetchNextPage()`,
+    `runBackgroundCompletion()`, `loadFarmsFromStart()`, `mergeFarmsPage()`,
+    the `PAGE_SIZE`/`BACKGROUND_FETCH_DELAY_MS` constants) -- all of it now
+    lives in `useFarmsData.ts` instead. This component now takes a required
+    `farmsData: FarmsData` prop and destructures `farms`, `isLoadingFirstPage`,
+    `isRefreshing`, `isFetchingMore`, `hasMore`, `loadError`,
+    `refresh` (aliased to the existing local name `refreshFarms`, so the
+    CSV/GPX upload handlers didn't need to change), and `requestMore` from it.
+  * The infinite-scroll `IntersectionObserver` effect now calls
+    `requestMore()` instead of a local `fetchNextPage("scroll")` --
+    `requestMore` is deliberately excluded from the effect's dependency
+    array (it's a fresh function identity on every `useFarmsData` state
+    change, i.e. every page fetch, which would otherwise tear down/rebuild
+    the observer constantly for no behavioral difference).
+  * `activeInsuranceOnly` (still defaults to `true`) is now **purely a
+    client-side display filter** on `filteredFarms`, same as it always was
+    structurally, but no longer triggers a fetch restart when toggled -- the
+    `useEffect(() => { loadFarmsFromStart(...) }, [activeInsuranceOnly])`
+    from the entry above is gone entirely, since `useFarmsData` already
+    fetches every farm (active-first, then the rest) regardless of this
+    toggle's state. Toggling now re-filters the already-loaded/loading
+    shared array instantly, with no network request -- strictly better UX
+    than the previous design's "restart pagination on toggle" behavior.
+
+### Status / Next Steps
+* **Verified by Fabio (2026-08-08):** fresh `npm run dev` + login walkthrough
+  confirmed -- farm records populate on the Monitoring tab immediately after
+  login (before ever clicking into Spatial), the Spatial tab shows data
+  immediately/near-immediately on first visit, the Active-Insurance toggle
+  re-filters instantly with no new network request, and scrolling/idle
+  background completion/CSV/GPX upload refresh all behave as expected.
+* `isComplete` is returned by `useFarmsData` but not yet consumed by either
+  screen (e.g. as a "still finishing up…" affordance on Monitoring's stat
+  cards) -- left unused/available for a future request rather than adding
+  UI surface that wasn't asked for.
+
+---
+
+## [2026-08-08] - Persist login session across page refresh
+
+Reported symptom: refreshing the page always redirected back to the login
+screen. Root cause: `LoginScreen.tsx` has no real backend auth (checks
+against hardcoded `DEMO_ACCOUNTS` client-side, issues no token/session --
+registration is similarly fake, just a `setTimeout` before showing a
+"submitted for approval" message) and `App.tsx`'s `currentUser` was purely
+in-memory React state, which a full page reload always wipes.
+
+Confirmed with Fabio: persist across full browser restarts (not just
+same-tab refresh), with no automatic time-based expiry -- the session lasts
+until the user explicitly logs out.
+
+### 1. File: `frontend/src/lib/authStorage.ts` (new)
+* Added **`CurrentUser`** interface (`{ name, role, email }` -- the same
+  shape `LoginScreen.tsx`'s `onLogin()` already passed, now the single
+  source of truth instead of a duplicate inline interface in `App.tsx`).
+* Added **`loadPersistedUser()`**: reads/parses the persisted user from
+  `localStorage` (key `agrisuregis_current_user`), with shape-validation on
+  the parsed JSON and a try/catch fallback to `null` (not logged in) for
+  corrupt/unparseable storage or a storage-unavailable environment (private
+  browsing, quota, disabled) -- fails safe rather than crashing app load.
+* Added **`persistUser(user)`** / **`clearPersistedUser()`**: write/remove
+  that same key, each independently try/caught so a storage failure doesn't
+  break login/logout itself, just the "survives a refresh" behavior.
+
+### 2. File: `frontend/src/app/App.tsx`
+* **Changes to Functions:**
+  * `currentUser` state now initialized via `useState<CurrentUser | null>
+    (loadPersistedUser)` -- a lazy initializer, so it reads `localStorage`
+    synchronously on the very first render and never flashes the login
+    screen before rehydrating.
+  * `handleLogin()`: now also calls `persistUser(user)` alongside the
+    existing `setCurrentUser(user)`.
+  * Added **`handleLogout()`**: `setCurrentUser(null)` + `clearPersistedUser()`,
+    replacing the inline `onLogout={() => setCurrentUser(null)}` prop that
+    never cleared storage.
+  * Removed the local `interface CurrentUser` (moved to `authStorage.ts`,
+    imported instead).
+* **Side effect worth noting, not a regression:** `useFarmsData(!!currentUser)`
+  (from the entry above) now effectively also starts on refresh instead of
+  only on a fresh login, since `currentUser` is populated synchronously on
+  first render whenever a persisted session exists -- consistent with the
+  rest of the app now staying "logged in" across a refresh.
+
+### Status / Next Steps
+* **Verified by Fabio (2026-08-08):** login persists across refresh and full
+  browser restarts, and explicit logout correctly clears the session (see
+  the follow-up entry directly below for the companion farms-cache fix found
+  during this same walkthrough).
+* No expiry timer exists by design (per Fabio's direction) -- the persisted
+  session is only ever cleared by an explicit logout. If a future request
+  wants automatic expiry, `authStorage.ts` would need a stored timestamp and
+  an expiry check in `loadPersistedUser()`.
+* This persists to `localStorage`, which is per-browser-profile, not a real
+  server-side session -- since there is still no backend auth endpoint,
+  logging in on a second device/browser is a separate, independent "session"
+  with no shared server-side state. Flagging in case real backend
+  authentication is wanted later; out of scope for this fix.
+
+---
+
+## [2026-08-08] - Farm records cache: seed instantly on refresh instead of
+## restarting the fetch from page 1
+
+Follow-up to the login-persistence entry directly above. Fabio's first
+walkthrough of that fix reported the login screen correctly stopped
+reappearing on refresh, but the Farm Records table/map still visibly reset
+and re-fetched from scratch on every refresh -- because `useFarmsData.ts`'s
+progress (the `farms` array, and which pages had already been fetched) only
+ever lived in React state, which a full page reload always wipes regardless
+of whether `currentUser` itself now survives it.
+
+Considered a "true resume" (persist exactly which offsets/pages were already
+fetched and pick up from there) vs. "seed instantly, then revalidate in the
+background" -- confirmed with Fabio: the latter, since it's simpler and
+self-correcting (no risk of stale data lingering if something changed
+server-side between sessions), at the cost of re-requesting some pages a
+true resume could have skipped.
+
+### 1. File: `frontend/src/lib/useFarmsData.ts`
+* Added **`loadCachedFarms()`** / **`persistFarmsCache()`**: read/write the
+  farms list to `localStorage` (key `agrisuregis_farms_cache`), each
+  independently try/caught (corrupt/unparseable cache, storage unavailable,
+  or quota exceeded all fail safe -- worst case, this cache is skipped and
+  the hook behaves exactly as it did before this entry, a cold-start fetch).
+* `farms` state now initialized via `useState<Farm[]>(loadCachedFarms)` (a
+  lazy initializer, reads `localStorage` synchronously on first render) --
+  instead of starting empty on every mount.
+* Added a `useEffect` that persists `farms` to the cache on every change
+  (i.e. after every merged page), so the *next* refresh seeds from
+  up-to-date data, not just whatever was cached at the start of the current
+  session. Skips persisting an empty array so a transient early error can't
+  wipe out a previously good cache.
+* `hasLoadedOnceRef` (already existed, drives the `isLoadingFirstPage` vs.
+  `isFetchingMore` distinction in `fetchNextPage()`) now initializes to
+  `farms.length > 0` instead of unconditionally `false` -- when `farms`
+  started from a non-empty cache, the mount fetch is treated as a quiet
+  background revalidation from the very first page, so the full-panel
+  "Loading farm records…" blocker never reappears on a refresh where cached
+  data already exists. No other logic changed: the same two-phase fetch
+  sequence (active-first, then complete) still runs in full on every mount,
+  it just does so behind already-visible cached rows instead of a blank
+  loading state, merging real data back over the seed via the existing
+  `mergeFarmsPage()` as it lands.
+* **Deliberately not cleared on logout** (unlike the login session itself in
+  `authStorage.ts`): farm records are shared, global data, not user-specific
+  or per-account -- both demo accounts see the same underlying dataset, and
+  the cache is never rendered without a valid session anyway (`App.tsx`
+  gates all screens behind `currentUser`). Leaving it in place across a
+  logout/re-login cycle is a free speed-up for the next login, not a
+  data-exposure risk.
+
+### Status / Next Steps
+* **Verified by Fabio (2026-08-08):** fresh `npm run dev` walkthrough
+  confirmed -- farm records appear immediately on refresh (no "Loading farm
+  records…" blocker), the background-completion sequence quietly re-runs
+  behind them, and the login-persistence behavior from the entry above still
+  holds (refresh, browser restart, and explicit logout all behave as
+  expected).
+* Very large datasets (the benchmarked ~24k-row CSV ingestion ceiling) could
+  approach `localStorage`'s typical ~5-10MB per-origin limit -- not a
+  concern at today's ~589-row scale, but `persistFarmsCache()`'s try/catch
+  means this fails safe (cache silently stops updating) rather than
+  breaking the app if that ceiling is ever hit.
+
+---
+
+## [2026-08-08] - Farm records: true resume instead of re-walking the whole
+## fetch on every refresh
+
+Follow-up to the entry directly above. The "very large datasets" note in its
+Status/Next Steps turned out to already be Fabio's actual situation: his dev
+DB apparently still carries the ~24,000 synthetic rows from the CSV
+ingestion benchmark run (`FUNCTION_CHANGES.md`, 2026-08-07), on top of the
+original ~589 -- Monitoring's "Affected Farms" stat card showed `0/25700`.
+At that real scale, "seed instantly, then fully revalidate the entire
+two-phase sequence in the background" (the entry above) meant every single
+refresh re-issued 250+ paginated requests at the deliberately-unhurried
+300ms/page background pace -- 75+ seconds of visible churn every reload,
+which Fabio reported as the page/backend "getting stuck" and "doing it again
+from the start." Confirmed with Fabio: switch to true resume.
+
+### 1. File: `frontend/src/lib/useFarmsData.ts`
+* Added **`loadCachedProgress()`** / **`persistProgress()`**: read/write
+  `{ phase, activeOffset, allOffset }` to `localStorage` (key
+  `agrisuregis_farms_progress`, separate key from the farms data cache
+  itself), with the same shape-validated-with-fallback-to-fresh pattern as
+  `loadCachedFarms()`/`persistFarmsCache()`.
+* `phaseRef`/`activeOffsetRef`/`allOffsetRef` now initialize from this
+  cached progress instead of always `"active"`/`0`/`0`. `hasMore`/
+  `isComplete` state likewise initialize from `cachedProgress.phase` instead
+  of always `true`/`false`.
+* `fetchNextPage()`'s success branch now calls `persistProgress()` after
+  every merged page (and after any phase transition), so the persisted
+  progress always reflects exactly how far the sequence has gotten.
+* Added **`resume()`**: the new mount-time entry point (replaces calling
+  `start(false)` on mount). Unlike `start()`, it does **not** reset
+  `phaseRef`/the offset refs -- it continues `fetchNextPage()` from
+  whatever they already are. If a previous session had already reached
+  phase `"done"`, `resume()` is a complete no-op: zero requests, the cached
+  `farms` (already seeded, per the entry above) is simply left as-is.
+* `start(isRefresh)` (still used only by `refresh()`, i.e. a CSV/GPX
+  upload) is unchanged in behavior -- a real restart, resetting both the
+  in-memory cursors *and* the persisted progress via
+  `persistProgress(FRESH_PROGRESS)`, so a refresh that happens mid-upload
+  resumes from that fresh sequence rather than stale pre-upload progress.
+
+### Status / Next Steps
+* Not yet verified by Fabio -- needs a walkthrough at his actual (large)
+  dataset scale: let the background sequence reach `isComplete` once, then
+  refresh -- confirm `farms` display instantly *and* the Network tab shows
+  no new `/api/farms/` requests at all (full resume, not just fast display).
+  Then try refreshing mid-sequence (before it completes) -- confirm it
+  continues from roughly where it left off rather than restarting at
+  `offset=0`.
+* Real corollary of true resume (called out when this tradeoff was first
+  offered, now the active choice): a farm that changes server-side (e.g.
+  insurance status flips) won't be reflected in the cached copy until
+  something eventually re-fetches its specific page -- once `isComplete` is
+  reached, that may never happen again automatically. No staleness
+  invalidation exists yet (e.g. re-running phase "all" periodically, or
+  after some elapsed time) -- flagging as a possible follow-up if stale data
+  becomes a real problem in practice, not built here since it wasn't asked
+  for.
+* `agrisuregis_farms_progress` is left uncleared on logout, same reasoning
+  as `agrisuregis_farms_cache` in the entry above (not user-specific data,
+  never rendered without a valid session).
+
+---
+
+## [2026-08-08] - Farm records: move the farms cache from localStorage to
+## IndexedDB (root cause of the "stuck at 16800" bug)
+
+Follow-up to the entry directly above. Fabio's walkthrough of "true resume"
+found it stuck: "Affected Farms" showed `0/16800`, unchanging across
+refreshes, with confirmed zero new backend requests (`curl` checks against
+`GET /api/farms/` directly proved the backend was completely healthy --
+`total: 48588`, `has_more: true` even at `offset=16795`; the real
+`tbl_farms` count via `psql` also confirmed `48588`).
+
+**Root cause, found via browser console:** `localStorage.getItem
+('agrisuregis_farms_progress')` returned `{"phase":"done","activeOffset":39,
+"allOffset":48588}` -- the fetch sequence had genuinely, correctly walked
+all 48,588 rows and correctly detected completion. But `JSON.parse
+(localStorage.getItem('agrisuregis_farms_cache')).length` was only `16800`.
+`localStorage` has a hard ~5-10MB per-origin quota (flagged as a risk in the
+entry above, but the actual failure mode wasn't yet understood). Once the
+serialized `farms` array grew past what ~16,800 real farm records encode to,
+every subsequent `persistFarmsCache()` call started throwing
+`QuotaExceededError` -- silently, since it's caught and treated as
+"best-effort, skip on failure." Meanwhile `persistProgress()`'s payload
+(`{phase, activeOffset, allOffset}`, a few dozen bytes) never came close to
+the quota and kept succeeding all the way to `"done"`. The two caches
+desynced: progress said "fully done," the farms cache silently froze at its
+last successful write. Every later `resume()` correctly trusted the
+(accurate) "done" progress marker and skipped fetching entirely -- but
+`farms` had seeded from the (stale, truncated) cache, so the UI stayed stuck
+at 16,800 forever with no way to notice.
+
+Confirmed with Fabio: move the (potentially large) farms array cache to
+IndexedDB, which doesn't have `localStorage`'s small quota ceiling. The tiny
+progress marker stays in `localStorage`, since it's the whole reason the two
+caches were distinguishable enough to diagnose this at all.
+
+### 1. File: `frontend/src/lib/useFarmsData.ts`
+* Replaced `loadCachedFarms()`/`persistFarmsCache()`'s `localStorage`
+  implementation with an `IndexedDB`-backed one (`openFarmsDb()` +
+  a single-record object store, db name `agrisuregis`, store
+  `farms_cache`). Both are now `async` (`IndexedDB`'s API is inherently
+  asynchronous, unlike `localStorage`), with the same fail-safe-on-any-error
+  philosophy as before (unavailable/disabled storage → treated as "nothing
+  cached" / "skip this write," never throws into calling code).
+* Added a one-time, unconditional `localStorage.removeItem
+  ('agrisuregis_farms_cache')` at module load -- the old cache key is now
+  orphaned dead weight, and since it was written right up to the quota
+  wall, leaving it in place risked *other* small `localStorage` writes
+  (the progress marker, `authStorage.ts`'s session) failing too.
+* `PROGRESS_CACHE_KEY` renamed to `agrisuregis_farms_progress_v2`. Without
+  this, the very first load after this fix would read the *old* progress
+  key's `"done"` state (persisted by the previous version of this hook)
+  against the *new*, empty IndexedDB cache -- reproducing this exact bug
+  immediately (progress says done, cache has nothing, farms render
+  permanently empty). Versioning the key forces one real walk instead.
+* Because the farms cache read is now async, `farms` state can no longer be
+  seeded synchronously via `useState`'s lazy initializer (`useState(() =>
+  ...)`, what the previous entry used) -- it now starts `[]` and is
+  populated inside the mount `useEffect`, after `await loadCachedFarms()`
+  resolves. `isLoadingFirstPage`'s default flipped from `false` to `true`
+  to cover this brief async gap (previously: default `false`, since a
+  synchronous `localStorage` read meant `farms` was correct from the very
+  first render) -- and is explicitly cleared after the cache read if
+  `phaseRef.current === "done"`, since in that case `fetchNextPage()`
+  (which normally clears it) never runs at all.
+* `hasLoadedOnceRef`'s initial value changed from `farms.length > 0`
+  (readable synchronously before) to unconditionally `false`, now set
+  `true` inside the mount effect once the async cache read resolves with
+  data, or by a successful `fetchNextPage()` -- same purpose as before
+  (distinguishing "nothing to show yet" from "quiet background top-up"),
+  just triggered from the new async path instead of the constructor-time
+  value.
+
+### Status / Next Steps
+* Tested by Fabio: the walk itself ran to real completion (progress marker
+  correctly reached `{"phase":"done",...,"allOffset":48588}`), but a reload
+  right around that point landed in the exact race this entry's own "Residual
+  risk" note below had already flagged -- see the next entry
+  (`[2026-08-08] - Farm records: close the IndexedDB write race behind
+  "done"`) for the follow-up fix and why the predicted risk turned out not to
+  be narrow enough to skip.
+
+## [2026-08-08] - Farm records: close the IndexedDB write race behind "done"
+
+Follow-up to the entry directly above. Fabio reloaded mid-testing (per that
+entry's own instructions, to check "does a second reload show zero new
+requests") and hit a fresh symptom: two stat cards on Monitoring disagreed on
+the farm total at the same moment (`Affected Farms: 0/48488` vs.
+`Active Insurance: 39/48588`) -- diagnosed as unrelated to this bug (they
+read from two independent sources, `farms.length` vs. a one-shot
+`GET /api/insurance/summary` `COUNT(*)`, explained and confirmed as a
+red herring). The real symptom, confirmed with Fabio afterward: the count
+climbed live, then permanently stopped at `48488` -- 100 rows (one page)
+short -- even though nothing on screen indicated loading was still in
+progress (neither `MonitoringModule.tsx` nor `SpatialAnalysisModule.tsx`
+gate any indicator on `isComplete`, only on `isLoadingFirstPage`, which
+clears after just the first page).
+
+**Root cause, confirmed via evidence at each step:**
+* `curl -sS "http://localhost:8000/api/farms/?limit=100&offset=48488&active_only=false"`
+  returned `total: 48588`, `has_more: false`, `len(data): 100`, farm_ids
+  `48489`-`48588` -- proving the backend was completely healthy and this was
+  the true, correct final page. Backend ruled out.
+* Browser console: `localStorage.getItem('agrisuregis_farms_progress_v2')`
+  returned `{"phase":"done","activeOffset":39,"allOffset":48588}` -- the
+  fetch sequence genuinely, correctly completed all 48,588 rows.
+* Browser console (reading the IndexedDB record directly): the cached
+  `farms` array held only `48488` entries -- matching the stuck on-screen
+  count exactly.
+* Fabio confirmed a reload happened between watching the count climb and it
+  landing on 48488. That reload is what exposed the bug: the tiny
+  `agrisuregis_farms_progress_v2` marker (`localStorage`) is written
+  *synchronously*, the instant a page's fetch resolves; the (much larger)
+  `IndexedDB` farms-array write was, until this fix, fired from a *separate*
+  `useEffect` keyed on `farms`, async and unawaited -- "best-effort," same
+  philosophy as the localStorage-quota-era version. The reload landed in the
+  gap: progress had already persisted `"done"` for the completing page, but
+  that page's IndexedDB write hadn't flushed yet. The new mount seeded
+  `farms` from the still-truncated (48488-row) cache, saw progress already
+  `"done"`, and `resume()` correctly no-op'd on `"done"` -- permanently
+  stuck, no further requests ever made. Same failure shape as the
+  `localStorage`-quota bug two entries above, different mechanism: a race
+  window instead of a hard wall. This is exactly the "residual risk" flagged
+  (but left unbuilt) in that entry's Status/Next Steps.
+
+### 1. File: `frontend/src/lib/useFarmsData.ts`
+* Added `farmsRef`, a ref mirroring `farms` state synchronously. Needed
+  because `setFarms(prev => mergeFarmsPage(prev, res.data))`'s updater isn't
+  guaranteed to have run yet by the time the code right after it needs the
+  merged array (React 18 batches state updates) -- `farmsRef.current` is
+  always the true current merged array, readable immediately.
+* `fetchNextPage()`: on the page that finishes the walk (`!res.has_more` in
+  phase `"all"`), now `await persistFarmsCache(mergedFarms)` *before* setting
+  `phaseRef.current = "done"` and before `persistProgress()` runs. This is
+  the actual fix -- it guarantees the complete farms array is durably in
+  IndexedDB before the progress marker is ever allowed to claim `"done"`, closing
+  the race a reload could land in. Every other (non-final) page keeps a
+  fire-and-forget `persistFarmsCache()` call, unchanged in spirit from
+  before -- a reload catching one of *those* mid-flight just resumes
+  normally via the persisted (non-`"done"`) progress and re-fetches whatever
+  the cache is missing, so only the final page's write needed to become
+  blocking.
+* Removed the separate `useEffect(() => { if (farms.length > 0)
+  persistFarmsCache(farms); }, [farms])` that previously drove all cache
+  writes -- superseded by the inline writes above (fire-and-forget mid-walk,
+  awaited on completion), which also avoids opening a fresh `IndexedDB`
+  connection on every single render-triggered `farms` change independent of
+  whether a fetch actually completed.
+* Mount effect: added a self-heal guard, checked right after seeding `farms`
+  from the IndexedDB cache. If loaded progress says `phase: "done"` but
+  `farmsRef.current.length !== allOffsetRef.current` (the "all" phase's
+  cumulative row count when it finished, which must equal the cached array's
+  length if that completing page's write truly landed), the `"done"` is
+  treated as unverifiable: falls back to `phaseRef.current = "all"`,
+  `allOffsetRef.current = 0`, `hasMore`/`isComplete` reset, and persists that
+  corrected progress immediately. Re-walking the `"all"` phase from scratch
+  is safe and idempotent (`mergeFarmsPage` dedupes by `farm_id`). This is
+  also what self-heals Fabio's already-stuck browser tab on its next
+  reload -- no manual cache-clearing needed -- and guards against any other
+  future cause of the same desync shape, not just this specific race.
+
+### Status / Next Steps
+* Verified by Fabio (2026-08-08): reload converged from 48488 to the true
+  48588, and a subsequent reload showed the count instantly with no further
+  `/api/farms/` requests.
+* The two stat-card totals reading from independent sources
+  (`farms.length` vs. `GET /api/insurance/summary`'s `COUNT(*)`) is a
+  pre-existing, separate characteristic, not touched by this fix -- flagged
+  during this investigation as a possible future inconsistency (most visible
+  transiently, mid-load, at real dataset scale) but out of scope here since
+  Fabio confirmed the frozen-count symptom, not the transient mismatch, was
+  the actual problem.
+
+## [2026-08-08] - Dev data: seed 1000 additional active InsuranceRecord rows
+
+Requested by Fabio directly (not tied to the Farm Records work above) so the
+dev DB's "active insurance" set is large enough to meaningfully exercise the
+app beyond the real dataset's tiny 39-farm active count -- e.g. testing the
+`useFarmsData` "active" phase (previously a single ~39-row page) against
+something closer to a realistic multi-page volume.
+
+### 1. File: `backend/seed_active_insurance.py` (new)
+* Standalone one-off script, same `psycopg2` connection style as the
+  existing `backend/seed_database.py` -- but unlike that script (which is
+  driven entirely by `pabs_results.csv` and isn't parameterized), this one
+  is a targeted, repeatable "add N active records" utility with no CSV
+  dependency.
+* `run()`: selects up to `TARGET_NEW_ACTIVE_RECORDS` (1000) farms at random
+  from `tbl_farms` via `NOT EXISTS (... WHERE effectivity_date <= today AND
+  expiry_date >= today)` -- i.e. farms with zero currently-active coverage,
+  the same "active" definition already used by
+  `backend/app/api/farms.py`'s `active_only` filter and
+  `backend/app/api/insurance.py`'s summary endpoint. Inserts one new
+  `InsuranceRecord` per selected farm:
+  * `policy_no = f"POL-SEED-{farm_id}"` -- deliberately distinct from both
+    the real dataset's plain numeric `policy_no` (e.g. `"1192155"`) and the
+    existing large synthetic batch's `"POL<digits>"` convention (e.g.
+    `"POL10483323900"`), so this batch stays trivially identifiable/
+    greppable (`WHERE policy_no LIKE 'POL-SEED-%'`) and reversible later
+    without touching real or previously-seeded rows.
+  * `program_type = "Rice Parametric"`, `amount_cover = area_size *
+    ₱25,000/ha` (rounded to 2dp) -- matches `pabs_results.csv`'s template
+    row convention (2.50 ha -> ₱62,500.00 `InsuredAmountofCover`) rather
+    than a flat amount, so the new rows don't stand out from real ones by
+    coverage size alone.
+  * `effectivity_date` = a random day within the last 30 days (not a single
+    shared date, so the batch doesn't read as obviously bulk-inserted),
+    `expiry_date` = `effectivity_date + 365 days` (standard annual policy
+    duration).
+  * `ON CONFLICT (policy_no, farm_id) DO NOTHING`, matching the existing
+    `uq_insurance_records_policy_no_farm_id` constraint's semantics.
+
+### Status / Next Steps
+* Run by Fabio via his own venv (`python seed_active_insurance.py` from
+  `backend/`) -- not run by Claude, per the repo's DB/venv command-handoff
+  rules. Reported inserting ~1000 rows.
+* Verified via `GET /api/insurance/summary`: `active_count` went `39` ->
+  `1039` (exactly +1000), `total_count` (total `InsuranceRecord` rows, not
+  farms) went `48588` -> `49588` (also exactly +1000) -- confirms the script
+  only added new rows and didn't touch or duplicate any existing ones.
+* Committed directly to `develop` (Fabio's choice) rather than behind a
+  feature branch, since it's a standalone dev-tooling/data script with no
+  application behavior change -- same category as `seed_database.py`.
+
+## [2026-08-09] - Farm Records: "most recent insurance per farm" NULLS-FIRST bug, then a 6-part farms-listing performance pass
+
+Two rounds of follow-up work in the same session, both triggered by testing
+`seed_active_insurance.py`'s output (see the entry above).
+
+### Round 1: NULLS FIRST bug in "most recent InsuranceRecord per farm"
+
+Fabio reported the Farm Records table (Active Insurance Only) stuck at 39-54
+records while Monitoring's Active Insurance stat card correctly showed
+~1036-1039. Root-caused: `GET /api/farms/?active_only=true` correctly
+*included* the 1000 newly-seeded farms (has an active record), but
+*displayed* the wrong record for ~949 of them -- `effectivity_date`/
+`expiry_date: null` instead of the new active dates.
+
+**Root cause:** `backend/app/api/farms.py`'s "most recent per farm"
+resolution (`order_by(InsuranceRecord.farm_id, InsuranceRecord.effectivity_date.desc())`,
+first-seen-per-farm_id wins) assumed Postgres sorts NULLs last in `DESC`
+order. It doesn't -- Postgres's default is NULLS FIRST for `DESC`, so a
+farm's old record with no dates set (common in the large synthetic batch)
+sorted *ahead of* a real dated record, and `setdefault()` picked the wrong
+one. Invisible until this session, since no farm had ever had 2+
+InsuranceRecords before `seed_active_insurance.py`.
+
+**Fix:** added `.nullslast()` to the ordering. Verified via curl against a
+sample of the previously-broken farm_ids (651, 880, 894) -- all 1000/1000
+rows in a full active_only=true page now correctly bracket today.
+
+#### File: `backend/app/api/farms.py`
+* `.order_by(InsuranceRecord.farm_id, InsuranceRecord.effectivity_date.desc().nullslast())`.
+
+### Round 2: 6-part performance pass (Fabio: "apply 1-6")
+
+Triggered by a side discussion about OFFSET pagination's cost profile --
+measured empirically (curl timing) at 54ms (offset=0) / 151ms (offset=24000)
+/ 264ms (offset=48000), confirming cost grows with depth. Fabio asked for
+all of it applied at once.
+
+#### 1. Keyset (cursor) pagination -- replaces OFFSET/LIMIT
+* `backend/app/api/farms.py`: `offset: int` param replaced with
+  `after_id: int` (0 = start). Filters `Farm.farm_id > after_id` instead of
+  `.offset()`. `total` still only computed on `after_id == 0` (unchanged
+  reasoning from the prior COUNT-skipping optimization); `has_more` no
+  longer needs `total` at all under keyset pagination -- just `len(data) ==
+  limit`.
+* `frontend/src/lib/api.ts`: `GetFarmsResult.offset` -> `after_id`;
+  `getFarms({ offset })` -> `getFarms({ after_id })`.
+* `frontend/src/lib/useFarmsData.ts`: `activeOffsetRef`/`allOffsetRef`
+  (OFFSET counters) replaced with `activeCursorRef`/`allCursorRef` (last-seen
+  `farm_id`), advanced from the last row of each returned page rather than
+  arithmetic on requested-offset + response-length. Added `allCountRef`, a
+  plain cumulative row counter *decoupled* from the cursor -- needed because
+  the mount effect's self-heal invariant (`farms.length` must equal the
+  "all" phase's total when `phase: "done"`) previously relied on
+  `allOffsetRef` doing double duty as both "resume position" and "count
+  fetched so far," which a farm_id cursor value can't do on its own.
+  `PROGRESS_CACHE_KEY` bumped `_v2` -> `_v3` (shape and semantics both
+  changed; an old record's numeric offsets would be silently wrong read
+  back as farm_id cursors).
+
+#### 2. Bigger pages
+* `PAGE_SIZE` (the "all" phase) raised from 100 to 1000 -- the backend's own
+  max `limit`. Was `ACTIVE_PAGE_SIZE`, a separate constant already at 1000
+  from the earlier active-phase speedup entry; now unified into one constant
+  since both phases use the same value. Cuts the "all" phase's walk from
+  ~486 requests to ~49.
+
+#### 3. Index for the active_only filter
+* `backend/app/models/models.py`: `InsuranceRecord.__table_args__` gained
+  `Index("ix_insurance_records_active_lookup", "effectivity_date",
+  "expiry_date", "farm_id")` -- a covering index (index-only scan) for
+  `active_only=True`'s `WHERE effectivity_date <= today AND expiry_date >=
+  today` / `DISTINCT farm_id` query.
+* `backend/init_schema.sql`: matching `CREATE INDEX` added, for future fresh
+  installs.
+* `backend/migrations/2026-08-09_farms_perf.sql` (new): standalone
+  `CREATE INDEX CONCURRENTLY` for Fabio's already-populated DB (re-running
+  `init_schema.sql` wholesale would `DROP TABLE` everything).
+
+#### 4. Optional Redis page-level cache
+* `backend/app/core/farms_cache.py` (new): `get_cached_farms_page()`/
+  `cache_farms_page()`/`invalidate_farms_cache()`. A no-op unless
+  `REDIS_URL` is set -- deliberately not a forced dependency (not added to
+  `requirements.txt`); degrades gracefully the same way the DB/venv/npm
+  handoff rules in `.claude/CLAUDE.md` treat any new local infrastructure.
+  Rationale: multiple real users each independently walking the same
+  ~48,588-farm dataset would otherwise each cost the DB the same queries
+  redundantly -- a shared cache means only the first request per page
+  actually hits Postgres. (Client-side IndexedDB caching only helps repeat
+  visits from the *same* browser, not a different user's first walk.)
+* `backend/app/api/farms.py`: checks the cache first, populates it after a
+  cache miss.
+* `backend/app/api/upload.py`: `invalidate_farms_cache()` called after a
+  successful CSV ingest and after a GPX boundary update (both change data
+  the cache could be serving stale).
+* `backend/seed_active_insurance.py`: also invalidates (best-effort, since
+  it writes outside the app) after inserting.
+
+#### 5. Materialized view for "most recent insurance per farm"
+* `backend/app/core/farms_view.py` (new): `mv_farm_latest_insurance`
+  precomputes what `list_farms()` otherwise resolves via bulk-fetch +
+  Python reduction on every request. `materialized_view_available()` checks
+  existence once and memoizes *only* a positive result -- a negative result
+  is cheaply re-checked every call, so applying the migration mid-session
+  is picked up by the very next request without restarting the backend
+  (this needed a follow-up fix after Fabio ran the migration and the
+  already-running process kept using the fallback path, having cached
+  `False` from testing before the migration existed).
+  `refresh_farm_latest_insurance_view()` uses `REFRESH ... CONCURRENTLY`
+  (needs the view's unique index) and is called from the same write paths
+  as `invalidate_farms_cache()` above.
+* `backend/app/api/farms.py`: uses the view when available, falls back to
+  the original bulk-fetch-and-reduce-in-Python path (with the Round 1
+  `.nullslast()` fix preserved) otherwise.
+* `backend/migrations/2026-08-09_farms_perf.sql`: `CREATE MATERIALIZED VIEW
+  IF NOT EXISTS` + its required unique index, `DISTINCT ON (farm_id) ...
+  ORDER BY farm_id, effectivity_date DESC NULLS LAST`.
+* `backend/init_schema.sql`: matching statements added for future fresh
+  installs.
+
+#### 6. DB connection pooling
+* `backend/app/core/database.py`: `create_engine(...)` gained explicit
+  `pool_size=10, max_overflow=20` (up from SQLAlchemy's unstated defaults of
+  5/10, sized for one local dev process, not concurrent real users),
+  `pool_pre_ping=True` (transparently replaces a connection that went stale
+  while idle instead of surfacing as a request failure), `pool_recycle=1800`
+  (proactively retires connections older than 30 minutes).
+
+### Status / Next Steps
+* Migration applied by Fabio (`psql -U agrisure_admin -d agrisure_db -f
+  migrations/2026-08-09_farms_perf.sql`) -- succeeded.
+* Verified via curl: keyset pagination pages correctly (cursor advances,
+  `has_more`/`total` semantics correct), materialized-view path returns the
+  same correct data as the Python fallback did.
+* Verified by Fabio: cleared frontend cache (`agrisuregis_farms_progress_v2`
+  removed, IndexedDB `agrisuregis` deleted, per the `_v3` bump), reloaded --
+  farms load correctly, counts reach the right totals, no errors.
+* Redis caching (item 4) is written but not enabled -- would need `pip
+  install redis`, a running Redis server, and `REDIS_URL` set in
+  `backend/.env`, none of which Fabio has done yet. Everything works
+  identically without it; enabling it is a future opt-in, not required.
+* `backend/seed_active_insurance.py`'s changelog entry (the one directly
+  above this one) is now slightly out of date in one respect: it predates
+  the NULLS FIRST bug fix, so re-reading it without this entry would miss
+  why the active-insurance data it seeds initially displayed incorrectly.
+
+## [2026-08-10] - REDIS_URL documented; TCB polling interval moved to minutes
+
+Two small follow-ups from the same day's remote-server-migration session.
+
+### 1. `REDIS_URL` documented (`backend/.env.example`, `.claude/ENV_GUIDE.md`)
+Fabio set up Redis locally (installed via `pacman`, started the service) to
+actually activate the optional page cache from the 2026-08-09 performance
+pass (`backend/app/core/farms_cache.py`). Added `REDIS_URL=` to
+`.env.example` with a placeholder and a row to `ENV_GUIDE.md`'s variable
+table, per that guide's own rule 4 ("add new variables to `.env.example` in
+the same commit"). `backend/.env` itself (gitignored) was updated directly
+with `REDIS_URL=redis://localhost:6379/0`, not part of this commit.
+
+### 2. TCB polling interval: hours -> minutes
+Fabio asked for the PAGASA bulletin scraper's polling interval to support
+15-minute granularity ("every 15 mins checking"). The prior implementation
+was hardcoded to whole hours at every layer (DB column, API validation,
+scheduler calls) with a 1-hour minimum -- confirmed with Fabio that this
+means the scraper hitting PAGASA's site up to 4x more often than that
+previous floor, since this polls an external third-party site, before
+implementing.
+
+#### Files
+* `backend/app/models/models.py`: `ParserSettings.polling_interval_hours`
+  (Integer, default 3) -> `polling_interval_minutes` (Integer, default 180
+  -- same real-world default of "every 3 hours," just expressed in minutes).
+* `backend/app/api/bulletins.py`: `ParserSettingsUpdate.polling_interval_hours`
+  (`ge=1, le=24`) -> `polling_interval_minutes` (`ge=15, le=1440` -- 1440 =
+  24h, same upper bound as before, just in minutes). `GET`/`PUT
+  /api/bulletins/settings` request/response bodies renamed to match.
+* `backend/app/core/scheduler.py`: `build_scheduler()`/
+  `reschedule_bulletin_job()` now pass `minutes=` to APScheduler instead of
+  `hours=`.
+* `backend/app/main.py`: reads `settings.polling_interval_minutes` (default
+  180 if no row exists yet) instead of `polling_interval_hours` (default 3)
+  when building the scheduler at startup.
+* `frontend/src/lib/api.ts`: `ParserSettings.polling_interval_minutes`;
+  `updateParserSettings(minutes)` (was `(hours)`).
+* `frontend/src/app/components/CalibrationModule.tsx`: `parserInterval`
+  state's default changed `3` -> `180`; the "TCB Polling Interval" input's
+  label, `min`/`max`/`step` (`15`/`1440`/`15`), and helper text all updated
+  to describe minutes instead of hours.
+* `backend/tests/test_parser_settings_api.py`: updated field names/values
+  and bound-rejection tests (`14`/`1441` instead of `0`/`25`).
+* `backend/migrations/2026-08-10_polling_interval_minutes.sql` (new):
+  `ALTER TABLE ... RENAME COLUMN polling_interval_hours TO
+  polling_interval_minutes`, then `UPDATE ... SET polling_interval_minutes
+  = polling_interval_minutes * 60` -- converts any already-persisted value
+  (e.g. `3`) to the equivalent real-world interval in minutes (`180`)
+  instead of silently reinterpreting it as 3 *minutes*, which would have
+  made the scheduler run 60x more often than intended for anyone with a
+  non-default saved interval.
+* `backend/init_schema.sql`: matching column rename for future fresh installs.
+
+### Status / Next Steps
+* `*.dump` added to `.gitignore` -- the `pg_dump` output used to migrate
+  data to the remote server (`agrisure_db.dump`, 1.7MB) is a data snapshot,
+  not source, and can carry real farmer/insurance data.
+* Not yet verified -- needs the migration applied and the backend restarted
+  on whichever DB(s) still have the old `polling_interval_hours` column
+  (both Fabio's local dev DB and the newly-provisioned remote server's DB).
+
+## [2026-08-10] - Containerize backend + Redis for the remote mock server
+
+Fabio's plan: run the backend and Redis (the optional page cache from the
+2026-08-09 performance pass, still never confirmed working anywhere) as
+Docker containers on the remote mock server (192.168.1.41), instead of the
+bare `uvicorn --reload` process it runs today, so that a `redis:alpine`
+sibling container finally activates `backend/app/core/farms_cache.py` for
+real. Postgres stays native on that machine (already `pg_restore`'d with
+~48,588 farms / 49,588 insurance records) -- only the backend app and
+Redis move into containers. Chose Redis-as-a-container over the
+earlier-discussed Memurai-on-bare-Windows alternative once Docker was
+already going to be introduced for the backend anyway.
+
+#### Files
+* `backend/requirements.txt`: committed the `redis==8.1.0` line (added
+  locally earlier but not yet committed) -- without this, `pip install -r
+  requirements.txt` inside the image wouldn't install `redis`, and
+  `farms_cache.py`'s `import redis` would fail silently inside its
+  `except Exception` guard, reproducing the exact "caching never actually
+  engages" gap this change exists to close.
+* `backend/Dockerfile` (new): `python:3.13-slim` base (placeholder --
+  must be confirmed against the remote venv's actual Python version before
+  building), installs `requirements.txt`, copies `app/` (including the
+  bundled `app/data/psgc_region10_boundaries.csv` PSGC lookup), no
+  `--reload` (deployed service now, not live-edited -- a code change means
+  `git pull` + `docker compose up --build`).
+* `backend/docker-compose.yml` (new): `backend` service (builds from the
+  Dockerfile, publishes `8000:8000`, reads `backend/.env` via `env_file:`
+  rather than inlining secrets in a tracked file, `depends_on: redis`) +
+  `redis` service (`redis:alpine`, named volume for restart persistence,
+  port intentionally not published -- only `backend` talks to it over
+  compose's internal DNS as `redis://redis:6379/0`).
+* `backend/.dockerignore` (new): excludes `venv/`/`.venv/` (hundreds of MB
+  with geopandas/numpy/pandas that would otherwise re-upload into the
+  Docker build context on every build), `__pycache__/`, `.env`, etc.
+
+#### Status / Next Steps
+* Not yet deployed -- remote-box steps (Postgres `listen_addresses`/
+  `pg_hba.conf`/firewall changes to let the container reach native
+  Postgres via `host.docker.internal`, `backend/.env` edit, `docker
+  compose build`/`up`, and updating `C:\Users\admin\check_backend.ps1`'s
+  restart action from spawning bare `uvicorn` to `docker compose restart
+  backend`) are all pending handoff to Fabio's own SSH session, one
+  command at a time.
+* Full plan: `/home/fabio/.claude/plans/so-this-is-the-happy-whisper.md`.
+* Separately, Tailscale is being set up on the same remote box for
+  outside-LAN SSH access -- independent of this containerization work,
+  no code/repo changes involved.
+
+## [2026-08-11] - Spatial Analysis tab: fix map ignoring the Active Insurance filter + add viewport culling
+
+Fabio reported the "Spatial Analysis & Data Import" tab (one component,
+despite the two-part label -- there's no separate Data Import module) is
+slow to click into. Investigation (two parallel Explore passes) found the
+farms data-fetching layer (`useFarmsData.ts`: shared, keyset-paginated,
+IndexedDB-cached) is already well-optimized and NOT the cause -- the
+slowness is entirely client-side map rendering:
+
+1. A real bug: the farm-records table respects the "Active Insurance Only"
+   toggle via `filteredFarms`, but the map was fed a separate, unfiltered
+   `farmRows` expression -- so the map silently ignored that toggle and
+   tried to render every farm in the shared cache (growing toward the full
+   ~48,588 rows as `useFarmsData`'s background "all" phase completes).
+2. No viewport limiting: `GISLeafletMap` gave every farm its own live
+   Leaflet layer (`<GeoJSON>` polygon or `<CircleMarker>`) with no
+   clustering and no bounds-based culling, so the map kept re-rendering
+   with more layers as more farms streamed into the shared cache.
+
+Fix direction chosen with Fabio: fix the filter bug, and add
+viewport-based culling directly in `GISLeafletMap.tsx` (only render farms
+currently within the visible map bounds) rather than adding a
+marker-clustering npm dependency -- clustering libraries only help point
+markers, not the polygon-heavy surveyed-farm case, and this needed no
+`npm install` handoff.
+
+#### Files
+* `frontend/src/app/components/SpatialAnalysisModule.tsx`:
+  `filteredFarms` (used by both the table and, now, the map) wrapped in
+  `useMemo` -- needed once it also feeds the map, since an unmemoized
+  version would hand `GISLeafletMap` a new array reference on every
+  unrelated re-render (e.g. typing in the municipality search box),
+  defeating the map's own memo chain. The `GISLeafletMap` `farms` prop
+  changed from a separate unfiltered `farmRows`/`.filter(municipality)`
+  expression to `filteredFarms` directly, so the map now respects
+  `activeInsuranceOnly` exactly like the table does.
+* `frontend/src/app/components/GISLeafletMap.tsx`:
+  - `surveyedFarms`/`unsurveyedFarms` (the has-geometry/no-geometry split)
+    wrapped in `useMemo` (was recomputed every render).
+  - Added `computeGeoJsonBBox()`/`bboxIntersects()`/`pointInBounds()`
+    helpers and a `surveyedBBoxByFarmId` cache (`useRef` Map, keyed by
+    `farm_id`, incremental -- only recomputes bbox math for farms not
+    already cached or whose `location_geom` reference changed).
+  - Added `MapBoundsWatcher` (mounted inside `MapContainer`, uses
+    react-leaflet's `useMapEvents`) reporting the map's current bounds on
+    mount and on every `moveend`/`zoomend` -- Leaflet's own discrete
+    end-of-gesture events, so no extra debounce timer was needed.
+  - Added `visibleSurveyedFarms`/`visibleUnsurveyedFarms` -- viewport-
+    culled subsets used only by the two `<GeoJSON>`/`<CircleMarker>`
+    render loops. Deliberately kept as *additional* derived arrays rather
+    than replacing `surveyedFarms`/`unsurveyedFarms`/`farms` in place,
+    since `selectedFarm` (`farms.find(...)`), `approxPlacements`,
+    `FlyToSelectedFarm`, and the legend all still need to resolve/operate
+    against the full farm set regardless of current viewport (e.g.
+    selecting an off-screen farm from the table must still fly to it).
+
+#### Status / Next Steps
+* Not yet verified end-to-end (frontend build/typecheck + manual browser
+  check) -- handed off to Fabio per the frontend-local-environment rule.
+* Full plan: `/home/fabio/.claude/plans/so-this-is-the-happy-whisper.md`.
+* Deliberately not addressed: a duplicate `getAssessments()` call between
+  `SpatialAnalysisModule` and `MonitoringModule` (each fetches
+  independently on mount, unlike the shared `farmsData`) -- low-cost
+  dataset, unrelated to the reported slowness, left for a separate cleanup
+  if wanted later.
+
+## [2026-08-11] - GeoServer setup rewritten for Docker on the remote mock server
+
+`.claude/GEOSERVER_SETUP.md` previously documented a native/JDK GeoServer
+install on Fabio's local machine. Rewritten to run GeoServer as a third
+Docker service on the remote mock server (192.168.1.41), alongside the
+`backend`/`redis` containers from the 2026-08-10/11 containerization work
+-- colocating it with the native Postgres it queries (avoids a network hop
+per internal PostGIS query GeoServer makes) and reusing the
+`host.docker.internal` reachability + Docker-subnet `pg_hba.conf`/firewall
+rules already set up for `backend`, rather than opening new surface area.
+Chose `docker.osgeo.org/geoserver:3.0.x` (current stable line, released
+June 2026) over the 2.x line, with a conservative `-Xms512m -Xmx1g` JVM
+heap given this box already runs `backend`, `redis`, native Postgres, and
+Docker Desktop itself.
+
+#### Files
+* `backend/docker-compose.yml`: added a `geoserver` service
+  (`docker.osgeo.org/geoserver:3.0.x`, port `8080:8080`, `env_file: .env`
+  for `GEOSERVER_ADMIN_USER`/`PASSWORD` -- kept out of this tracked file
+  same as `DATABASE_URL`/`REDIS_URL` -- `GEOSERVER_DATA_DIR`,
+  `EXTRA_JAVA_OPTS`, `SKIP_DEMO_DATA=true` to skip bundled demo layers) +
+  a `geoserver-data` named volume for persistence across restarts.
+* `.claude/GEOSERVER_SETUP.md`: full rewrite --
+  - Prerequisites/install section now points at the existing Docker Desktop
+    setup instead of a JDK, with an explicit note that building/pulling
+    this image needs the physical console on 192.168.1.41 (the same
+    Windows Credential Manager/DPAPI-over-SSH limitation hit building the
+    `backend` image), while day-to-day `restart`/`logs`/`ps` work fine
+    over SSH.
+  - Schema-change/backfill steps (`ALTER TABLE`, `backfill_admin_boundary_geom.py`)
+    changed from "your local venv" to "the remote box's venv over SSH,"
+    since `agrisure_db` lives there now, not locally.
+  - GeoServer's PostGIS datastore connection host changed from `localhost`
+    to `host.docker.internal` (GeoServer-in-a-container reaching
+    native Postgres, same indirection `backend`'s `DATABASE_URL` uses).
+  - CORS section kept the existing "handled by the Vite dev proxy, not
+    GeoServer" design (`CORS_ENABLED` is available on this image but
+    deliberately left off) -- added a new step 8 documenting the
+    `VITE_GEOSERVER_URL` value pointing at the remote box's LAN or
+    Tailscale address instead of `localhost`.
+  - All admin-UI/WMS/WFS URLs updated from `localhost:8080` to
+    `192.168.1.41:8080`.
+
+#### Status / Next Steps
+* **Deployed and verified 2026-08-11.** `.env` credentials, firewall rule,
+  `docker compose up -d` (needed the physical console the first time --
+  hit the same Docker Desktop credential-helper/logon-session bug as the
+  `backend` image, same fix), workspace/datastore, and both layers are
+  all live. WMS/WFS endpoints confirmed responding; frontend confirmed
+  loading boundaries from GeoServer with the overlay toggle working.
+* Hit and worked around a `docker.osgeo.org/geoserver:3.0.x`-specific bug:
+  "Compute from native bounds" corrupts the Lat/Lon Bounding Box (garbage
+  `0`/`-1` values) even though native SRS is already EPSG:4326 and no real
+  reprojection is needed. Workaround: use "Compute from data" only, then
+  manually copy those same values into the Lat/Lon Bounding Box fields.
+  `tbl_farms` also needed a real GPX uploaded first (this DB had zero
+  farms with `location_geom`) before it had any geometry to compute a bbox
+  from at all -- used a `backend/mock_data/gpx/` test file. See
+  `project_geoserver_deployed` memory for full details.
+* `frontend/.env`'s `VITE_GEOSERVER_URL` now set to
+  `http://100.80.128.92:8080/geoserver` (Tailscale address, matching
+  `VITE_API_BASE_URL`) -- gitignored, local-only change.
+
+## [2026-08-11] - Spatial Analysis map: remove approximate-placement circle markers for unsurveyed farms
+
+Fabio flagged solid gray blob shapes on the map (screenshot around
+Manolo Fortich, Bukidnon) suspecting they weren't real farm locations.
+Confirmed: `GISLeafletMap.tsx`'s `MUNICIPALITY_CENTERS` only defines real
+coordinates for 2 municipalities (`Talakag`, `Claveria`); every farm in
+any other municipality fell back to one shared `DEFAULT_CENTER` point.
+With ~48,588 farms and only 1 having a real GPX boundary (see the
+GeoServer deployment entry above), nearly the entire table collapsed onto
+2-3 shared points, rendered as a small grid of `<CircleMarker>`s dense
+enough to look like solid blobs rather than individual farm positions.
+
+Confirmed with Fabio: remove the circle-marker rendering entirely rather
+than improve the placement algorithm — the map now only shows farms with
+real GPX-surveyed boundaries.
+
+#### Files
+* `frontend/src/app/components/GISLeafletMap.tsx`:
+  - Removed the `visibleUnsurveyedFarms.map(...)` `<CircleMarker>` render
+    loop (was the "click to select as an upload target" affordance for
+    unsurveyed farms) and the now-unused `visibleUnsurveyedFarms` `useMemo`
+    + `pointInBounds()` helper it alone depended on.
+  - Kept `unsurveyedFarms`, `approxPlacements`, and `approximateFarmPosition()`
+    intact -- selecting an unsurveyed farm via the farm-records table still
+    flies the map to its approximate town-center position
+    (`FlyToSelectedFarm`'s `approxPos` prop), just without drawing a marker
+    there. Selecting one for GPX upload still works via the table's row
+    click, unaffected by this change.
+  - Removed the now-stale "Approximate (no GPX yet)" legend row and the
+    `CircleMarker` import (both otherwise-unused after the above).
+
+#### Status / Next Steps
+* Verified 2026-08-11 -- circles gone, everything else (selection, GPX
+  upload targeting) still works.
+
+## [2026-08-11] - Fix backend Docker build needing physical console (pin FROM to a digest)
+
+Fabio wants ordinary backend code updates buildable entirely over SSH,
+without the physical-console requirement hit during the initial
+containerization work ([[project_docker_containerization]]). Root cause
+was more specific than first thought: it's not just about pulling a
+*brand-new* image -- `docker images -a` on 192.168.1.41 showed
+`python:3.13-slim` was never actually stored as its own locally-tagged
+image at all (only the final `backend-backend:latest` image existed).
+Without a local tag-to-digest mapping, BuildKit's `FROM python:3.13-slim`
+step has to ask the registry "what does this tag currently point to?" on
+*every* build, not just the first -- and that resolution call is what
+hits the Windows Credential Manager/DPAPI-over-SSH limitation
+(`error getting credentials ... A specified logon session does not
+exist.`), independent of whether any actual layers end up needing to be
+downloaded.
+
+Fix: pin the Dockerfile's `FROM` to an exact digest instead of the
+mutable `:3.13-slim` tag. A digest reference is immutable, so BuildKit
+can match it against the local cache directly with no ambiguity to
+resolve -- no registry contact needed at all once it's cached under that
+exact digest.
+
+#### Files
+* `backend/Dockerfile`: `FROM python:3.13-slim` -> `FROM
+  python:3.13-slim@sha256:69e18bd8d831d88e0ef70239dc7771ab7c28bc296ae78ac75cde71e60aa4434f`
+  (linux/amd64, confirmed via Docker Hub's public API, not guessed).
+
+#### Status / Next Steps
+* **Verified 2026-08-11.** First build against the new digest ran at the
+  console as expected (one-time cost); a second build immediately after,
+  from an SSH session, succeeded with no credential error -- confirms
+  ordinary backend code rebuilds are now fully SSH-workable. A genuinely
+  new/updated base image (a real version bump, not this exact digest)
+  would still need the console once, same reasoning as before.
+* `redis:alpine` and `docker.osgeo.org/geoserver:3.0.x` are unaffected --
+  those are `image:`-referenced (pulled, not built) in
+  `backend/docker-compose.yml`, and `docker compose up`/`restart`'s
+  default pull policy only contacts the registry if the tag isn't already
+  present locally at all (it is, for both) -- no equivalent freshness-check
+  behavior to BuildKit's build-time tag resolution applies to them.
+
+## [2026-08-11] - UX Pass: Toast Notifications + Subtle Hover Polish
+
+Fabio asked for the app to feel more "lively"/interactive, referencing an
+external PCIC reference system (Sir Dave's) not available to compare
+against directly. Investigated the existing design system first rather
+than inventing new UI: confirmed the app's colors already match the
+prototype's official `--brand-green`/`--brand-blue`/`--brand-gold` tokens
+(`#166534`/`#1e3a5f`/`#ca8a04`), and found `sonner` toast notifications are
+already installed, imported, and mounted app-wide (`<Toaster richColors />`
+in `App.tsx`, already used for the typhoon-status notification bell) but
+unused by most success/error messages, which were still static inline
+banners. Used what was already approved/mounted rather than adding
+anything new.
+
+### 1. File: `frontend/src/app/components/MonitoringModule.tsx`
+* "Parse Latest Bulletin" (`handleParseLatest`) now shows `toast.success()`
+  (with the real `parsed_count` from `parseBulletins()`, previously
+  discarded) or `toast.error()` instead of setting `loadError` -- the
+  initial bulletin-list load error on mount is untouched (kept as an inline
+  banner, since that's persistent context for why the list is empty, not a
+  transient action result).
+* Stat cards: added `transition-shadow hover:shadow-md` -- were completely
+  flat/static before.
+
+### 2. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* Replaced the `uploadStatus` inline banner (CSV/GPX upload
+  success/failure) entirely with `toast.success()`/`toast.error()`. The GPX
+  batch-failure case keeps its "View details" action (now a toast action
+  button) opening the same `UploadFailuresModal` added earlier today --
+  `uploadStatus` state renamed to `uploadFailureDetails` (just the failure
+  list, since the toast itself now carries the summary message).
+
+### 3. File: `frontend/src/app/components/AssessmentModule.tsx`
+* "Compute Assessments" (`handleComputeAssessments`) now shows
+  `toast.success()`/`toast.error()` instead of the
+  `computeAssessmentsError`/`computeAssessmentsMessage` inline banners --
+  both states removed entirely, including their reset calls in
+  `handleSelectTyphoon`.
+
+### Status / Next Steps
+* Verified working directly with the user.
+* Scoped deliberately narrow (toasts for transient status + one hover
+  affordance) per explicit confirmation before implementing -- did not
+  touch layout, add new screens, or introduce colors outside the existing
+  brand tokens, per `CLAUDE.md`'s scope-guard rules.
+* Not pushed yet -- awaiting the user's own push per `CLAUDE.md`'s
+  git-handoff rules.
+* Separately noted: `backend/temp_bulletins/` has ~56MB of leftover PDFs
+  from earlier debugging (not gitignored) -- flagged to the user, not yet
+  cleaned up or added to `.gitignore`.
+
+## [2026-08-13] - Virtualize the Farm Records table (fixes 5-7GB RAM usage at ~50K farms)
+
+Fabio reported the frontend consuming 5-7GB RAM once the farms dataset
+loads close to its full ~48,588-row size. Root cause: the Farm Records
+table in `SpatialAnalysisModule.tsx` rendered one real `<tr>` (12 `<td>`s)
+per row via a bare `filteredFarms.map()`, with no virtualization -- once
+"Active Insurance Only" is off, or the background loader finishes filling
+in the complete farms set, that's tens of thousands of live DOM nodes plus
+their matching React fiber/VDOM objects mounted at once. This is separate
+from `GISLeafletMap.tsx`, which already got viewport-bbox culling in the
+2026-08-11 pass and was not the driver here -- only the table lacked any
+windowing.
+
+Also researched (not implemented, deliberately deferred as a separate,
+bigger follow-up): whether farm `location_geom` itself could be kept out
+of memory until needed. Conclusion: not without a backend change --
+`GISLeafletMap`'s viewport culling needs a bounding box for *every*
+surveyed farm (not just visible ones) to know what's currently on screen,
+and today that bbox is computed client-side from the full GeoJSON
+geometry, so the full polygon for every farm has to already be loaded
+before it can be reduced to a bbox. A real fix would move bbox computation
+to PostGIS (`GET /api/farms/` returning a cheap 4-number bbox instead of
+full geometry) and fetch full polygon geometry lazily, only for farms
+actually in the current viewport -- a real API-contract change, scoped
+separately per Sprint 3's Scope Guard, not bundled into this fix.
+
+#### Files
+* `frontend/src/app/components/SpatialAnalysisModule.tsx`:
+  - Added `ROW_HEIGHT` (33px, matches the table's current `px-2.5 py-2` /
+    `text-[11px]` row styling) and `OVERSCAN` (10 rows) constants.
+  - Added `tableScrollTop`/`tableViewportH` state, populated by a new
+    mount effect that measures `scrollContainerRef`'s `clientHeight` via
+    `ResizeObserver`, and an `onScroll` handler on the scroll container.
+  - Added `tableStartIndex`/`tableEndIndex`/`windowedFarms`/
+    `topSpacerHeight`/`bottomSpacerHeight`, derived from `filteredFarms`,
+    `tableScrollTop`, and `tableViewportH` -- same bbox-culling idea as
+    `GISLeafletMap`, applied to table scroll position instead of map
+    bounds. Falls back to rendering the first 50 rows before the first
+    viewport-height measurement lands, instead of "everything."
+  - `<tbody>` now renders `windowedFarms` (instead of all of
+    `filteredFarms`) as real `<tr>`s, bracketed by a top and bottom spacer
+    `<tr>` (empty `<td colSpan={12}>` sized via inline `height`) so the
+    scrollbar's size/position stays correct for the full row count. The
+    infinite-scroll sentinel row (`hasMore`) is unchanged, now placed
+    after the bottom spacer.
+
+#### Status / Next Steps
+* Not yet verified by Fabio -- frontend build/run is his local environment
+  per this file's execution rules; awaiting his confirmation that the
+  table scrolls/sorts/filters correctly and that RAM usage during a full
+  farms load actually drops.
+* Backend-assisted bbox + lazy-geometry-fetch (see above) is a candidate
+  follow-up task, not started.
+
+## [2026-08-13] - Normalize farmer-name and boundary casing to ALL CAPS on CSV ingest
+
+Fabio noticed farmer names coming out of `tbl_farmers_profile` show
+inconsistent capitalization (some ALL CAPS, some Title Case). Root cause:
+`prepare_row_payload()` in `upload.py` only ever stripped/None-coerced
+these fields via `_normalize_value()` -- it never changed case -- so
+`last_name`/`first_name`/`middle_name` and
+`AdminBoundary.province/municipality/barangay` were persisted exactly as
+the source PABS export typed them, and real exports are confirmed to mix
+ALL CAPS and Title Case within the same file. The only case-folding that
+existed was at *comparison* time (`_boundary_key()`'s `.upper()` for the
+AdminBoundary lookup, `func.lower(...)` in `GpxFarmerMatcherService`),
+never on the stored value.
+
+Scope, confirmed with Fabio: farmer names + boundary fields, normalized to
+ALL CAPS (matching `_boundary_key()`'s existing convention).
+Insurance/crop text fields (`program_type`, `product_name`, `crop_stage`)
+are explicitly out of scope. Forward-only -- no backfill of already-
+ingested rows.
+
+#### Files
+* `backend/app/api/upload.py`:
+  - Added `_normalize_text_upper()`: same cleanup as `_normalize_value()`,
+    plus `.upper()` on the result if it's a string. Applied to `farmer`
+    payload's `last_name`, `first_name`, `middle_name` in
+    `prepare_row_payload()`.
+  - `prepare_row_payload()`'s `boundary` dict (`province`/`municipality`/
+    `barangay`) is now built by feeding the raw normalized values through
+    `_boundary_key()` and using its output directly, instead of a
+    separate, un-uppercased `_normalize_value(...)` call -- removes the
+    previous duplication where the persisted row and the lookup key were
+    two independent normalizations of the same three fields (and could
+    diverge on casing). The downstream `_boundary_key()` call that builds
+    the get-or-create lookup key (unchanged) is now effectively a no-op
+    re-uppercase of already-uppercase values, kept as a safety net for
+    rows from any other path.
+* `backend/tests/test_upload_csv_ingestion.py`:
+  - Added `test_mixed_case_source_values_are_normalized_to_upper_on_ingest`:
+    feeds a mixed-case row (`"bukidnon,Malaybalay,CasiSang"` /
+    `"Abao"` / `"jonel"`) through `upload_csv()` and asserts the persisted
+    `FarmerProfile`/`AdminBoundary` rows come back as `"BUKIDNON"`,
+    `"MALAYBALAY"`, `"CASISANG"`, `"ABAO"`, `"JONEL"`.
+  - Existing `test_latin1_encoded_csv_with_accented_surname_is_ingested`
+    (asserts `farmer.last_name == "SEÑERES"`) is unaffected -- fixture
+    was already all-caps.
+
+#### Status / Next Steps
+* Verified by Fabio -- `cd backend && python -m pytest
+  tests/test_upload_csv_ingestion.py -v` passes, including the new casing
+  test and the existing `SEÑERES` test.
+* `GpxFarmerMatcherService` was confirmed read/match-only (never writes a
+  `FarmerProfile`/`Farm` row), so no change was needed there; its
+  case-insensitive `func.lower(func.trim(...))` matching continues to work
+  unchanged against ALL-CAPS-stored names.
+* No backfill script for already-ingested rows, per Fabio's explicit
+  choice -- existing data keeps whatever casing it was ingested with.
+
+## [2026-08-13] - PSGC boundary-name alias resolution on CSV ingest
+
+A ~48k-row CSV upload against the remote server logged hundreds of "No
+PSGC code on file" failures (`upload.py`'s per-row `ValueError`) for
+Caraga-area rows (Surigao del Norte/Sur, Agusan del Norte/Sur, Dinagat
+Islands). Investigated against `psgc_region10_boundaries.csv`: every
+failing province/municipality/barangay combination was **already present
+in the file** under a different spelling -- the file wasn't missing
+regions, `_boundary_key()`'s exact-match lookup just had no tolerance for
+common PH PSGC naming variants. Confirmed by manually diffing every
+distinct failure pattern from the log against the CSV's actual entries:
+- Municipality form: `"SURIGAO CITY"` vs. file's `"City of Surigao"`,
+  `"BAYUGAN CITY"` vs. `"City of Bayugan"`, `"BUTUAN CITY"` vs. `"City of
+  Butuan"`, `"STA. JOSEFA"` vs. `"Santa Josefa"`, `"STA. MONICA"` vs.
+  `"Santa Monica"`.
+- Trailing parenthetical qualifiers on municipality and/or barangay:
+  `"LIBJO (ALBOR)"` vs. `"Libjo"`, `"POBLACION (TUBOD)"` vs.
+  `"Poblacion"`, `"DIAZ (ROMUALDEZ)"` vs. `"Diaz"`.
+
+Considered and rejected: expanding to the full national PSGC dataset, or
+adding Region XI (Davao) -- neither addresses a naming-format mismatch,
+and both are out of scope per `.claude/PROJECT_CONTEXT.md`'s explicit
+PCIC Regional Office X-only deployment target.
+
+Scope, confirmed with Fabio: resolve municipality-form and
+parenthetical-qualifier variants (covers all 17 distinct failure patterns
+seen in the log); leave `seed_database.py`'s separate, non-normalized
+lookup path untouched for now.
+
+#### Files
+* `backend/app/api/upload.py`:
+  - Added `_strip_trailing_parenthetical()`: drops a trailing `"(...)"`
+    qualifier from a name. Verified against the full 2,258-row CSV that no
+    municipality has two distinct barangays differing only by such a
+    suffix, so this can't collapse two real places together.
+  - Added `_municipality_alias_variants()`: generates `"X CITY"` <->
+    `"City of X"` and `"Sta./Santo"` <-> `"Santa/Santo"` alternate
+    spellings for a municipality name.
+  - Added `_resolve_psgc_code()`: tries the exact `(province, municipality,
+    barangay)` key first, then retries with municipality alias variants
+    and/or the parenthetical stripped from municipality and/or barangay,
+    before reporting a miss. Every fallback stays scoped to the row's own
+    province (matching is always done within one already-identified
+    province), so it can never match across two different provinces.
+  - `_ingest_row()`'s PSGC lookup now calls `_resolve_psgc_code(boundary_key,
+    _load_psgc_lookup())` instead of a bare dict `.get()`.
+
+#### Status / Next Steps
+* Verified by Fabio -- `cd backend && python -m pytest -v` passes.
+* Verified all 17 distinct failure patterns from the actual upload log
+  resolve correctly against the real CSV data (standalone check, not
+  committed as a test fixture).
+* Still open, separate issue: the same upload run left the remote DB at
+  0 farms despite thousands of rows processing without incident in the
+  log -- `upload_csv()` does one `db.commit()` for the entire file (only
+  per-row `SAVEPOINT`s roll back individually), so whatever ended the
+  request after the logged rows rolled back everything, not just the
+  failed rows. Pending `docker compose ps` / `docker compose logs backend`
+  output from the remote box to identify the actual cause (crash/OOM vs.
+  timeout vs. an uncaught exception) before deciding on a fix (e.g.
+  periodic intermediate commits).
+* `seed_database.py` still reads `psgc_region10_boundaries.csv` through
+  its own separate lookup with no case-folding or alias resolution --
+  flagged, not fixed, per agreed scope.
+---
+
+## [2026-08-13] - Real Auth + Admin-Exclusive Panel (branch: gayla/frontend/admin-user-management)
+
+Fabio (via Discord) asked for three related UI changes: remove the "Access
+Level" role picker from Login (keep it on Registration, where it already
+was); move User Account Management out of the general Calibration &
+Settings screen into an admin-exclusive dedicated panel; and give System
+Administrators a different nav altogether, focused on admin
+privileges/maintenance instead of the regular GIS Specialist tabs. Confirmed
+scope with the user before starting: (1) only 2 real roles (GIS
+Specialist/System Administrator) supported, not the UI prototype's wider
+4-option dropdown (Data Analyst/Field Supervisor had no backing permission
+logic anywhere); (2) the *entire* Calibration & Settings screen (including
+User Management) becomes the admin-exclusive panel, not just the User
+Management section in isolation.
+
+Investigation before writing code found: login/registration were **entirely
+mocked** (`LoginScreen.tsx` compared credentials against a hardcoded
+`DEMO_ACCOUNTS` dict client-side; Registration's submit was a bare
+`setTimeout`, never persisted anywhere), `tbl_system_users`/`SystemUser`
+already existed as a DB model with zero backend API routes, and
+`CalibrationModule.tsx`'s "User Account Management" section already existed
+as a pixel-perfect port of the UI prototype's design (add/edit/deactivate
+modals, table) -- just wired to local mock state instead of a backend. So
+this is real end-to-end auth wiring, not new UI invention.
+
+### 1. File: `backend/app/api/users.py` (new)
+* `POST /users/register`: public self-registration, creates a pending
+  (`is_active=False`) `SystemUser` row awaiting admin approval.
+* `POST /users/login`: real credential check (`passlib` bcrypt), replaces
+  the old client-side `DEMO_ACCOUNTS` comparison. Rejects inactive
+  (pending/deactivated) accounts with 403. Returns the same `{name, role,
+  email}` shape `App.tsx`/`authStorage.ts` already expect, so nothing
+  downstream of a successful login needed to change.
+* `GET /users/`, `POST /users/` (admin-created, active immediately),
+  `PATCH /users/{id}` (edit / activate / deactivate) -- back Calibration's
+  User Account Management table.
+* `ALLOWED_ROLES` restricted to the 2 real roles, rejecting anything else
+  with 400.
+
+### 2. File: `backend/requirements.txt` / `requirements-win.txt`
+* Added `passlib==1.7.4` + `bcrypt==4.2.0` -- no password-hashing library
+  existed in this codebase before now.
+
+### 3. File: `backend/app/main.py`
+* Registered `users_router` under `/api`.
+
+### 4. File: `backend/seed_system_users.py` (new)
+* Seeds the two former `DEMO_ACCOUNTS` (Ana Reyes/GIS Specialist, Ramon
+  Santos/System Administrator) as real, active, bcrypt-hashed rows so the
+  same demo credentials shown on the login screen keep working end-to-end.
+  Idempotent (skips existing emails). Same raw-`psycopg2` script pattern as
+  `seed_active_insurance.py`. No schema change needed -- `tbl_system_users`
+  already existed.
+
+### 5. File: `frontend/src/lib/api.ts`
+* Added `SystemUser` type + `loginUser()`, `registerUser()`, `getUsers()`,
+  `createUser()`, `updateUser()`.
+
+### 6. File: `frontend/src/app/components/LoginScreen.tsx`
+* Removed the "Access Level" (GIS Specialist/Administrator) selector from
+  the login step entirely -- role now comes back from the server based on
+  which account matches, not a pre-selected client-side toggle. Kept on
+  `RegistrationPanel` (unchanged there, was already correct).
+* Login's `handleSubmit` now calls `loginUser()`; `RegistrationPanel`'s
+  `handleSubmit` now calls `registerUser()` -- both replace their previous
+  mock logic (`DEMO_ACCOUNTS` comparison / bare `setTimeout`).
+* `DEMO_ACCOUNTS` kept only as a small array driving the "Demo Credentials"
+  hint box (now shows both seeded accounts with per-account Auto-fill,
+  since there's no role toggle to key off of anymore).
+
+### 7. File: `frontend/src/app/components/CalibrationModule.tsx`
+* User Account Management section: replaced the local mock
+  `useState<UserEntry[]>([...])` with a real `getUsers()` fetch on mount
+  (`loadUsers()`, alongside the existing `getParserSettings()` call) plus
+  loading/error states.
+* `handleAddUser`/`handleSaveEditUser`/`handleDeleteUser` now call
+  `createUser()`/`updateUser()` instead of mutating local state directly --
+  each still updates the local `users` array from the real response so the
+  table reflects the server's state, not an optimistic guess.
+* Role `<select>` options (both Add and Edit modals) now come from the
+  shared `USER_ROLES` constant (2 roles), not the prototype's hardcoded
+  4-option list.
+* Layout/design otherwise untouched -- this section was already a faithful
+  port of the UI prototype.
+
+### 8. File: `frontend/src/app/components/Header.tsx`
+* `MODULES` split into `SPECIALIST_MODULES` (Monitoring/Spatial/Assessment)
+  and `ADMIN_MODULES` (a single "Admin Panel" entry, id still
+  `"calibration"` so `App.tsx`'s existing render branch didn't need a new
+  `ModuleId`) -- picked by `currentUser.role === "System Administrator"`.
+* The user-menu "Account Settings" shortcut (previously always routed to
+  `"calibration"`) is now only rendered for admins, relabeled "Admin
+  Panel" -- Specialists have no path to a tab that no longer exists for
+  them.
+
+### 9. File: `frontend/src/app/App.tsx`
+* Default `activeModule` now derived from role at both initial mount
+  (covers a refreshed/persisted admin session) and in `handleLogin` (covers
+  a fresh login) -- admins land on `"calibration"` directly instead of
+  `"monitoring"`, which isn't even a navigable tab for them.
+* Main content render gated by `currentUser.role` directly (not just
+  `activeModule`), as defense in depth -- a stale/mismatched
+  `activeModule` value can never render a Specialist tab for an Admin or
+  vice versa.
+
+### Status / Next Steps
+* Branch: `gayla/frontend/admin-user-management`, off `develop` -- per
+  Fabio's explicit request, **not** pushed straight to `develop` like some
+  recent work; this one goes through a PR for review.
+* Not yet tested end-to-end -- needs `pip install -r requirements-win.txt`
+  (passlib/bcrypt), `python seed_system_users.py`, then a real
+  login/registration/admin-CRUD pass in the running app before opening
+  the PR.
+* No DB schema/migration needed -- `tbl_system_users` already existed;
+  only new data (the seed script), not new structure.
+* **Follow-up same day:** dropped `passlib` entirely in favor of calling
+  `bcrypt` directly in both `users.py` and `seed_system_users.py` --
+  `passlib==1.7.4` (unmaintained since 2020) has a documented compatibility
+  bug with `bcrypt>=4.1.0` (reads a `__about__.__version__` attribute
+  bcrypt removed) that can silently break hashing/verification depending on
+  exact installed versions. Found while investigating an unconfirmed
+  "something's off" report from the user during testing -- not proven to be
+  the actual cause, but a real, well-documented risk worth eliminating
+  regardless. `passlib` removed from both requirements files; `bcrypt` was
+  already present.
+
+## [2026-08-16] - Admin Panel Split, Real Satellite Basemap, Real Backend-Driven Bulletin Alerts (branch: fabio/frontend/user-management-modal-polish)
+
+Testing the `gayla/frontend/admin-user-management` branch surfaced several
+follow-on requests from Fabio, all in the same direction: replace decorative/
+mock admin UI with either real backend behavior or nothing at all, and stop
+burying admin functions behind accordions. Branched off that work
+(`fabio/frontend/user-management-modal-polish`, not yet merged to `develop`)
+since it depends on the real-auth/admin-panel plumbing that branch adds.
+
+### 1. File: `frontend/src/app/components/CalibrationModule.tsx`
+* Restyled the Edit/Add User modals: `Users` icon in the modal header, form
+  fields wrapped in a `bg-muted/40` highlighted container (matching the
+  existing "Live Preview" callout convention), widened `400px` -> `420px`.
+  Same handlers/roles/checkbox, no behavior change.
+* Extracted "User Account Management" (state, handlers, both modals, table)
+  out entirely into a new standalone component/tab -- see file 4 below. No
+  longer a nested accordion section here.
+* Extracted "Database Backup & Restore" out entirely into a new standalone
+  component/tab -- see file 5 below.
+* Removed the "Google Earth Engine Credentials" section outright (not moved
+  anywhere) -- it was pure decorative UI: hardcoded demo `geeProjectId`/
+  `geeApiKey` state, no backend endpoint or real GEE integration existed
+  anywhere in `backend/`. Removed the now-unused `Key`/`Server`/`Eye`/
+  `EyeOff` icon imports with it.
+* Removed the entire "PAGASA Parser & Notification Settings" section (TCB
+  Polling Interval input, Alert Email Recipients input, Email Alerts
+  toggle, On-Screen Pop-up Alerts toggle) -- polling interval is now fixed
+  backend-side (file 6) and email alerts are now real backend automation
+  (file 7), so neither needs or has an admin-facing control anymore. The
+  in-app popup toggle was already decorative (no `onClick`, and the real
+  bulletin toast in `App.tsx` already fires unconditionally).
+* `getParserSettings()` on mount is now used purely as a backend-
+  connectivity ping for the System Status section -- no longer reads
+  `polling_interval_minutes` into local state.
+* `handleSave`/"Save All Settings" no longer calls `updateParserSettings`
+  (removed, see file 3) -- just shows the local "saved" toast.
+* Net effect: this screen now only covers System Status, RSBSA Coverage
+  Rate, Signal Damage Factor Table, Session & Security. Removed the now
+  fully-unused `ConfirmDialog` component/`confirm` state (Database Backup
+  was its only remaining caller) and `Users`/`Database`/`RefreshCw`/`Bell`/
+  `ToggleLeft`/`Plus`/`Trash2` icon imports.
+
+### 2. File: `frontend/src/app/components/UserManagementModule.tsx` (new)
+* Standalone admin page: the extracted User Account Management
+  state/handlers/modals/table from file 1, verbatim aside from no longer
+  being nested in an accordion (own page header + "+ Add User" button
+  where the section's inline button used to be). Own local `ConfirmDialog`
+  copy (small, no cross-file coupling needed for one dialog).
+
+### 3. File: `frontend/src/lib/api.ts`
+* Removed `updateParserSettings()` -- no longer called from anywhere now
+  that the TCB Polling Interval field is gone. `getParserSettings()` kept
+  (connectivity ping, see file 1).
+
+### 4. File: `frontend/src/app/components/DatabaseBackupModule.tsx` (new)
+* Standalone admin page: the extracted Database Backup & Restore
+  state/handlers/dialog from file 1, same treatment as file 2 (own
+  `ConfirmDialog` copy, own page header, no longer an accordion section).
+
+### 5. File: `frontend/src/app/components/Header.tsx`
+* `ADMIN_MODULES` grows from 1 entry to 3: "Admin Panel" (`calibration`),
+  "User Management" (new `"users"` `ModuleId`), "Database Backup" (new
+  `"backup"` `ModuleId`) -- admins now see three tabs instead of one.
+
+### 6. File: `frontend/src/app/App.tsx`
+* Admin render branch now switches on `activeModule` between
+  `CalibrationModule`/`UserManagementModule`/`DatabaseBackupModule`
+  (previously always rendered `CalibrationModule` for any admin, since
+  there was only one admin tab) -- falls back to `CalibrationModule` for
+  any unrecognized value, preserving the original "never render blank for
+  an admin" defensive intent.
+* New import: `UserManagementModule`, `DatabaseBackupModule`.
+
+### 7. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* Replaced the Google Maps/`googlemutant` satellite layer (gated behind an
+  unset `VITE_GOOGLE_MAPS_API_KEY`, so it was silently falling back to
+  OpenStreetMap street tiles -- Google Maps Platform needs a billing-
+  enabled GCP key that was never provisioned) with a single, always-on
+  **Esri World Imagery** `TileLayer` -- free, no API key/billing, high-
+  resolution (often sub-meter in populated/agricultural areas), a curated
+  best-available mosaic so it reads as cloud-free in practice. Removed the
+  `GoogleSatelliteLayer` component, its dynamic Google Maps script loader,
+  and the `GOOGLE_MAPS_API_KEY` env read entirely.
+* Removed `import "leaflet.gridlayer.googlemutant"`.
+
+### 8. File: `frontend/package.json`
+* Removed the now-unused `leaflet.gridlayer.googlemutant` dependency.
+  **Needs `npm install` to sync `node_modules`/lockfile.**
+
+### 9. File: `frontend/src/leaflet-plugins.d.ts` (dead, pending deletion)
+* Only declared types for the now-removed `googlemutant` plugin +
+  `Window.google`. Harmless if left (nothing imports it), but should be
+  deleted (`rm frontend/src/leaflet-plugins.d.ts`) -- blocked on Fabio's
+  own approval/environment, not run via tool call.
+
+### 10. File: `backend/app/core/scheduler.py`
+* New `FIXED_POLL_INTERVAL_MINUTES = 15` module constant -- TCB polling is
+  no longer admin-configurable (was `tbl_parser_settings.
+  polling_interval_minutes`, adjustable 15-1440 min via the now-removed
+  Calibration UI field). `tbl_parser_settings` and the
+  `/api/bulletins/settings` GET/PUT routes are left in place (GET still
+  used as a connectivity ping; PUT is just unreachable from the UI now,
+  not deleted) rather than touching schema/migrations without an explicit
+  ask.
+* `run_scheduled_scrape()`: `created` bulletins list is now initialized
+  before the scrape `try` block (so it's always defined even if the scrape
+  itself raises) and, after the existing active-typhoon sync step, calls
+  `send_new_bulletin_alerts(created, db)` (file 12) in its own try/except
+  -- runs *after* the sync so `Typhoon.is_active` reflects this cycle's
+  freshest status, not the previous poll's.
+
+### 11. File: `backend/app/main.py`
+* `lifespan()` no longer queries `ParserSettings` from the DB at startup --
+  passes `FIXED_POLL_INTERVAL_MINUTES` straight to `build_scheduler()`.
+  Dropped the now-unused `SessionLocal` import/session.
+
+### 12. File: `backend/app/services/email_alert_service.py` (new)
+* `send_new_bulletin_alerts(created, db)`: real SMTP email alerts, replacing
+  the old Calibration screen's decorative "Alert Email Recipients" text
+  field (hardcoded `defaultValue`, no `onChange`, never wired to anything)
+  and "Email Alerts" toggle. Per Fabio's explicit instructions:
+  - Recipients are **all** `tbl_system_users` rows with `is_active = true`
+    -- not a manually-maintained address list.
+  - Only fires for a newly-created bulletin whose `Typhoon.is_active` is
+    currently `True` (re-fetches each `created` dict's bulletin by
+    `tcb_id` to reach its `typhoon` relationship, since the scrape
+    function's return shape doesn't include `typhoon_id`) -- a bulletin
+    that parses successfully for a typhoon PAGASA no longer lists as
+    active is deliberately **not** alerted on.
+  - Same "no-op unless configured" convention as `farms_cache.py`'s
+    optional Redis cache: missing `SMTP_HOST`/`SMTP_USER`/`SMTP_PASSWORD`
+    means the function logs and returns, no error. Uses `smtplib`/
+    `email.mime.text` (stdlib) -- no new pip dependency.
+  - One BCC-style email per alert-worthy batch (recipients passed to
+    `smtplib.SMTP.sendmail()`'s envelope list, not a visible header, so
+    active users' addresses aren't exposed to each other); `To:`/`From:`
+    both set to `SMTP_USER`.
+  - Never raises -- SMTP failure is logged and swallowed, so it can't take
+    down the scrape/parse request or the scheduler thread.
+
+### 13. File: `backend/app/core/scheduler.py` / `backend/app/api/bulletins.py`
+* Both the scheduled background poll (`run_scheduled_scrape`) and the
+  manual "Parse Latest Bulletin" button's route (`trigger_pagasa_scrape`)
+  now call `send_new_bulletin_alerts()` after their respective
+  active-typhoon sync steps -- a manual parse notifies active users the
+  same as an automatic one, since the old UI copy never distinguished
+  "scheduled" vs "manual" for this ("Send email when new TCB is
+  downloaded").
+
+### 14. File: `backend/.env.example` / `.claude/ENV_GUIDE.md`
+* Added `SMTP_PORT` (default `587`, STARTTLS) -- `SMTP_HOST`/`SMTP_USER`/
+  `SMTP_PASSWORD` were already scaffolded as placeholders from an earlier
+  session but never had working code behind them until now. Documented the
+  "unset = no-op" behavior and that `SMTP_USER` doubles as the From/To
+  address.
+
+### Status / Next Steps
+* Not tested end-to-end -- needs, in Fabio's own environment: `npm install`
+  (dependency removal), a dev-server restart (structural frontend changes,
+  not hot-reloadable), and a real SMTP account's credentials in
+  `backend/.env` to actually exercise the email alert path (untestable
+  without them; the no-op path was the only one verifiable here).
+* `backend/app/services/email_alert_service.py` is new and unit-untested --
+  Fabio should run the backend test suite (`python -m pytest`) himself
+  once SMTP credentials are available, and ideally trigger one real manual
+  parse against a known-active typhoon to confirm delivery end-to-end.
+* `tbl_parser_settings` table and its API routes were deliberately left in
+  place rather than removed -- flagging in case Fabio wants that cleaned
+  up properly (schema/migration decision, out of scope for this pass).
+* `frontend/src/leaflet-plugins.d.ts` still needs manual deletion (see
+  file 9) -- blocked on tool sandboxing, not forgotten.
+
+## [2026-08-16] - Real Session-Token Auth, Per-Account Session Timeout, Activity Log (branch: fabio/frontend/user-management-modal-polish)
+
+Same-day follow-on from the entry above. Testing surfaced that the
+Calibration screen's "Session Timeout" dropdown was decorative (set local
+state, nothing read it) -- same category as the other mocks fixed earlier
+today. Investigating what a *real* session timeout would need surfaced a
+much bigger gap: **login issued no token at all**. `POST /api/users/login`
+returned a plain `{name, role, email}` object; the frontend trusted it
+forever in `localStorage`; and no backend route -- including the
+already-admin-gated user-management ones -- ever verified who (or whether
+anyone) was calling it. "Admin-only" was purely a frontend UI convention;
+any route was directly callable by anyone, logged in or not. Fabio confirmed
+scope to fix this for real rather than build session timeout on top of
+nothing: a real signed session token, checked on every route, plus (his
+separate, explicit request) a new admin-only Activity Log recording login,
+logout, and every mutating backend call.
+
+Key design decisions, confirmed with Fabio before implementing:
+- **Stateless JWT, not a DB session table.** Token is invalidated by the
+  frontend discarding it (explicit Logout, or the client-side idle timer)
+  -- not a server-side expiry/blocklist. The token's own `exp` claim (24h)
+  is a fixed safety-net upper bound, not the timeout mechanism.
+- **Session timeout is per-account (DB-backed), not per-browser.** Follows
+  a user to any device they log into, admin-editable from User Management
+  -- resolved after Fabio pointed out a client-only/localStorage-only
+  version wouldn't follow a user to a second PC.
+- **Enforcement is entirely client-side**, via real mouse/keyboard/scroll
+  activity tracking. No server-side heartbeat/last-seen call -- explicitly
+  dropped per Fabio's direction once it was clear the token itself doesn't
+  time out server-side, so a heartbeat wouldn't be doing any security work,
+  only cosmetic "last seen" tracking nobody asked for.
+- **Activity Log records login/logout + mutating calls only** (POST/PUT/
+  PATCH/DELETE), not GETs -- read traffic would drown the log in noise.
+
+### 1. File: `backend/requirements.txt` / `requirements-win.txt`
+* Added `PyJWT==2.10.1`. **Needs `pip install -r requirements(-win).txt`.**
+
+### 2. File: `backend/.env.example` / `.claude/ENV_GUIDE.md`
+* New **required** `JWT_SECRET_KEY` -- deliberately no insecure hardcoded
+  fallback like `DATABASE_URL` has (this is what makes tokens unforgeable).
+  Documented generating one via `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
+
+### 3. File: `backend/app/core/security.py` (new)
+* `create_access_token(user)` -- signs a JWT (`sub`=user_id, `role`, 24h
+  fixed `exp`) with `JWT_SECRET_KEY`. Raises `RuntimeError` at import time
+  if `JWT_SECRET_KEY` is unset, so the backend refuses to start without it
+  rather than silently signing tokens with a guessable default.
+* `get_current_user(request, authorization, db)` -- verifies the
+  `Authorization: Bearer <token>` header FastAPI dependency; re-checks
+  `is_active` on every request (not just at login), so deactivating a user
+  invalidates their token immediately instead of waiting for it to expire.
+  Stamps `request.state.user` -- read back by main.py's activity-log
+  middleware after the route finishes.
+* `require_admin(user)` -- layers a `role == "System Administrator"` check
+  on top, for the genuinely admin-exclusive routes.
+
+### 4. File: `backend/migrations/2026-08-16_session_timeout_minutes.sql` (new) / `backend/init_schema.sql`
+* `ALTER TABLE tbl_system_users ADD COLUMN session_timeout_minutes INT NOT NULL DEFAULT 5`.
+  0 = disabled. `init_schema.sql` updated to create it directly for fresh installs.
+
+### 5. File: `backend/migrations/2026-08-16_activity_log.sql` (new) / `backend/init_schema.sql`
+* New `tbl_activity_log` table (`log_id`, `user_id` FK **nullable** -- a
+  failed/anonymous login attempt has no confirmed identity but is still
+  worth recording, `action`, `endpoint`, `status_code`, `created_at`) +
+  indexes on `created_at DESC` and `user_id`.
+
+### 6. File: `backend/app/models/models.py`
+* `SystemUser`: new `session_timeout_minutes` column (default 5, matches
+  the migration).
+* New `ActivityLog` model (`tbl_activity_log`), with a `user` relationship
+  for the admin-only list endpoint's join.
+
+### 7. File: `backend/app/core/activity_log.py` (new)
+* `record_activity(db, user_id, action, endpoint, status_code)` -- shared
+  write helper used by both main.py's generic middleware (file 9) and
+  `users.py`'s explicit LOGIN/LOGOUT logging (file 8). Never raises -- a
+  logging failure must not break the request it's describing; each write
+  is its own short-lived commit, not sharing a transaction with whatever
+  the route itself is doing.
+
+### 8. File: `backend/app/api/users.py`
+* `POST /login` now returns a real `token` (via `create_access_token`)
+  alongside `user`, which also grew a `session_timeout_minutes` field.
+  Explicitly logs a `LOGIN` activity-log entry on every outcome (invalid
+  credentials, pending-approval, and success) -- not left to the generic
+  middleware, since a failed login has no bearer token yet for
+  `get_current_user` to have resolved an acting user from.
+* New `POST /logout` -- does nothing to the token itself (stateless, no
+  blocklist), exists purely so a `LOGOUT` entry gets recorded before the
+  frontend clears local storage.
+* `GET /`, `POST /`, `PATCH /{user_id}` now require `Depends(require_admin)`
+  -- previously callable by anyone. `POST /register` and `POST /login`
+  stay public (that's how a token is obtained in the first place).
+* `UpdateUserRequest` gained `session_timeout_minutes` (0-120, validated);
+  `update_user` applies it; `_user_to_dict` serializes it.
+
+### 9. File: `backend/app/api/bulletins.py` / `farms.py` / `assessments.py` / `insurance.py` / `typhoons.py` / `upload.py`
+* Each router now declares `dependencies=[Depends(get_current_user)]` at
+  the `APIRouter(...)` level -- one line per file, requires a valid token
+  for every route in that router at once. This is the change that actually
+  closes the "anyone can call any endpoint directly" gap app-wide, not just
+  for user management.
+
+### 10. File: `backend/app/main.py`
+* New `activity_log_middleware` (`@app.middleware("http")`) -- logs every
+  POST/PUT/PATCH/DELETE request after it completes, resolving the acting
+  user from `request.state.user`. Skips `/api/users/login` and
+  `/api/users/logout` (self-logged, see file 8) to avoid double-logging
+  them as a generic `"POST"`.
+* Registers the new `activity_log_router` (file 11).
+
+### 11. File: `backend/app/api/activity_log.py` (new)
+* `GET /api/activity-log/` (admin-only via router-level `Depends(require_admin)`)
+  -- newest-first, capped at `limit` (default/max 200/1000; this table has
+  no upper bound on growth, so an unbounded query isn't safe long-term),
+  optional `user_id` filter. Joins `ActivityLog.user` for display name/email.
+
+### 12. File: `frontend/src/lib/authStorage.ts`
+* `CurrentUser` gained `session_timeout_minutes`. New `persistToken()`/
+  `loadPersistedToken()` (separate `localStorage` key from the user object)
+  -- `clearPersistedUser()` now also clears the token.
+
+### 13. File: `frontend/src/lib/api.ts`
+* `request()` now attaches `Authorization: Bearer <token>` to every call
+  (harmless no-op on the two public routes) and force-clears storage +
+  reloads to the login screen on a `401` from anywhere except login/register
+  (a failed login 401 is a normal wrong-password case, not "your session
+  died," so it's excluded from the force-logout path).
+* `LoginResult` gained `token` + `user.session_timeout_minutes`.
+* New `logoutUser()` (`POST /api/users/logout`) and `getActivityLog()`
+  (`GET /api/activity-log/`, new `ActivityLogEntry` type).
+* `SystemUser`/`UpdateUserPayload` gained `session_timeout_minutes`.
+
+### 14. File: `frontend/src/app/components/LoginScreen.tsx`
+* `onLogin` now passes `(user, token)` instead of just `user`.
+
+### 15. File: `frontend/src/app/App.tsx`
+* `handleLogin` persists the token too (`persistToken`); `handleLogout`
+  fire-and-forgets `logoutUser()` (records the LOGOUT entry) *before*
+  clearing storage, so the call still has a valid token to authenticate
+  with -- logout itself must never be blocked by a slow/failed request.
+* New idle-timeout `useEffect`: real `mousemove`/`keydown`/`mousedown`/
+  `scroll`/`touchstart` listeners only -- deliberately **not** the existing
+  60s background bulletin poll, which is a fetch the app makes on its own,
+  not the user doing anything; counting it would mean a tab left open and
+  genuinely untouched never actually goes idle. Resets a `setTimeout` on
+  activity; fires `handleLogout()` after `currentUser.session_timeout_minutes`
+  idle minutes (skipped entirely if `0`/disabled).
+* Admin render branch now also handles `activeModule === "activity"` ->
+  `ActivityLogModule`.
+
+### 16. File: `frontend/src/app/components/UserManagementModule.tsx`
+* Edit User modal: replaced nothing, *added* a "Session Timeout" `<select>`
+  (same `[0,5,10,15,30]`/"Disabled" convention as the old decorative
+  Calibration dropdown) wired to the real field via `handleSaveEditUser`.
+
+### 17. File: `frontend/src/app/components/ActivityLogModule.tsx` (new)
+* New admin tab: read-only table (timestamp, user, action, endpoint,
+  status) backed by `getActivityLog()`, action-colored badges, manual
+  Refresh button. No auto-poll -- admin-initiated refresh only.
+
+### 18. File: `frontend/src/app/components/Header.tsx`
+* `ADMIN_MODULES` grows to 4 entries: Admin Panel / User Management /
+  Database Backup / **Activity Log** (new `"activity"` `ModuleId`).
+
+### Status / Next Steps
+* **Not tested end-to-end at all** -- this is the largest, highest-risk
+  change of the session. Before this ships anywhere near `develop`, Fabio
+  needs to, in his own environment: `pip install -r requirements(-win).txt`
+  (PyJWT), generate and set `JWT_SECRET_KEY` in `backend/.env` (backend
+  **will not start** without it), apply both new migrations (local *and*
+  remote -- the 2026-08-10 polling-interval migration was previously only
+  applied to remote, don't repeat that split here), `npm install`/restart
+  the frontend, and then a real login/logout/idle-timeout/admin-CRUD/
+  Activity-Log pass in the running app.
+* Every existing frontend `fetch`-based call now depends on a valid token
+  being attached -- if anything was calling `fetch()` directly instead of
+  through `api.ts`'s `request()`, it will start getting 401s. Worth a
+  search before merging.
+* `python -m pytest` has not been run against any of this.
+* Token expiry is a fixed 24h from issuance, every login -- a user who
+  logs in and leaves their session open (not idle, just open) past 24h
+  will be force-logged-out by the `401` handler regardless of activity.
+  Not raised as a problem, just flagging it's a real behavior, not a bug,
+  if it comes up in testing.
+
+## [2026-08-16] - Real Upload Progress: CSV Job Polling + GPX Batch Counter (branch: fabio/frontend/user-management-modal-polish)
+
+Same-day follow-on. Asked whether ingestion progress could be tracked and
+where a loading bar would best go in Spatial Analysis. Investigated both
+upload paths first rather than assuming: GPX already uploads one file at a
+time in a loop, so "file 3 of 12" was trivially trackable client-side with
+no backend change. CSV was a single synchronous request that fully
+processed the file (parse -> farmer-match -> insert, row by row) before
+responding at all -- zero progress visibility, and a real percentage would
+need the row loop's actual position exposed somehow, not a fake/simulated
+bar. Fabio confirmed he wanted the real thing for CSV too, not just a
+spinner, which meant moving that row loop off the request thread entirely.
+
+### 1. File: `backend/app/core/upload_jobs.py` (new)
+* In-memory job registry (`create_job`/`update_progress`/`mark_done`/
+  `mark_error`/`get_job`), lock-protected dict keyed by a UUID job id.
+  Deliberately plain in-process memory, not Redis/a DB table -- same
+  single-worker assumption already documented for the APScheduler job in
+  `scheduler.py` (this repo's dev setup is one `uvicorn` process). Jobs are
+  never explicitly cleaned up -- not worth the complexity at this scale.
+
+### 2. File: `backend/app/api/upload.py`
+* Split `upload_csv`'s body: file validation + parsing stays synchronous
+  in the route (fast); the row-by-row ingestion loop (previously the whole
+  function body) moved into a new `_run_csv_ingestion()`, run in a
+  `threading.Thread` with its **own** `SessionLocal()` session -- the
+  request's `Depends(get_db)` session closes the moment the route returns,
+  long before a real multi-thousand-row export's loop finishes. Logic
+  inside the loop is otherwise unchanged; it now calls
+  `upload_jobs.update_progress(job_id, progress_count)` every row (cheap
+  in-memory write) and `mark_done()`/`mark_error()` at the end instead of
+  `return`ing/raising directly, since there's no request left to return
+  into by the time it finishes.
+* `POST /csv` now returns immediately: `{status: "processing", job_id,
+  total_rows}`, instead of blocking until ingestion completes.
+* New `GET /csv/status/{job_id}` -- `{status, processed, total, result,
+  error}`, polled by the frontend. 404s if the job_id is unknown (e.g. a
+  backend restart wiped the in-memory registry mid-upload).
+
+### 3. File: `frontend/src/lib/api.ts`
+* `uploadCsv()` return type changed from the final ingestion result to
+  `StartCsvUploadResult` (`{status, job_id, total_rows}`).
+* New `getCsvUploadStatus(jobId)` (`GET /api/upload/csv/status/{jobId}`)
+  and `CsvUploadStatus` type -- `result` is the same `UploadCsvResult`
+  shape the old synchronous response used to return directly.
+
+### 4. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* `handleCsvFileSelected` now starts the job, then polls
+  `getCsvUploadStatus()` every 500ms, updating `csvUploadProgress`
+  (`{processed, total}`) until `status: "done"` (shows the same success
+  toast as before, from `status.result`) or `"error"`.
+* `handleGpxFilesSelected` now tracks `gpxUploadProgress`
+  (`{current, total}`), updated after each file in the existing
+  upload-one-at-a-time loop -- no backend change needed, each completed
+  file already was the progress signal.
+* Both "Upload CSV"/"Upload GPX" buttons in the map toolbar (chosen over a
+  separate bar under the toolbar -- the row is already a tight single-line
+  strip of compact controls, and swapping the button's own contents needed
+  no new layout space) now show a spinner + real progress
+  (`Uploading… 47%` / `Uploading 3/12…`) and disable themselves while
+  their respective upload is in flight.
+
+### 5. File: `frontend/src/app/components/SpatialModule.tsx`
+* Dead/unreachable code (confirmed earlier -- nothing imports this
+  component), but still part of the TypeScript build, so `uploadCsv()`'s
+  changed return shape would have broken compilation. Minimally patched
+  to stay type-compatible (reports "Upload started (N rows)" instead of a
+  final result) rather than investing in building out real polling for
+  code nothing renders.
+
+### Status / Next Steps
+* Not tested -- needs a real large-ish CSV upload against a running
+  backend+frontend to confirm the progress bar actually moves smoothly and
+  the final toast/refresh still fires correctly.
+* The in-memory job registry does not survive a backend restart -- an
+  upload in progress when the backend restarts (e.g. `--reload` picking up
+  an unrelated code change) will leave the frontend polling a job_id that
+  now 404s; the row loop itself would also be killed mid-thread, so the
+  ingestion is genuinely incomplete in that case, not just the progress
+  display. Not handled specially -- surfaces as a normal upload-failed
+  toast.
+* No per-user ownership check on `GET /csv/status/{job_id}` -- any
+  authenticated user who knows a job_id (a UUID, not guessable) can poll
+  its status. Acceptable for this app's scale/threat model, not flagged
+  as something to fix now.
+
+---
+
+## [2026-08-16] - Self-Service Account Settings Tab (branch: fabio/frontend/user-management-modal-polish)
+
+Same-day follow-on. Fabio asked for a window where any logged-in user (not
+just an admin editing others) can edit their own session timeout, plus
+"similar features" -- confirmed via follow-up: full name, email, password,
+and session timeout, surfaced as a new dedicated nav tab available to every
+role (not a dropdown modal, not admin-only). No UI-prototype precedent for
+this screen existed; placement/scope were confirmed with Fabio first per
+the Required Process before writing any code. Distinct from
+`UserManagementModule.tsx`, which remains the admin-only screen for editing
+*other* accounts (role/active status included) -- this new route/component
+deliberately cannot touch either of those on yourself.
+
+### 1. File: `backend/app/api/users.py`
+* New **`UpdateMeRequest`** Pydantic model -- `name`, `email`,
+  `session_timeout_minutes`, `current_password`, `new_password`. No
+  `role`/`is_active` fields exist on this model at all (not just left
+  optional/unset), so there is no payload shape that could ever let a user
+  promote or reactivate/deactivate themselves.
+* New **`update_me()`** -- `PATCH /api/users/me`, gated by
+  `Depends(get_current_user)` (any authenticated user), not
+  `require_admin`. Registered in the file **before** the existing
+  `PATCH /{user_id}` route so the static `/me` path is matched first,
+  rather than being swallowed by the int-typed `{user_id}` path parameter.
+  Password change requires `current_password` to verify correctly via the
+  existing `_verify_password()` before `_hash_password()` overwrites
+  `password_hash` -- reuses the same helpers `login_user()`/`update_user()`
+  already use, no new hashing logic. Reuses `_split_name()`/`_user_to_dict()`
+  too. Falls through to the generic activity-log middleware in `main.py`
+  for audit logging (a mutating PATCH call) -- no special-casing needed
+  like `login_user()`/`logout_user()` required.
+
+### 2. File: `frontend/src/lib/api.ts`
+* New `UpdateMePayload` type and `updateMe(payload)` (`PATCH /api/users/me`),
+  alongside the existing admin-only `updateUser(userId, payload)`.
+
+### 3. File: `frontend/src/app/components/AccountSettingsModule.tsx` (new)
+* Self-service tab, styled to match `UserManagementModule.tsx`'s existing
+  modal conventions (`bg-muted/40` field containers, same input/button
+  classes) but rendered inline as a tab, not a modal overlay, per Fabio's
+  placement choice. Two independent sections/save actions:
+  - **Profile & Preferences** -- Full Name, Email, Session Timeout
+    (same `[0, 5, 10, 15, 30]` dropdown convention as the admin Edit User
+    modal). Single "Save Changes" button, disabled unless something
+    actually changed.
+  - **Change Password** -- Current/New/Confirm Password, with client-side
+    length and match validation before the request is even sent. Separate
+    "Update Password" button/flow from the profile save, since it is a
+    materially different, more sensitive action.
+* Both actions call `onUpdated(res.data)` on success so the parent
+  (`App.tsx`) can reconcile the change into `currentUser` immediately.
+
+### 4. File: `frontend/src/app/components/Header.tsx`
+* `ModuleId` gained `"account"`.
+* New `ACCOUNT_MODULE` entry (icon: `UserCog`) appended to whichever list
+  (`ADMIN_MODULES`/`SPECIALIST_MODULES`) is active, rather than duplicated
+  into both arrays -- this tab is the one nav item every role gets
+  regardless of admin/specialist split.
+
+### 5. File: `frontend/src/app/App.tsx`
+* New **`handleAccountUpdate(updated: SystemUser)`** -- maps the backend's
+  full user row back down to the `CurrentUser` shape and calls
+  `setCurrentUser()`/`persistUser()`, the same pair `handleLogin()` uses.
+  Needed so a changed `session_timeout_minutes` is picked up immediately by
+  the existing idle-timeout `useEffect` (keyed on
+  `currentUser?.session_timeout_minutes`) without forcing a re-login, and
+  so a changed name/email shows up in `Header.tsx`'s user menu right away.
+  A changed email does not require re-login either -- the JWT only encodes
+  `user_id`/`role`, not email, so the existing token stays valid.
+* Main-content render now checks `activeModule === "account"` **before**
+  branching on `currentUser.role`, since this is the one tab both branches
+  share -- avoided duplicating the render call into both the admin and
+  specialist branches.
+
+### Status / Next Steps
+* Not tested -- needs a real click-through: profile save reflecting
+  immediately in the header, a session-timeout change actually shortening
+  the idle-logout window without a re-login, a wrong-current-password
+  attempt correctly rejected, and a successful password change actually
+  working on the next login.
+* No new migration -- `name`/`email`/`session_timeout_minutes`/
+  `password_hash` all already exist on `tbl_system_users` from earlier
+  work this session.
+
+---
+
+## [2026-08-16] - Activity Log: human-readable summaries instead of raw endpoints
+
+Fabio's explicit request: the Activity Log's Endpoint column showed the raw
+request path (`/api/users/login`, `/api/users/42`, ...) -- asked for a
+readable summary instead (e.g. "Logged in" / "User logged in"), same spirit
+as the rest of this session's "replace raw/decorative with something a
+non-engineer admin can actually read" work.
+
+### 1. File: `backend/app/api/activity_log.py`
+* New `_ENDPOINT_SUMMARIES`: an ordered `(method, path-regex, summary text)`
+  table covering every mutating route in the app as of this date (users
+  register/create/self-update/admin-update, CSV/GPX upload, bulletin
+  parse/manual-PDF-upload/settings/compute-exposure, assessment
+  calculation). Dynamic id segments matched generically (`\d+`) -- the
+  summary never needs to name *which* row was touched.
+* New `_summarize(action, endpoint, status_code)`: `LOGIN`/`LOGOUT` handled
+  specially (and, per Fabio's confirmation, a failed/blocked login reads
+  differently -- "Failed login attempt" (401) / "Login blocked (pending
+  approval)" (403) vs. "Logged in" (200)); everything else looked up in the
+  table above. Anything not explicitly mapped falls back to the old
+  `"{ACTION} {endpoint}"` format, so a future route added without updating
+  this table is never silently hidden from the log.
+* `_entry_to_dict()` gained a `summary` field alongside the existing raw
+  `endpoint` (kept, not removed from the API response -- see file 3).
+
+### 2. File: `frontend/src/lib/api.ts`
+* `ActivityLogEntry` gained `summary: string`.
+
+### 3. File: `frontend/src/app/components/ActivityLogModule.tsx`
+* Table's "Endpoint" column header/cell replaced with "Summary" -- shows
+  `e.summary` as the primary text, with the raw `e.endpoint` kept as a
+  small muted mono subtext underneath (same visual convention the User
+  column already uses for name + email), rather than dropping the raw path
+  entirely -- still useful for an admin cross-checking against server logs.
+
+### Status / Next Steps
+* Not tested -- needs a real click-through against a populated Activity Log
+  (a mix of successful/failed logins, a few different mutating actions) to
+  confirm the summaries read correctly and the fallback format doesn't fire
+  for anything that should have been mapped.
+
+---
+
+## [2026-08-16] - SAR/GEE Mock Analysis Removed
+
+Fabio's explicit request, after confirming with him that the SAR/GEE panels
+were 100% mock/simulated (no real Google Earth Engine or Sentinel-1
+integration anywhere in the codebase -- see the removed files' own
+in-repo comments admitting this). This maps to the documented
+"Verify Farm Planted" use case (`docs/UseCase.drawio.png`, `<<include>>`
+of "Conduct Parametric Damage Assessment", external system "GOOGLE EARTH
+ENGINE (GEE)"), so it's a deliberate deferral of that use case's UI
+scaffolding, not scope creep being trimmed.
+
+### 1. File: `frontend/src/app/components/AOISARPanel.tsx`
+* **Deleted.** 493-line panel that ran a scripted fake progress sequence
+  ("Authenticating with Google Earth Engine…", "Fetching Sentinel-1 SAR
+  tiles…") against a hardcoded `MOCK_SAR_RESULTS` array; no backend call
+  anywhere in it. (Note: this file could not be removed via a tool call in
+  this session -- `rm`/`git rm` were both blocked -- Fabio deleted it by
+  hand.)
+
+### 2. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* Removed the `AOISARPanel` import, the `showSARPanel` state, the
+  "SAR / GEE Analysis" toggle button, and the panel's overlay render over
+  `GISLeafletMap`. Dropped the now-unused `Satellite` icon import.
+
+### 3. File: `frontend/src/app/components/MonitoringModule.tsx`
+* Removed **`SARQuickViewModal()`**: a modal that rendered a canvas-drawn
+  fake SAR backscatter composite per farm (its own comment already
+  disclosed this: "the SAR imagery below is simulated... no real Google
+  Earth Engine integration exists").
+* Removed the `sarFarmer` state, its modal render call, and the "Farmer
+  list with SAR quick-view" block under each selected bulletin (the
+  per-farm buttons that opened the modal).
+* Removed the now-dead `selectedMaxSignal` variable (only consumer was the
+  deleted block) and the now-unused `Satellite`, `MapPin`, `User` icon
+  imports and `useRef` hook import.
+
+### 4. File: `frontend/src/app/components/SettingsModule.tsx`
+* Removed the "Google Earth Engine Configuration" card (Project ID / EEC
+  Capacity fields, fake "GEE API Status: Connected" chip, "Test
+  Connection" button -- none wired to a real check) and its
+  `geeProjectId`/`geeCapacity` state. "Database Configuration" card
+  (unrelated, real) left untouched.
+
+### Status / Next Steps
+* `frontend/src/app/components/AOISARPanel.tsx` still needs to be deleted
+  by hand (blocked tool call, see above).
+* Not yet verified against a running `npm run dev` -- Fabio to confirm no
+  TypeScript/build errors from the removed imports/state before this is
+  committed.
+
+---
+
+## [2026-08-17] - Farms On-Demand Pagination Redesign, Stage 1 (Backend)
+
+Branch `fabio/perf/farms-on-demand-pagination` (off `develop`). Fabio
+confirmed 100k-1M farm records is a real near-term scale target -- the
+current frontend design (`frontend/src/lib/useFarmsData.ts`) eagerly
+background-walks the *entire* dataset into the browser (React state +
+one giant IndexedDB blob) every session, which already needed one fix at
+~48,588 rows (see the 2026-08-13 table-virtualization entry) and would
+not survive 20x that scale: a full walk at 1M rows/1000-per-page, at the
+network latency observed against the remote box, would take over an
+hour. This stage lays the backend groundwork for the frontend switch to
+genuine on-demand (fetch-what's-visible) pagination -- table windowing,
+map viewport geometry, and server-computed dashboard aggregates -- landing
+in later stages of this branch. Design decisions confirmed with Fabio:
+table pagination stays farm_id-order only (multi-column server sort would
+need a new index + compound keyset cursor per column, two of which are
+behind joins -- not worth it speculatively); the client-side whole-dataset
+IndexedDB cache is being dropped entirely in favor of the already-working
+Redis page cache (a single-blob client cache is structurally incompatible
+with on-demand paging anyway).
+
+### 1. File: `backend/app/api/farms.py`
+* `list_farms()` (`GET /farms/`) gained a `municipality` query param --
+  pushes what was a client-side filter (over the fully-loaded array) into
+  the query via a plain (non-eager) join against `AdminBoundary`, filtered
+  on `AdminBoundary.municipality`. Many-to-one join, so `total`/pagination
+  stay correct without needing `DISTINCT`.
+* Added **`get_farms_geometry()`** (`GET /farms/geometry`): new,
+  deliberately lightweight endpoint returning only `farm_id`/
+  `location_geom` for farms whose geometry intersects a given
+  `bbox=minLon,minLat,maxLon,maxLat`, via a real `ST_Intersects`/
+  `ST_MakeEnvelope` PostGIS query (uses the existing
+  `idx_farms_location_geom` GiST index -- no new migration needed).
+  Replaces `GISLeafletMap.tsx`'s current approach of computing bbox
+  intersection client-side over every farm already sitting in the shared
+  `farms` array. Supports the same `active_only`/`municipality` filters
+  as `list_farms()`.
+
+### 2. File: `backend/app/api/assessments.py`
+* Added **`get_assessments_summary()`** (`GET /assessments/summary`):
+  real SQL-aggregate replacement for what `MonitoringModule.tsx`'s
+  "Affected Farms"/`EST. TOTAL INDEMNITY` stat tiles used to compute by
+  reducing over the entire client-side `farms` array (only viable because
+  the old design had loaded everything already). Uses a `DISTINCT ON`
+  CTE (same "most recent row per farm_id" pattern as
+  `app/core/farms_view.py`'s materialized view) to find each farm's most
+  recent `RiskAssessment` across all its insurance records/typhoons, then
+  aggregates `COUNT`/`SUM ... FILTER` over the ones with `wind_velocity`
+  set -- exact same "affected" semantics the old frontend reduction used,
+  just computed once in Postgres instead of per-request in the browser
+  over a fully-loaded array.
+
+### 3. File: `backend/app/core/farms_cache.py`
+* `_cache_key()`/`get_cached_farms_page()`/`cache_farms_page()` all gained
+  a `municipality` parameter, folded into the Redis cache key -- without
+  this, two different municipality filters would have collided on the
+  same cache entry and served each other's (wrong) results. Old-format
+  keys (pre-this-change) are simply orphaned, not migrated -- harmless,
+  they age out via the existing 300s TTL and are never read by the new
+  key format.
+
+### Status / Next Steps
+* **Not yet tested** -- needs a backend restart + a few manual
+  requests (`GET /api/farms/?municipality=...`, `GET
+  /api/farms/geometry?bbox=...`, `GET /api/assessments/summary`) to
+  confirm before any frontend work builds against these.
+* Frontend still on the old `useFarmsData.ts` eager-load design --
+  intentionally unchanged in this stage. Next stages: table (windowed
+  on-demand pagination), map (viewport geometry fetching), dashboard
+  stats (call the new summary endpoint), then remove the IndexedDB
+  whole-dataset cache once nothing depends on it.
+
+---
+
+## [2026-08-17] - Dark Mode Keyed Per User, Not Per Browser
+
+Fabio's request: the dark-mode toggle (uncommitted work already sitting in
+this branch's tree) persisted to one global `localStorage` key shared by
+*every* user of a given browser/device -- User B logging in after User A
+would silently inherit User A's light/dark preference. Fabio clarified he
+wanted this scoped per user, but deliberately **without** a DB/backend
+change (no new column, no server round-trip) -- purely a local-storage
+keying fix, same device only, nothing synced across devices for the same
+user.
+
+### 1. File: `frontend/src/lib/themeStorage.ts`
+* `loadPersistedDarkMode()`/`persistDarkMode()` both now take an `email`
+  parameter and read/write `agrisuregis_dark_mode_<email>` instead of one
+  flat `agrisuregis_dark_mode` key -- two different users sharing a
+  browser now each keep their own independent entry.
+
+### 2. File: `frontend/src/app/App.tsx`
+* `darkMode`'s lazy initializer now reads `loadPersistedUser()?.email`
+  first and keys the theme lookup off that (falls back to light mode when
+  there's no persisted user yet, e.g. a fresh login screen).
+* **`handleLogin()`** now also calls `setDarkMode(loadPersistedDarkMode(user.email))`
+  right after login -- otherwise a shared device would keep showing
+  whichever mode the *previous* user left it in until the newly-logged-in
+  user happened to toggle it themselves.
+* `onToggleDark` now persists via `persistDarkMode(currentUser.email, next)`
+  instead of the old no-argument call.
+
+### Status / Next Steps
+* Verified working locally by Fabio: toggles correctly, survives a
+  refresh, no TypeScript errors.
+
+---
+
+## [2026-08-17] - Local DB Reset + Scale-Test Seeding Tooling
+
+Fabio's local backend hit the same `column tbl_insurance_records.is_used
+does not exist` error diagnosed and fixed on the *remote* DB the day
+before (see [[project_migrations_not_auto_applied]]) -- his local DB had
+the same never-applied-migration gap. Fixed by a full local reset
+(`psql -f init_schema.sql`, which already has the fix baked in for fresh
+installs) + full reseed. Two new scripts added along the way:
+
+### 1. File: `backend/seed_100k_farms.py` (new)
+* Adds 100,000 synthetic farms (+ one synthetic farmer each) on top of
+  whatever's already in `tbl_farms`, for local scale-testing of the
+  on-demand-pagination redesign (branch
+  `fabio/perf/farms-on-demand-pagination`) without waiting on real PABS
+  data to reach that scale. Deliberately narrow: only
+  `tbl_farmers_profile`/`tbl_farms` rows, no insurance/assessment rows
+  (that's `seed_active_insurance.py`'s job), no `location_geom` (matches
+  the real dataset's own sparse-geometry pattern). Reuses existing
+  `tbl_admin_boundaries` rows rather than inventing fake municipalities.
+  Bulk-inserts via `psycopg2.extras.execute_values` in 5,000-row batches
+  (not row-by-row) for a reasonable runtime at this scale. Rows are
+  clearly prefixed (`SEED-FARMER-`/`SEED-FARM-`) so they're
+  identifiable/removable later without touching real or
+  previously-seeded data. Invalidates the Redis farms cache on completion
+  (no matview refresh needed -- this script never touches insurance data).
+
+### 2. File: `backend/seed_all.py` (new)
+* One-command orchestrator for the full local-DB reseed sequence already
+  documented in `.claude/BACKEND_DATABASE_WORKFLOW.md`'s "Resetting the
+  Local Database" section -- imports and calls each existing seed
+  script's entry point (`seed_database.run_setup()`,
+  `seed_system_users.run()`, `backfill_admin_boundary_geom.run_backfill()`,
+  `mock_data.seed_mock_typhoon.run_seed()`, `seed_active_insurance.run()`,
+  `seed_100k_farms.run()`) in the required order, in one process, instead
+  of running six files by hand one at a time. Does **not** run
+  `init_schema.sql` itself (that stays a separate, explicit `psql` step in
+  Fabio's own terminal, per the Database Command Execution rule) -- this
+  only covers everything *after* the schema reset. Stops immediately with
+  a clear message if any step fails, since every later step assumes the
+  ones before it succeeded.
+
+### Status / Next Steps
+* Fabio ran both the schema reset and `python seed_all.py` locally --
+  all 6 steps completed successfully.
+* Still needs: confirm the frontend actually fetches/renders data again
+  now that the schema error is gone (this was the original symptom that
+  surfaced the bug).
+
+---
+
+## [2026-08-18] - Explicit Notice on Involuntary Logout (Idle Timeout / Expired Session)
+
+Same branch (`fabio/perf/farms-on-demand-pagination`). Previously, both the
+idle-timeout logout and a 401 from `api.ts` (expired/missing token,
+deactivated account) dropped the user straight back to the login screen --
+the 401 path did it via a hard `window.location.reload()`. Neither told
+the user *why* they landed there, which reads as a bug rather than
+expected behavior. Credit to Cristian Aton for this fix.
+
+### 1. File: `frontend/src/lib/sessionEvents.ts` (new)
+* `SESSION_EXPIRED_EVENT` / `notifySessionExpired()`: a tiny
+  `window` custom-event bridge so `api.ts` (a plain module outside React)
+  can tell `App.tsx` a request came back 401 without forcing a reload.
+
+### 2. File: `frontend/src/lib/api.ts`
+* `request()`'s 401 handling still force-clears local storage
+  synchronously (unchanged -- that has to happen regardless of whether
+  React is still mounted to hear about it), but now calls
+  `notifySessionExpired()` instead of `window.location.reload()`.
+
+### 3. File: `frontend/src/app/components/LoggedOutNotice.tsx` (new)
+* **`LoggedOutNotice()`**: an `AlertDialog` shown in place of the login
+  screen for an involuntary logout, with copy keyed by a `LogoutReason`
+  (`"idle"` | `"expired"`). Deliberately uncontrolled (`open` always
+  `true`, no `onOpenChange`) so Escape/outside-click can't dismiss it --
+  the only way through is the explicit "Return to Login" click, so the
+  user actually registers why they landed back at login.
+
+### 4. File: `frontend/src/app/App.tsx`
+* New `logoutReason` state (`LogoutReason | null`). `null` means either
+  still logged in, or a *voluntary* Sign Out (Header's Sign Out button
+  calls `handleLogout()` directly and never touches this) -- both still
+  fall through to `LoginScreen` unchanged.
+* The idle-timeout effect's `setTimeout` callback now also calls
+  `setLogoutReason("idle")` after `handleLogout()`.
+* New effect listens for `SESSION_EXPIRED_EVENT`; on it, clears
+  `currentUser` and sets `setLogoutReason("expired")`.
+* Render now checks `logoutReason` ahead of the `!currentUser` check and
+  renders `LoggedOutNotice` (clearing back to `null` on acknowledgment)
+  instead of falling straight through to `LoginScreen`.
+
+### Status / Next Steps
+* Fabio confirmed testing complete on this branch (backend Stage 1,
+  dark-mode-per-user, and this logout-notice change) -- merging to
+  `develop` and pushing next.
+
+---
+
+## [2026-08-18] - Farms On-Demand Pagination Stage 2: Split Polygons from List Data
+
+New branch `fabio/perf/farms-polygon-split`, off `develop` (which now
+contains Stage 1, commit `273532d`). Fabio asked what happens at
+100k-1M farm polygons -- the backend was already fine (keyset pagination,
+bbox-indexed `/farms/geometry`, materialized view), but the frontend's
+`useFarmsData.ts` was still proactively background-walking the *entire*
+farms table into browser memory + IndexedDB every session regardless of
+what was on screen, and `GISLeafletMap.tsx` still culled geometry
+client-side over that fully-loaded array instead of using the already-built
+bbox endpoint. Settled design: split "polygon or not" cleanly between the
+list endpoint (table) and the geometry endpoint (map); remove the
+background-walk entirely; and -- the stricter of two options discussed --
+no default "browse everything" view at all. The Farm Records table and map
+now stay empty until the user searches a specific municipality.
+
+### 1. File: `backend/app/api/farms.py`
+* **`list_farms()`** (`GET /farms/`): replaced the per-row `location_geom`
+  GeoJSON (`to_shape()`/`shapely.mapping()`) with a cheap
+  `has_geometry: bool` (`farm.location_geom is not None`) -- the only
+  consumer of geometry content here was a Yes/No "Surveyed" badge, nothing
+  ever drew a polygon with it. Skips real per-row CPU cost at 100k-1M scale.
+* **`get_farms_geometry()`** (`GET /farms/geometry`): added an optional
+  `farm_id: int | None` param that, when set, ignores
+  `bbox`/`active_only`/`municipality` and returns just that one farm's
+  geometry -- backs `GISLeafletMap.tsx`'s `FlyToSelectedFarm` for a farm
+  selected from a table row that's outside the map's current viewport
+  fetch. `bbox` is now optional (`Query(None)`), required only when
+  `farm_id` is absent.
+* **New: `list_farm_municipalities()`** (`GET /farms/municipalities`):
+  distinct municipality names from `tbl_admin_boundaries` (not
+  `tbl_farms`), `ORDER BY municipality`. Required fix, not optional --
+  without a default farm-list view, the search box's old suggestion source
+  (whatever farms happened to already be loaded) would be permanently empty
+  before a first search.
+
+### 2. File: `backend/app/api/assessments.py`
+* **`get_assessments_summary()`** (`GET /assessments/summary`): extended
+  the existing totals aggregate (built 2026-08-17, previously had no
+  frontend caller) with two more, each following the same
+  `DISTINCT ON`-latest-assessment-per-farm CTE pattern:
+  `growth_stage_distribution` (per-crop-stage farm counts across all farms,
+  `LEFT JOIN`, bucketed to `"Not Assessed"`) and `signal_breakdown`
+  (per-`wind_velocity` farm count + summed area, affected farms only).
+  Three separate `db.execute(text(...))` calls, one HTTP response --
+  replaces `MonitoringModule.tsx`'s Growth Stage pie and Farms by Signal
+  Number bar chart, which used to reduce over the full client-side `farms`
+  array. Deliberately not municipality-scoped -- a dashboard summary, not
+  something a user searches into.
+
+### 3. File: `frontend/src/lib/api.ts`
+* `Farm.location_geom` (`GeoJsonMultiPolygon | null`) replaced with
+  `Farm.has_geometry: boolean`.
+* **`getFarms()`**: added the missing `municipality` param (backend already
+  supported it).
+* New **`getFarmsGeometry()`** + `FarmGeometry`/`GetFarmsGeometryResult`
+  types, calling `GET /farms/geometry` (`bbox`/`farm_id`/`active_only`/
+  `municipality`).
+* New **`getAssessmentsSummary()`** + `AssessmentsSummary`/
+  `GrowthStageBucket`/`SignalBucket` types, calling the extended
+  `GET /assessments/summary`.
+* New **`getMunicipalities()`**, calling `GET /farms/municipalities`.
+
+### 4. File: `frontend/src/lib/useFarmsData.ts` (rewritten)
+* New signature: `useFarmsData({ enabled, activeOnly, municipality })`.
+  `municipality: string | null` now gates fetching entirely, not just what's
+  fetched -- `null` means no request is ever sent, `farms` stays `[]`.
+* Removed entirely: the two-fixed-phase (`active` -> `all`) model, the
+  self-pacing background loop (`runBackgroundLoop`/`sleep`/
+  `BACKGROUND_FETCH_DELAY_MS`) that walked the whole table to completion
+  regardless of scroll position, and the IndexedDB cache +
+  `agrisuregis_farms_progress_v3` localStorage progress marker built to
+  survive that walk across reloads. One-time cleanup of any pre-existing
+  browser state (`indexedDB.deleteDatabase("agrisuregis")`, both old
+  localStorage keys) runs on module load.
+* Kept: `mergeFarmsPage()` (farm_id-keyed merge, not replace), `PAGE_SIZE`,
+  keyset cursor semantics.
+* New behavior: page 1 fetches eagerly on mount/enable and on every
+  `activeOnly`/`municipality` change (cursor reset, old rows merged over);
+  every later page only via an explicit `requestMore()` call (unchanged
+  `IntersectionObserver` scroll trigger in `SpatialAnalysisModule.tsx`).
+  `refresh()` (`start()` internally) is a no-op while `municipality` is
+  `null`.
+
+### 5. File: `frontend/src/app/App.tsx`
+* `activeInsuranceOnly` (default `true`) and `filterMuni` (default `"All"`)
+  lifted up from `SpatialAnalysisModule` into controlled state here, since
+  `useFarmsData` stays owned here (shared/eager, and `SpatialAnalysisModule`
+  is conditionally mounted -- moving the hook down would drop progress on
+  every tab switch). `useFarmsData({ enabled: !!currentUser, activeOnly:
+  activeInsuranceOnly, municipality: filterMuni === "All" ? null :
+  filterMuni })`.
+* `MonitoringModule` no longer receives a `farmsData` prop.
+  `SpatialAnalysisModule` gains `activeInsuranceOnly`/
+  `onActiveInsuranceOnlyChange`/`filterMuni`/`onFilterMuniChange`.
+
+### 6. File: `frontend/src/app/components/MonitoringModule.tsx`
+* Dropped the `FarmsData` prop/import entirely. Removed `farms`,
+  `assessments` state + its `getAssessments()` fetch, `assessmentByFarmId`,
+  the local `FarmRow` type, `farmRows`, `affectedFarmRows` -- all dead once
+  stats moved server-side (also removes an extra unpaginated
+  `GET /assessments/` call this module was making just to build
+  `assessmentByFarmId`).
+* `totalFarms`/`affectedFarms`/`totalArea`/`totalIndemnity`/
+  `growthStageData`/`signalChartData` now derive from one
+  `getAssessmentsSummary()` call instead of reducing over `farms`. Stat-card
+  and chart JSX unchanged -- same variable names, new source.
+
+### 7. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* `activeInsuranceOnly`/`filterMuni` are now props, not local state.
+* `municipalities`/`muniSuggestions` no longer derive from `farmRows`
+  (would be permanently empty pre-search under the new gating) -- new
+  `allMunicipalities` state fetched once via `getMunicipalities()`, filtered
+  by `muniQuery` for suggestions exactly as before.
+* New empty state: while `filterMuni === "All"`, the table area shows a
+  "Search a municipality above to view farm records" prompt instead of an
+  empty/loading table; the record-count badge shows "No municipality
+  selected".
+* "Active Insurance Only" toggle: `disabled={filterMuni === "All"}` with an
+  explanatory tooltip -- turning off active-insurance scope only makes
+  sense once a municipality narrows what's being browsed.
+* `f.location_geom` Yes/No badge check -> `f.has_geometry`.
+* `<GISLeafletMap>` now also receives `activeOnly={activeInsuranceOnly}`.
+
+### 8. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* New `activeOnly: boolean` prop.
+* Removed client-side geometry culling built from the `farms` prop
+  (`surveyedFarms`-as-render-source, `bboxCacheRef`, `surveyedBBoxByFarmId`,
+  `visibleSurveyedFarms`) -- `farms` no longer carries geometry at all.
+  `computeGeoJsonBBox`/`bboxIntersects`/`BBox`/`SimpleBounds` kept, now
+  applied to the new fetched geometry cache instead.
+* New `geomCache: Map<farm_id, GeoJsonMultiPolygon>` state, refetched via
+  `getFarmsGeometry({ bbox, active_only, municipality })` on
+  `moveend`/`zoomend` (existing `MapBoundsWatcher`), reset (not merged)
+  whenever `activeOnly`/`focusMunicipality` change. Render loop iterates the
+  viewport-culled subset of `geomCache` directly (no longer joined against
+  farm attributes for rendering -- geometry and attributes now arrive
+  independently).
+* **`FlyToSelectedFarm()`**: checks `geomCache` first; if the selected farm
+  `has_geometry` but isn't cached (out of viewport), calls
+  `getFarmsGeometry({ farm_id })` directly, reports the result back via a
+  new `onGeometryFetched` callback (so it's immediately render-eligible too,
+  not just used for the flight), then flies to its bounds. Falls back to
+  `approxPos`/`flyTo` unchanged when the farm has no geometry.
+* `unsurveyedFarms` filter and the Selected Farm Info Panel's
+  "Surveyed"/"Not yet uploaded" check both switched from `f.location_geom`
+  to `f.has_geometry`.
+
+### Status / Next Steps
+* Implementation complete on this branch; not yet verified by Fabio in the
+  running app (backend venv/DB and frontend npm are his environment per
+  the Python/DB/Frontend execution rules -- verification steps are listed
+  in the approved plan at
+  `/home/fabio/.claude/plans/rippling-launching-pond.md`).
+* Scale-testing note: `backend/seed_100k_farms.py` exercises `GET /farms/`
+  pagination at real scale once a search lands on a padded municipality,
+  but adds no `location_geom`, so it doesn't exercise
+  `GET /farms/geometry`'s `ST_Intersects` query at scale -- that stays
+  bounded by however many farms in that municipality have a real GPX
+  boundary today.
+
+---
+
+## [2026-08-18] - Stage 2 Correction: Restore Default Active-Insurance View
+
+Fabio tested the above and reported the default screen showed nothing --
+the "no default view at all" decision went further than intended. Corrected
+gating: the default view (no municipality searched) should behave like
+before the redesign -- show active-insurance farms across every
+municipality. Only turning Active Insurance Only *off* (to browse
+inactive/all-status farms) should require a specific municipality first,
+since "every farm, active or not, no municipality scope" is the one
+combination that's actually unbounded at 100k-1M scale -- everything else,
+including the default, is fine to fetch outright.
+
+### 1. File: `frontend/src/lib/useFarmsData.ts`
+* Gating condition changed from "fetch only when `municipality != null`" to
+  "fetch for every `(activeOnly, municipality)` combination except
+  `activeOnly: false, municipality: null`" -- in both `start()` and the
+  mount/filter-change effect. The default `activeOnly: true,
+  municipality: null` now fetches normally, same as the original
+  pre-redesign default (bounded by however many farms have active
+  insurance).
+
+### 2. File: `frontend/src/app/App.tsx`
+* Re-added a guard effect: if `filterMuni` reverts to `"All"` while
+  `activeInsuranceOnly` is still `false` (e.g. the user clears the search
+  box after browsing one municipality's inactive farms), it's forced back
+  to `true` -- keeps the app out of the one blocked combination rather than
+  leaving the table/map stuck empty.
+
+### 3. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* Removed the "no municipality selected" empty-state prompt and record-count
+  badge text added in the prior entry -- the table now renders normally
+  (loading state, then rows) for the default view again, same as before
+  this stage's first pass. "Active Insurance Only" toggle's disabled
+  tooltip reworded to reflect that it's gating the *inactive-farms* browse
+  specifically, not farm records in general.
+
+### 4. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* Geometry-fetch effect gated the same way as `useFarmsData.ts` --
+  `!activeOnly && !focusMunicipality` skips the fetch; every other
+  combination, including the default, fetches viewport geometry normally.
+
+### Status / Next Steps
+* Fabio confirmed the default view now shows active-insurance farms again,
+  and the municipality-gated inactive-farm browse works as designed.
+
+---
+
+## [2026-08-18] - Farmer Search + Farm Records Toolbar Consolidation
+
+Fabio asked for a farmer search, then requested it live in the Farm Records
+toolbar alongside the (moved-down) municipality search, and asked for the
+two upload buttons to move there too so the map's own toolbar clears down
+to just its title, for more map visibility.
+
+Farmer names can't be preloaded whole for a client-side type-ahead the way
+municipalities are -- `tbl_farmers_profile` scales with the farm count
+(`seed_100k_farms.py` adds one new synthetic farmer per new farm) -- so
+this is a debounced, server-side search instead. `filterFarmerId` scopes
+exactly like `filterMuni` (either one alone allows Active Insurance Only to
+be turned off) and combines with it (both, either, or neither), per Fabio's
+explicit direction that the two filters be independent and combinable.
+
+### 1. File: `backend/app/core/farms_cache.py`
+* `_cache_key()`/`get_cached_farms_page()`/`cache_farms_page()` all gained
+  a `farmer_id: int | None = None` param, folded into the Redis cache key
+  -- otherwise a farmer-scoped request and an unscoped one at the same
+  `limit`/`after_id`/`active_only`/`municipality` would collide.
+
+### 2. File: `backend/app/api/farms.py`
+* **`list_farms()`** (`GET /farms/`): new `farmer_id: int | None` query
+  param, an exact `Farm.farmer_id == farmer_id` filter -- combines with
+  `active_only`/`municipality` rather than replacing them.
+* **`get_farms_geometry()`** (`GET /farms/geometry`): new `farmer_id`
+  param with two roles depending on whether `bbox` is also given: combined
+  with a real `bbox` request it's just another AND'd filter on the normal
+  viewport query; given alone (no `bbox`, no `farm_id`) it behaves like
+  `farm_id`'s existing bypass -- every farm belonging to that farmer,
+  regardless of viewport/active_only/municipality -- backing
+  `GISLeafletMap.tsx`'s new fly-to-farmer.
+* **New: `search_farmers()`** (`GET /farms/farmers?q=...`): farmer name
+  search backing the new search box. Matches
+  `first_name || ' ' || last_name` as one concatenated string (single
+  `ILIKE '%q%'`, via `func.concat`) rather than checking first/last
+  separately -- covers a query that's just a first name, just a last name,
+  or both, in one expression. Capped at 20 results, ordered by last then
+  first name.
+
+### 3. File: `frontend/src/lib/api.ts`
+* `getFarms()`/`getFarmsGeometry()` both gained an optional `farmer_id`
+  param.
+* New `FarmerSearchResult` type + `searchFarmers(q)` calling
+  `GET /farms/farmers`.
+
+### 4. File: `frontend/src/lib/useFarmsData.ts`
+* New `farmerId: number | null` param, alongside `activeOnly`/
+  `municipality`. The one combination the hook refuses to fetch for
+  widened from `activeOnly: false, municipality: null` to `activeOnly:
+  false, municipality: null, farmerId: null` -- a real `farmerId` scopes
+  exactly like a real `municipality` (a specific farmer's own farms are
+  always a small, bounded set).
+
+### 5. File: `frontend/src/app/App.tsx`
+* New `filterFarmerId` state (default `null`), passed into `useFarmsData`
+  and down to `SpatialAnalysisModule`. The existing "force Active Insurance
+  Only back on" guard effect now also checks `filterFarmerId == null`, not
+  just `filterMuni === "All"` -- clearing either scope alone doesn't
+  trigger it if the other is still set.
+
+### 6. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* New farmer search box: `farmerQuery`/`showFarmerSuggestions`/
+  `farmerSuggestions` state, a 300ms-debounced effect calling
+  `searchFarmers()` (discards a stale response via a bumped sequence ref if
+  a newer keystroke has already superseded it), `selectFarmer()`. Mirrors
+  the municipality box's interaction pattern (type-ahead dropdown, clearing
+  the input resets the filter) but backed by a live query instead of a
+  preloaded list.
+* `filteredFarms` also filters by `filterFarmerId` now; "Active Insurance
+  Only" toggle's `disabled`/tooltip condition extended to
+  `filterMuni === "All" && filterFarmerId == null`.
+* **Toolbar consolidation** (per Fabio's explicit request): the map
+  toolbar (top panel) is stripped down to just its title/icon. The
+  municipality search box and the Upload CSV/Upload GPX buttons (+ their
+  hidden file inputs) all move down into the Farm Records toolbar (bottom
+  panel), alongside the new farmer search box -- the row already had
+  `flex-wrap`, so it wraps gracefully at narrow widths. `<GISLeafletMap>`
+  gains `focusFarmerId={filterFarmerId}`.
+
+### 7. File: `frontend/src/app/components/GISLeafletMap.tsx`
+* New `focusFarmerId?: number | null` prop.
+* `FlyToSelectedFarm`'s `onGeometryFetched` callback generalized from a
+  single `(farmId, geom)` pair to a batch `(entries: GeomEntry[])`, shared
+  with the new `FlyToFarmer` below via a new `mergeGeomEntries()` helper
+  (`useCallback`-wrapped, merges into `geomCache`).
+* **New `FlyToFarmer()`**: same idea as `FlyToMunicipality`, but there's no
+  static boundary outline for a farmer -- resolves that farmer's geometry
+  directly (`getFarmsGeometry({ farmer_id })`, bypassing viewport/
+  active_only/municipality) and flies to the combined bounds over all of
+  it; falls back to the first matching farm's approximate marker position
+  if the farmer has no surveyed farms at all.
+* `geomCache`'s reset effect and the viewport bbox-fetch effect (and its
+  gating condition) both extended to include `focusFarmerId`, mirroring
+  `focusMunicipality`.
+
+### Status / Next Steps
+* Fabio confirmed the toolbar consolidation and farmer search both work as
+  expected.
+
+---
+
+## [2026-08-18] - Remove Map Toolbar Entirely
+
+Fabio: the map toolbar (by this point just a title, everything else having
+moved down to the Farm Records toolbar per the prior entry) was still
+taking up vertical space the map itself could use -- asked to remove it
+outright.
+
+### File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* Deleted the map toolbar `<div>` (icon + `"{typhoon} Impact Map"` /
+  `"Spatial Impact Map"` title) entirely -- the map canvas `<div>`
+  (`flex-1`) now fills the whole top panel on its own. Dropped the
+  now-unused `Map as MapIcon` import.
+
+---
+
+## [2026-08-18] - Collapsible Main Header
+
+Fabio: "make this panel like on word that it can be hide," pointing at the
+main nav header (logo/tabs/status/icons) -- same idea as Word's
+ribbon-collapse toggle. Confirmed interaction: a toggle button collapses
+the whole header down to a thin strip with just that button, click again
+to bring it back (not auto-hide-on-idle).
+
+### File: `frontend/src/app/components/Header.tsx`
+* New `collapsed` state (component-local, not persisted -- a per-session
+  convenience, not a saved preference like `darkMode`). `false` renders the
+  header exactly as before, plus a new `ChevronUp` "Hide menu" button
+  appended to the end of Right Controls. `true` short-circuits the whole
+  render to a `h-5` strip (same background color as the real header, so it
+  reads as "the header, collapsed" rather than a different element) holding
+  a centered `ChevronDown` "Show menu" button.
+* No `App.tsx` changes needed -- `<main>` is already `flex-1` inside a
+  `flex flex-col` shell, so it automatically expands to fill the space the
+  collapsed header frees up.
+
+---
+
+## [2026-08-18] - Header Hide Mode: Manual or Auto, Set from Account Settings
+
+Fabio: "give user option for auto hide or manual hide in the settings" --
+turns the prior entry's manual-only collapse into a per-user choice between
+the existing manual toggle and a new auto-hide-on-idle/reveal-on-hover mode,
+set from Account Settings. Client-only preference (like `darkMode`), not
+part of `SystemUser`/`updateMe()` -- there's no backend preferences field
+to put it in, and it doesn't need to sync across devices.
+
+### 1. File: `frontend/src/lib/headerHideModeStorage.ts` (new)
+* `HeaderHideMode = "manual" | "auto"` + `loadPersistedHeaderHideMode(email)`/
+  `persistHeaderHideMode(email, mode)` -- exact same per-user
+  localStorage-keyed-by-email pattern as `themeStorage.ts`'s dark-mode
+  persistence, mirrored file-for-file (private `keyFor()`, try/catch
+  fail-safes, default `"manual"` on any read failure).
+
+### 2. File: `frontend/src/app/components/Header.tsx`
+* New required `hideMode: HeaderHideMode` prop.
+* The old single `collapsed` boolean is now two independent pieces of
+  state, one per mode, so switching `hideMode` never has to reconcile one
+  against the other: `collapsed` (manual, click-driven, unchanged from the
+  prior entry) and `autoVisible` (auto, driven by a `setTimeout` +
+  `AUTO_HIDE_DELAY_MS = 900`). `isHidden = hideMode === "manual" ? collapsed : !autoVisible`
+  is the single value the render branches on.
+* Auto mode: `<header>` gets `onMouseEnter`/`onMouseLeave` (cancel/schedule
+  the hide timer); the collapsed strip gets `onMouseEnter` too (reveal on
+  hover, no click needed) instead of manual's `onClick`. A `useEffect`
+  keyed on `hideMode` re-arms auto-hide on mount/mode-switch (shows the
+  header, then schedules the same hide-after-a-pause used on mouseLeave) --
+  covers landing directly in "auto" mode or switching into it while the
+  cursor isn't already over the header to trigger a real `mouseLeave`.
+* The manual `ChevronUp` "Hide menu" button now only renders when
+  `hideMode === "manual"` -- "auto" hides itself, no button needed.
+
+### 3. File: `frontend/src/app/App.tsx`
+* New `headerHideMode` state, lazy-initialized from
+  `loadPersistedHeaderHideMode()` exactly like `darkMode`, re-read in
+  `handleLogin()` alongside it. New `handleHeaderHideModeChange(mode)`
+  updates state and persists in one call -- passed to
+  `AccountSettingsModule` as `onHeaderHideModeChange`. `headerHideMode`
+  itself passed to `<Header>` as `hideMode`.
+
+### 4. File: `frontend/src/app/components/AccountSettingsModule.tsx`
+* New props `headerHideMode`/`onHeaderHideModeChange` (controlled from
+  App.tsx, not local state -- this screen's other fields all round-trip
+  through `updateMe()`/`SystemUser`, this one doesn't).
+* New "Display Preferences" card (its own card, deliberately separate from
+  "Profile & Preferences" -- no Save button, since the change applies
+  immediately via `onHeaderHideModeChange` on `<select>` change, unlike the
+  Profile card's dirty-check-then-Save flow) with a "Header Visibility"
+  `<select>` (same visual pattern as the existing Session Timeout field):
+  "Manual -- click a button to hide/show" / "Auto-hide -- hides itself,
+  hover to reveal".
+
+### Status / Next Steps
+* Implementation complete on this branch; not yet verified by Fabio in the
+  running app.
+
+---
+
+## [2026-08-18] - Tab-Key Module Switching
+
+Fabio: make the module tabs (Monitoring/Spatial/Assessment/Admin/Users/
+Backup/Activity/Account) navigable with the Tab key. Clarified scope: plain
+`Tab` (not Ctrl+Tab -- browsers/OS reserve that combo for real tab/window
+switching, so a page's `keydown` handler never sees it), only while focus is
+already on one of the module tab buttons (not a global app-wide shortcut),
+wrapping around at both ends.
+
+### File: `frontend/src/app/components/Header.tsx`
+* New `tabRefs` (`useRef<Array<HTMLButtonElement | null>>`), one entry per
+  rendered module tab, set via a callback ref on each `<button>`.
+* New **`handleTabKeyDown(e, idx)`**: on `Tab`/`Shift+Tab`, `preventDefault`s
+  the browser's default focus-move, computes the next/previous index
+  (wrapping via `% modules.length`), calls the existing `onModuleChange()`
+  with that module's id, and moves DOM focus onto its button ref -- so
+  focus and the active module stay in sync as you tab through. Wired via
+  `onKeyDown` on each tab button; scoped to those buttons only, so `Tab`
+  behavior everywhere else in the app (search boxes, form fields, modals)
+  is untouched.
+
+### Status / Next Steps
+* Deliberately diverges from the ARIA tabs authoring pattern (which
+  reserves `Tab` for leaving the tablist and uses arrow keys to move
+  between tabs) per Fabio's explicit request -- flagged to him before
+  implementing, confirmed as intended.
+* Fabio reported Tab "doesn't do its job" on first test. Likely cause:
+  the handler only fires when a tab button already has DOM focus, but
+  clicking a `<button>` doesn't reliably grant it focus across browsers
+  -- Chrome does, Firefox and Safari (macOS) don't by default. Fixed by
+  having `onClick` explicitly call `e.currentTarget.focus()` in addition
+  to `onModuleChange()`, so a click always leaves the clicked tab
+  focused regardless of browser. **Not yet re-verified by Fabio.**
+
+---
+
+## [2026-08-20] - CSV/GPX Upload Notifications Survive Module Switching
+
+Fabio: "i want to have notification for ingestion if it was done cause
+there is no way to tell user is it done or not." Root cause: CSV/GPX
+upload progress state and the handlers driving it
+(`handleCsvFileSelected`/`handleGpxFilesSelected`, plus the CSV job-status
+poll and the GPX upload-failures modal) lived as local state inside
+`SpatialAnalysisModule`, which is conditionally mounted only while
+`activeModule === "spatial"` (see App.tsx). Switching to another module tab
+before an upload finished unmounted the component running the poll loop,
+so its completion toast could be silently missed with no record anywhere
+that the upload had even happened -- unlike bulletin-parse notifications,
+which already post to both a toast *and* the persistent notification bell.
+
+### 1. File: `frontend/src/app/App.tsx`
+* New state: `csvUploadProgress`, `gpxUploadProgress`,
+  `uploadFailureDetails`, `showUploadDetails` -- moved up from
+  `SpatialAnalysisModule`, same reasoning already documented there for why
+  `useFarmsData` lives here instead of locally.
+* New **`handleCsvFileSelected()`** / **`handleGpxFilesSelected()`** --
+  moved up verbatim from `SpatialAnalysisModule` (same polling/upload
+  logic, `farmsData.refresh()` call unchanged), with one addition: on
+  completion (success, partial failure, or error) each now also pushes an
+  `AppNotification` into the existing notification-bell list (`type:
+  "success"` or `"warning"`), not just a `toast()` call -- so the outcome
+  is still visible later even if the toast faded or was missed while the
+  user was on a different module.
+* New **`UploadFailuresModal`** (moved verbatim from
+  `SpatialAnalysisModule`) and its render call, now sitting at the App
+  root next to `<Toaster>` instead of inside the conditionally-mounted
+  module -- so the toast's "View details" action still works no matter
+  which module is active when it's clicked.
+* `<SpatialAnalysisModule>` now passes `csvUploadProgress`,
+  `gpxUploadProgress`, `onCsvFileSelected`, `onGpxFilesSelected` as props.
+
+### 2. File: `frontend/src/app/components/SpatialAnalysisModule.tsx`
+* Removed the local `csvUploadProgress`/`gpxUploadProgress`/
+  `uploadFailureDetails`/`showUploadDetails` state, `handleCsvFileSelected`/
+  `handleGpxFilesSelected`, `CSV_POLL_MS`, and `UploadFailuresModal` (all
+  moved to App.tsx as above). Also dropped the now-unused
+  `refresh: refreshFarms` destructure from `farmsData`.
+* `SpatialAnalysisModuleProps` gained `csvUploadProgress`,
+  `gpxUploadProgress`, `onCsvFileSelected`, `onGpxFilesSelected`; the
+  upload buttons/inputs now read/call these props instead of local
+  state/handlers. No visual change -- same buttons, same progress text.
+
+### Status / Next Steps
+* Frontend-only fix, scoped per Fabio's explicit confirmation (module-switch
+  gap, not page-refresh/browser-close persistence -- the CSV job itself
+  stays in-memory on the backend per `upload_jobs.py`'s existing
+  single-worker-process design, unchanged here).
+* Not yet verified by Fabio in the running app.
+
+---
+
+## [2026-08-20] - Nationwide PSGC Expansion + Remove Mindanao-Only Exposure Restriction
+
+Fabio: wants to test whether typhoon-signal exposure calculation actually
+works when fed real data for the whole country, not just the previous
+Region X + Caraga subset. This is a **testing-scoped change, not a change to
+the documented insured-area business scope** -- `.claude/PROJECT_CONTEXT.md`
+and `.claude/MASTER_DEVELOPMENT_CONTEXT.md`'s "PCIC Regional Office X"
+deployment scope are unchanged; this only expands what the ingestion/
+exposure code is *capable* of computing so it can be tested end to end.
+Full plan: `/home/fabio/.claude/plans/why-it-does-not-prancy-pony.md`.
+
+### 1. File: `backend/scripts/convert_psgc_publication.py` (new)
+* Converts the official PSA PSGC Publication Excel file (Fabio downloads
+  it himself -- automated fetching from psa.gov.ph/the FOI portal returns
+  403) into the flat `psgc_code,province,municipality,barangay` CSV the app
+  already expects. Written defensively: an `--inspect` flag prints the raw
+  file's actual sheets/columns/geographic-level values before any
+  conversion logic assumes a layout, since PSA's exact export format
+  wasn't in hand while writing this.
+* Convention for Highly Urbanized/NCR cities, which have no parent province
+  in PSA's own hierarchy: `province` is set to the city's own name. See the
+  script's module docstring for the full reasoning.
+
+### 2. File: `backend/app/data/psgc_nationwide_boundaries.csv` (renamed from `psgc_region10_boundaries.csv`)
+* Was 2,258 rows / 8 provinces (Bukidnon, Camiguin, Misamis Oriental +
+  all 5 Caraga provinces). Regenerated nationwide via the script above once
+  Fabio supplies the source file -- row/province counts to be confirmed
+  once that run happens.
+
+### 3. File: `backend/app/api/upload.py`
+* `_PSGC_LOOKUP_PATH` now points at the renamed file. Updated the
+  `ValueError` message and the `_prefetch_caches()` sizing comment (was
+  "~2-3k rows", now describes nationwide scale, ~42k). No logic changes --
+  `_boundary_key()`/`_resolve_psgc_code()`/the alias-variant matching were
+  already geography-agnostic, confirmed fine performance-wise at nationwide
+  scale (single in-memory dict, a few MB).
+
+### 4. File: `backend/seed_database.py`
+* Read path and surrounding comments updated for nationwide sourcing.
+  Confirmed idempotent for the boundary-seeding section (existence-check
+  per row before insert, no truncate/drop) -- safe to re-run against an
+  already-provisioned DB.
+
+### 5. File: `backend/scripts/benchmark_csv_ingestion.py`
+* `_PSGC_LOOKUP_PATH` updated in lockstep (duplicates the constant rather
+  than importing it from `upload.py`).
+
+### 6. File: `backend/app/services/bulletin_parser.py`
+* `save_bulletin_to_db()`: collapsed the old two-branch logic (precise
+  `AdminBoundary` match for Mindanao/`island_group=2` only, free-text split
+  for Luzon/Visayas) into one loop applying the same precise
+  province+municipality substring match to every island group. Per Fabio's
+  explicit choice: **no free-text fallback** -- a bulletin cell naming only
+  a province/region with no specific municipality now yields zero matched
+  rows for that group, same as an unmatched area always has.
+* Deleted `_split_named_areas()` (dead code under the above).
+* Each inserted `TcbSignal` now also records `province` (the matched
+  boundary's province) -- see next item.
+
+### 7. File: `backend/app/models/models.py`, `backend/init_schema.sql`, `backend/migrations/2026-08-20_tcb_signal_province.sql` (new)
+* Added `TcbSignal.province` (nullable `VARCHAR(100)`). Existing rows from
+  before this migration are left `NULL`, not backfilled.
+* **Why:** `exposure_calculator.py` previously matched signal areas to
+  boundaries by municipality name alone, which was safe at Region X +
+  Caraga scale (8 provinces, no name collisions) but silently wrong
+  nationwide -- duplicate municipality names across provinces (e.g.
+  multiple "Santa Cruz") could attribute exposure to the wrong province
+  with no visible symptom. This surfaced during this session's design pass,
+  not something explicitly asked for -- flagged to Fabio and fixed in the
+  same pass per his confirmation, since deferring it would mean shipping
+  known-wrong data.
+* Run against any already-provisioned DB: `psql -U agrisure_admin -d
+  agrisure_db -f backend/migrations/2026-08-20_tcb_signal_province.sql`.
+
+### 8. File: `backend/app/services/exposure_calculator.py`
+* `boundaries_by_municipality` (keyed on municipality name alone) replaced
+  with `boundaries_by_province_municipality` (keyed on `(province,
+  municipality)`), matched against the new `TcbSignal.province`. A signal
+  with no recorded province (pre-migration rows) is skipped rather than
+  guessed.
+
+### 9. File: `backend/app/api/bulletins.py`
+* `GET /api/bulletins/{tcb_id}/signals` now includes `province` in each
+  signal's response dict, so the frontend can do the same disambiguation.
+
+### 10. File: `frontend/src/lib/api.ts`
+* `TcbSignal` interface gained `province: string | null`.
+
+### 11. File: `frontend/src/app/components/AssessmentModule.tsx`
+* `AreasAffectedModal`: removed the hardcoded `island_group === 2`
+  restriction on exposure enrichment -- now matches every island group's
+  areas against `typhoonSummary.areas_hit` by `(province, municipality)`
+  instead of a `"2:"`-prefixed municipality-only key (same collision-safety
+  reasoning as the backend fix above).
+* `MergedArea`/the row-merge key now include `province` for the same
+  reason.
+* Removed `mindanaoCount`; the info banner text no longer claims
+  Luzon/Visayas areas "never have exposure data" (no longer true) --
+  replaced with a generic "{matched} of {total} area(s) have computed
+  exposure data" message. Updated the stale doc-comments above
+  `ISLAND_GROUP_LABELS` and the enrichment loop that documented the
+  Mindanao-only rule as intentional design.
+
+### 12. File: `backend/tests/test_bulletin_parser.py`, `backend/tests/test_exposure_calculator.py`
+* Removed the two `_split_named_areas()` unit tests (method deleted).
+* Replaced the old "Luzon/Visayas free-text fallback" test with one
+  confirming Luzon/Visayas now match `AdminBoundary` precisely like
+  Mindanao, plus a new test confirming an unmatched area now yields zero
+  rows (no fallback).
+* Added `test_compute_for_typhoon_disambiguates_same_named_municipality_by_province`
+  and a companion "no province recorded -> skipped" test, as direct
+  regression coverage for the collision-bug fix (item 8).
+
+### Status / Next Steps
+* **Not yet run against a real database or a real PSA file** -- Fabio still
+  needs to (a) download the PSA PSGC Publication, (b) run the conversion
+  script and review its output, (c) re-run `seed_database.py` locally, then
+  on the remote box (192.168.1.41), (d) apply the
+  `2026-08-20_tcb_signal_province.sql` migration on both, per
+  [[project_migrations_not_auto_applied]] -- a new migration file is never
+  auto-applied from `git pull` alone.
+* `frontend/public/data/region10-boundaries.geojson` (the Spatial Analysis
+  map's polygon overlay, unrelated to exposure calculation) stays
+  Region-X-only by design -- not part of this change.
+* Branch: `fabio/data/nationwide-psgc-exposure`, off `develop`, per
+  `.claude/GITHUB_WORKFLOW.md`'s protected-branch policy (not committed
+  directly to `develop`).
+
+
+## [2026-09-30] - Stop Non-Bulletin PDFs Creating "UNKNOWN" TCBs + LPA Bulletin Always Final
+
+A "TCB No. 1 / UNKNOWN" row appeared in the bulletin table, issued at the
+scrape time itself (Sep 30, 12:29 PM). Checked the live TAMSS index
+(`pubfiles.pagasa.dost.gov.ph/tamss/weather/bulletin/`): every storm that
+weakened into a Low Pressure Area (LUIS 13F, MAYMAY 17F, JOSIE 3F,
+NENENG 9F) is titled `Low Pressure Area (formerly "NAME")`, which the
+parser already resolves to the real name -- not the source. The source is
+that the index also hosts PDFs that are not Tropical Cyclone Bulletins:
+`IWS#2_pilandok.pdf` (Tropical Cyclone Warning for Shipping) and
+`TCB#unknown.pdf` (Tropical Cyclone Advisory for BAVI, outside PAR).
+`fetch_active_bulletin_links()` took every `.pdf`, so the shipping warning
+parsed with no bulletin number (default 1), no title ("UNKNOWN"), and no
+matching "Issued at" (defaulted to now).
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* New module-level **`TCB_LINK_NAME_RE`** (`TCB#\d+[A-Za-z]?_[A-Za-z\-]+\.pdf`).
+* **`fetch_active_bulletin_links()`**: only keeps links whose URL-decoded
+  filename fully matches `TCB_LINK_NAME_RE` (drops `IWS#...` and
+  `TCB#unknown.pdf`). Added `urllib.parse.unquote` import.
+* **`parse_bulletin_text()`**: a `Low Pressure Area (formerly "NAME")`
+  bulletin now always sets `is_final=True`, even without the "F" suffix --
+  a storm that weakened into an LPA gets no further TCBs, so it is always
+  that storm's last bulletin (and triggers the final-bulletin assessment
+  calculation in `scrape_and_save_all()`).
+
+### 2. File: `backend/tests/test_bulletin_parser.py`
+* Added `test_parse_bulletin_text_low_pressure_area_is_final_even_without_f_suffix`.
+* Added `FetchActiveBulletinLinksTests.test_keeps_only_tcb_links_and_drops_non_bulletin_pdfs`
+  (modeled on the live index's IWS/TCB#unknown entries).
+
+### Status / Next Steps
+* `python -m pytest tests/test_bulletin_parser.py` passed (2026-09-30,
+  run together with the timeout fix below).
+* The existing "UNKNOWN" typhoon + its TCB No. 1 row already in the DB is
+  not removed by this change -- needs a manual DB cleanup by Fabio.
+
+
+## [2026-09-30] - PAGASA PDF Download Timeouts: Longer Read Window + One Retry
+
+The backend log (Cristian's Tailscale-hosted instance) filled with full
+`httpx.ReadTimeout` / `ConnectTimeout` tracebacks from
+`download_bulletin_pdf()` -- `pubfiles.pagasa.dost.gov.ph` often takes more
+than the old flat 15s to send a bulletin PDF (e.g. `TCB#11_inday.pdf`,
+`TCB#12_pilandok.pdf`, `TCB#13_kiyapo.pdf`), so those bulletins were never
+saved. The scrape loop already skipped the failed link and continued, so no
+crash -- just missing bulletins and a noisy log.
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* New module-level **`PDF_DOWNLOAD_TIMEOUT`** (`httpx.Timeout(60.0, connect=15.0)`)
+  and **`PDF_DOWNLOAD_RETRY_DELAY_SECONDS`** (2.0). Added `asyncio` import.
+* **`download_bulletin_pdf()`**: uses `PDF_DOWNLOAD_TIMEOUT`; on
+  `httpx.TimeoutException`, waits and retries once. A second timeout propagates.
+* **`scrape_and_save_all()`**: new `except httpx.TimeoutException` branch
+  (before the generic one) -- rolls back and logs a single-line warning with
+  the decoded filename, no traceback. Parse/DB errors keep the full traceback.
+
+### 2. File: `backend/tests/test_bulletin_parser.py`
+* New `DownloadBulletinPdfTests`: retry-then-success, retry-then-raise, and
+  the one-line timeout warning in `scrape_and_save_all()`. Added `httpx`,
+  `tempfile` imports.
+
+### Status / Next Steps
+* `python -m pytest tests/test_bulletin_parser.py` passed (2026-09-30).
+* Merged into `develop` locally per Cristian's explicit direction (skip-PR).
+* A PAGASA outage (not just slowness) still fails the link; the next
+  scheduled poll retries it.
+
+
+## [2026-09-30] - TCB Viewer Shows Real TCWS Signal + Full Nationwide PSGC Boundaries
+
+The TCB viewer (e.g. TCB 147, PILANDOK #11) showed "No Signal Data" and an
+empty "Areas Under Signal Warning" -- and so did every other real bulletin:
+the 2026-09-30 DB backup had zero `tbl_tcb_signals` rows for any real TCB
+(only the two mock bulletins had any), even KIYAPO #11 whose PDF clearly has
+Signal No. 2 over Batanes. Root causes:
+1. The viewer derived the signal number only from `tbl_tcb_signals` rows.
+2. `save_bulletin_to_db()` only wrote a row when an `AdminBoundary`
+   province AND municipality both appeared in the TCWS cell. The
+   "nationwide" `psgc_nationwide_boundaries.csv` was never actually
+   regenerated (still 2,257 rows / 8 Mindanao provinces), and
+   `tbl_admin_boundaries` only ever got barangays that had farms -- so every
+   Luzon/Visayas area was dropped. Whole-province mentions ("Batanes") never
+   matched either, since no municipality name appears.
+3. Signals were only seeded on a bulletin's first insert -- never backfilled.
+(PILANDOK #11 itself, centered at 22.2°N 132.4°E, may genuinely have had no
+TCWS -- if so it will still read "No Signal Data" after reprocessing.)
+
+Fabio's decisions: keep PAGASA's raw TCWS on the bulletin for display
+(unvalidated), backfill on the next scrape/upload, and load every PSGC
+barangay so Luzon/Visayas areas also resolve for exposure.
+
+### 1. File: `backend/app/models/models.py`, `backend/init_schema.sql`, `backend/migrations/2026-09-30_tcb_raw_tcws.sql` (new)
+* `TropicalCycloneBulletin`: new nullable **`max_signal_level`** (INT) and
+  **`tcws_areas`** (JSONB, `{"<level>": {"<island_group>": text}}`).
+  **ERD deviation** -- two new columns on `tbl_tropical_cyclone_bulletins`.
+
+### 2. File: `backend/app/services/bulletin_parser.py`
+* **`save_bulletin_to_db()`**: sets `max_signal_level` / `tcws_areas` on
+  insert. For an existing bulletin with `tcws_areas IS NULL` and parsed
+  signals: fills both in, and seeds `tbl_tcb_signals` if it has no rows yet
+  -- one-time backfill (guarded on the NULL), not on every poll.
+* New **`_seed_tcb_signals()`** (extracted matching loop): loads only
+  `DISTINCT province, municipality` instead of every AdminBoundary row.
+* New module-level **`match_tcws_cell()`** replacing plain substring
+  matching: whole-name regex (no "Cagayan" in "Cagayan de Oro", "Samar" in
+  "Northern Samar"); province + `( ... )` list -> only listed towns;
+  province with no list -> all its municipalities (a province's list is
+  only looked for up to the next province mention or top-level comma, so
+  "Batanes" never borrows a following unloaded province's list); province names inside a
+  parenthetical ignored; "City of X" also matches "X City" / "X"; HUCs
+  (province == municipality) matched anywhere. Dedup now includes province,
+  so same-named towns in different provinces are both kept.
+* New helpers `_raw_tcws_columns()`, `_name_re()` (cached),
+  `_municipality_aliases()`, `_mentions()`. Added `functools` import.
+
+* **`parse_bulletin_text()`**: new `no_signal_hoisted` flag -- PAGASA's
+  "No Wind Signal is currently hoisted" sentence (confirmed on
+  `TCB#11_pilandok.pdf`: PILANDOK #11 genuinely had no TCWS, 1,105 km east
+  of Extreme Northern Luzon). Stored as `max_signal_level = 0` (NULL still
+  means "no signal information found"); the backfill guard is now
+  `max_signal_level IS NULL` so these bulletins are backfilled too.
+* Viewer: `max_signal_level === 0` -> header "No Wind Signal Is Raised" and
+  areas box "No Wind Signal is Currently Listed." instead of
+  "No Signal Data".
+
+### 3. File: `backend/app/services/exposure_calculator.py`
+* **`compute_for_typhoon()`**: boundary lookup uses `load_only(boundary_id,
+  province, municipality)` -- no geometry for ~42k rows. Logic unchanged.
+
+### 4. File: `backend/app/api/bulletins.py`
+* **`list_bulletins()`**: returns `max_signal_level` and `tcws_areas`.
+
+### 5. File: `frontend/src/lib/api.ts`, `frontend/src/app/components/MonitoringModule.tsx`
+* `Bulletin` type: `max_signal_level`, `tcws_areas`.
+* **`TCBViewerModal`**: header signal = max(signal rows, `max_signal_level`).
+  Areas box keeps the matched-municipality list; when there are none, falls
+  back to PAGASA's raw text per level, labeled Luzon/Visayas/Mindanao (new
+  `rawTcwsByLevel()` helper). `handleDownloadTCB()` uses the same fallback.
+  No layout change.
+
+### 6. File: `backend/scripts/convert_psgc_publication.py`
+* Reads the PSA file as text (`dtype=str`) and restores a lost leading zero
+  (Regions 01-09) via `_normalize_code()`.
+* HUC/NCR fix: a city whose code's province segment differs from the
+  current province's is its own province. The old `current_province is
+  None` check only caught the first NCR city (later ones inherited its name)
+  and let HUCs inherit the preceding province.
+* Sub-municipalities (Manila's districts) no longer replace the parent city.
+* `_find_code_column()`: prefers a header containing "psgc" -- the 2Q-2026
+  publication's code column is "10-digit PSGC" (no "code" in it), next to a
+  "Correspondence Code" that must not be picked.
+* Conversion body split into testable **`convert_rows()`**.
+* `backend/requirements.txt`: added `openpyxl==3.1.5` -- `pd.read_excel()` on
+  the PSA `.xlsx` needs it and it wasn't installed.
+* New **`preserve_existing_names()`**: codes already in the current CSV keep
+  their existing spelling (e.g. Butuan under "Agusan del Norte"), codes
+  missing from the PSA file are kept, every difference is printed, and the
+  old CSV is backed up to `.csv.bak`.
+
+### 7. File: `backend/seed_admin_boundaries.py` (new), `backend/seed_all.py`
+* Bulk-loads every CSV barangay into `tbl_admin_boundaries`
+  (`ON CONFLICT (psgc_code) DO NOTHING`, batches of 5,000). Added as
+  `seed_all.py` step 1. `boundary_geom` stays NULL outside Region X.
+  Connects via `backend/.env`'s `DATABASE_URL` (falls back to the hardcoded
+  local-dev `DB_CONFIG` the other seed scripts use) -- the hardcoded
+  password didn't match this machine's DB.
+* `psgc_nationwide_boundaries.csv` regenerated from
+  `docs/PSGC-2Q-2026-Publication-Datafile.xlsx`: 42,010 barangays, 1,642
+  (province, municipality) pairs; 193 existing Region X/Caraga rows kept
+  their current spelling (Butuan under Agusan del Norte, `Santo`/`(Pob.)`
+  variants); no existing code missing.
+
+### 8. File: `backend/tests/test_bulletin_parser.py`, `backend/tests/test_exposure_calculator.py`, `backend/tests/test_convert_psgc_publication.py` (new)
+* Save-to-DB mock now serves the distinct (province, municipality) query
+  and a `TcbSignal` query. New tests: raw TCWS stored with no boundary
+  match / NULL with no signals, whole-province expansion, backfill once
+  with no re-seed, plus `MatchTcwsCellTests` and converter tests.
+
+### Status / Next Steps
+* `python -m pytest tests/test_bulletin_parser.py tests/test_exposure_calculator.py
+  tests/test_convert_psgc_publication.py` passed, 58/58 (2026-09-30).
+* Applied on this PC's DB (2026-09-30): migration run; CSV regenerated from
+  `docs/PSGC-2Q-2026-Publication-Datafile.xlsx` (committed as the source);
+  `seed_admin_boundaries.py` inserted 41,966 rows (44 already existed).
+* TCB reset (2026-09-30, pg_dump backup taken first): deleted all 28 real
+  typhoons (MARISOL mock kept -- its bulletins were already gone; the
+  table also held duplicate typhoon rows from an earlier TCB-only delete),
+  then re-downloaded every TCB from PAGASA. PILANDOK #11 now shows "No Wind
+  Signal Is Raised".
+* Other DBs (e.g. Fabio's): run the migration, then `seed_admin_boundaries.py`;
+  existing bulletins backfill on the next scrape.
+* Open: the Exposure Summary for PILANDOK is empty -- not yet investigated
+  (likely no PILANDOK bulletin had a TCWS).
+* Side effect: `GET /farms/municipalities` (Farm Records suggestions) reads
+  `tbl_admin_boundaries`, so it will list every municipality nationwide.
+* Known gap: "Metro Manila" isn't a PSGC province name -- only the raw text
+  shows it. No nationwide polygons (map still Region X only).
+
+---
+
+## [2026-10-09] - Monitoring & Extraction Redesign (branch: develop, direct push per user)
+
+Per Fabio (relayed via the user): simplify the Monitoring & Extraction stat
+cards and layout, then (after an initial "revert" request) bring back "TCBs
+Downloaded" rescoped to one typhoon instead of a lifetime total, plus a new
+"done collecting" alert.
+
+### 1. File: `frontend/src/app/components/MonitoringModule.tsx`
+* Removed the "Est. Total Indemnity" stat card, "Growth Stage Distribution"
+  chart, and "TCB Download Timeline" chart entirely, along with their
+  supporting code (`growthStageData`, `bulletinTimelineData`,
+  `GROWTH_STAGE_COLORS`, now-unused `PieChart`/`LineChart`/`TrendingUp`
+  imports).
+* "Farms by Signal Number" moved up into the right panel, now sitting
+  beside "PAGASA TCB Bulletins" (previously a separate bottom row with TCB
+  Download Timeline, which is now gone) -- the whole bottom charts row is
+  removed.
+* "TCBs Downloaded" brought back (initially removed, then explicitly
+  reverted per Fabio) but rescoped: instead of `bulletins.length` (a
+  lifetime total across every typhoon ever parsed), it now counts bulletins
+  for one tracked typhoon -- the first/primary active typhoon if there is
+  one, falling back to the most recently-issued bulletin's typhoon once
+  nothing is active (so the count/alert still has something to point at
+  right after a typhoon closes out). Two storms active at once is rare
+  enough that summing/listing separately wasn't worth the complexity, per
+  Fabio's explicit call.
+* New "done collecting" alert badge (amber, `AlertTriangle` icon) on that
+  card once the tracked typhoon is no longer on PAGASA's active list
+  (`Typhoon.is_active` turning false) -- chosen over the bulletin's own "F"
+  (final bulletin) marker since that's parse-time-only today, never
+  persisted, and would have needed a new DB column + API change. Badge text
+  is exactly "Ready for assessment", per the user's explicit wording choice
+  after trying a couple of longer alternatives.
+* Stat card grid: 5 cards -> 4, `grid-cols-5` -> `grid-cols-4`, each card
+  made visibly larger (bigger padding/icon/value text) so the row doesn't
+  look sparse with one fewer card.
+
+### Status / Next Steps
+* Verified working directly with the user (including the alert wording
+  iteration) before this push.
+* This redesign was implemented twice -- first against an older version of
+  this file, but that work was discarded unpushed after a large upstream
+  pull (`ca5bf34` "farms on-demand pagination stage 2", `ca5bf34`'s
+  sibling commits) changed `MonitoringModule.tsx` to pull stats from a new
+  `GET /api/assessments/summary` endpoint instead of client-side-computed
+  `farms`/`assessments` arrays -- the original diff would not have applied
+  cleanly. Redone from scratch against the current file; no leftover
+  references to the old data-fetching approach.
+* Pushed directly to `develop` per the user's explicit instruction, not
+  through a feature branch/PR.

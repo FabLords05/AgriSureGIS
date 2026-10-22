@@ -1,19 +1,24 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
-  Settings, Key, Database, Users, Shield, Save, AlertTriangle,
-  ChevronDown, ChevronRight, RefreshCw, Trash2, Plus, CheckCircle2,
-  Server, Bell, Clock, ToggleLeft, ToggleRight, Eye, EyeOff, DollarSign
+  Settings, Save, AlertTriangle,
+  ChevronDown, ChevronRight, CheckCircle2,
+  Clock, DollarSign, Wifi, Key, Lock
 } from "lucide-react";
-import { DAMAGE_FACTORS, GrowthStage } from "./mockData";
+import { toast } from "sonner";
+import {
+  getParserSettings, getSystemStatus, SystemStatus,
+  getSystemSettings, updateCoverageRate, getPcicMatrices, PcicMatrices,
+} from "@/lib/api";
 
 interface SectionProps {
   title: string;
   icon: React.ReactNode;
   children: React.ReactNode;
   defaultOpen?: boolean;
+  badge?: string;
 }
 
-function Section({ title, icon, children, defaultOpen = true }: SectionProps) {
+function Section({ title, icon, children, defaultOpen = true, badge }: SectionProps) {
   const [open, setOpen] = useState(defaultOpen);
   return (
     <div className="bg-card border border-border rounded-xl overflow-hidden">
@@ -23,6 +28,11 @@ function Section({ title, icon, children, defaultOpen = true }: SectionProps) {
       >
         <span className="text-[#166534]">{icon}</span>
         <span className="text-sm font-semibold flex-1">{title}</span>
+        {badge && (
+          <span className="flex items-center gap-1 text-[10px] text-muted-foreground px-2 py-0.5 rounded-full border border-border">
+            <Lock size={9} /> {badge}
+          </span>
+        )}
         {open ? <ChevronDown size={14} className="text-muted-foreground" /> : <ChevronRight size={14} className="text-muted-foreground" />}
       </button>
       {open && <div className="border-t border-border px-4 py-4">{children}</div>}
@@ -30,214 +40,100 @@ function Section({ title, icon, children, defaultOpen = true }: SectionProps) {
   );
 }
 
-interface ConfirmDialogProps {
-  message: string;
-  onConfirm: () => void;
-  onCancel: () => void;
-}
+const EXPOSURE_HOURS = [6, 12, 24];
 
-function ConfirmDialog({ message, onConfirm, onCancel }: ConfirmDialogProps) {
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="bg-card border border-amber-300 rounded-xl shadow-2xl p-5 max-w-sm">
-        <div className="flex items-center gap-2 mb-3">
-          <AlertTriangle size={18} className="text-amber-500" />
-          <span className="text-sm font-semibold">Confirm Action</span>
-        </div>
-        <p className="text-xs text-muted-foreground mb-4">{message}</p>
-        <div className="flex gap-2">
-          <button onClick={onCancel} className="flex-1 py-1.5 rounded-lg border border-border text-xs hover:bg-muted transition-colors">Cancel</button>
-          <button onClick={onConfirm} className="flex-1 py-1.5 rounded-lg bg-amber-500 text-white text-xs font-semibold hover:bg-amber-600 transition-colors">Confirm</button>
-        </div>
-      </div>
-    </div>
-  );
-}
+// Admin Panel (2026-10-22): every control here is now real. The coverage rate
+// is persisted (tbl_system_settings) and used at upload as the default Amount
+// of Cover; the PCIC matrices are the real payout tables, shown read-only.
+// The old client-only Session & Security section was removed -- per-account
+// timeout lives in Account Settings / User Management.
+export function CalibrationModule() {
+  const [coverageRate, setCoverageRate] = useState<number | null>(null);
+  const [savedRate, setSavedRate] = useState<number | null>(null);
+  const [rateBounds, setRateBounds] = useState<[number, number]>([1000, 100000]);
+  const [isSaving, setIsSaving] = useState(false);
+  const [matrices, setMatrices] = useState<PcicMatrices | null>(null);
+  const [matrixError, setMatrixError] = useState<string | null>(null);
 
-interface CalibrationModuleProps {
-  coverageRatePerHa: number;
-  onCoverageRateChange: (rate: number) => void;
-}
+  // Backend API status -- real, not mock. Reuses the existing GET
+  // /api/bulletins/settings call purely as a connectivity ping now that the
+  // TCB polling interval it used to also surface is fixed backend-side (see
+  // build_scheduler's hardcoded 15min in scheduler.py) instead of admin-
+  // configurable here.
+  const [backendOk, setBackendOk] = useState<boolean | null>(null);
+  const [lastCheck, setLastCheck] = useState<string | null>(null);
 
-type UserEntry = { id: number; name: string; role: string; email: string; active: boolean };
+  // Google Earth Engine connection (2026-10-12) -- read-only. The
+  // prototype's editable credentials card is deliberately not reproduced:
+  // the service-account key is a live private key and stays in backend/.env.
+  const [gee, setGee] = useState<SystemStatus["gee"] | null>(null);
+  useEffect(() => {
+    getSystemStatus().then(res => setGee(res.gee ?? null)).catch(() => setGee(null));
+  }, []);
 
-export function CalibrationModule({ coverageRatePerHa, onCoverageRateChange }: CalibrationModuleProps) {
-  const [damageFactor, setDamageFactor] = useState<Record<GrowthStage, Record<number, number>>>(
-    JSON.parse(JSON.stringify(DAMAGE_FACTORS))
-  );
-  const [geeProjectId, setGeeProjectId] = useState("pcic-bicol-gee-2024");
-  const [geeApiKey, setGeeApiKey]       = useState("AIzaSyPCIC-BICOL-GEE-2024-DEMO-KEY");
-  const [showGeeKey, setShowGeeKey]     = useState(false);
-  const [sessionTimeout, setSessionTimeout] = useState(5);
-  const [autoBackup, setAutoBackup]     = useState(true);
-  const [emailAlerts, setEmailAlerts]   = useState(true);
-  const [parserInterval, setParserInterval] = useState(3);
-  const [savedSuccess, setSavedSuccess] = useState(false);
-  const [confirm, setConfirm]           = useState<{ msg: string; fn: () => void } | null>(null);
-  const [backupRunning, setBackupRunning] = useState(false);
-  const [users, setUsers] = useState<UserEntry[]>([
-    { id:1, name:"Ana L. Reyes",    role:"GIS Specialist",      email:"a.reyes@pcic.gov.ph",   active:true  },
-    { id:2, name:"Ramon B. Santos", role:"System Administrator", email:"r.santos@pcic.gov.ph",  active:true  },
-    { id:3, name:"Liza M. Cruz",    role:"GIS Specialist",      email:"l.cruz@pcic.gov.ph",    active:false },
-  ]);
+  useEffect(() => {
+    getParserSettings()
+      .then(() => setBackendOk(true))
+      .catch(() => setBackendOk(false))
+      .finally(() => setLastCheck(new Date().toLocaleTimeString()));
+  }, []);
 
-  // User management modals
-  const [editingUser, setEditingUser] = useState<UserEntry | null>(null);
-  const [addingUser, setAddingUser]   = useState(false);
-  const [newUser, setNewUser]         = useState({ name:"", role:"GIS Specialist", email:"", password:"" });
+  useEffect(() => {
+    getSystemSettings()
+      .then(res => {
+        setCoverageRate(res.data.coverage_rate_per_ha);
+        setSavedRate(res.data.coverage_rate_per_ha);
+        setRateBounds([res.data.coverage_rate_min, res.data.coverage_rate_max]);
+      })
+      .catch(error => toast.error(error instanceof Error ? error.message : "Failed to load settings."));
+    getPcicMatrices()
+      .then(res => setMatrices(res.data))
+      .catch(error => setMatrixError(error instanceof Error ? error.message : "Failed to load PCIC matrices."));
+  }, []);
+
+  const rateValid = coverageRate !== null && coverageRate >= rateBounds[0] && coverageRate <= rateBounds[1];
+  const rateDirty = coverageRate !== null && coverageRate !== savedRate;
 
   const handleSave = () => {
-    setSavedSuccess(true);
-    setTimeout(() => setSavedSuccess(false), 2500);
+    if (!rateValid || coverageRate === null) return;
+    setIsSaving(true);
+    updateCoverageRate(coverageRate)
+      .then(res => {
+        setSavedRate(res.data.coverage_rate_per_ha);
+        setCoverageRate(res.data.coverage_rate_per_ha);
+        toast.success("Settings saved successfully.");
+      })
+      .catch(error => toast.error(error instanceof Error ? error.message : "Failed to save settings."))
+      .finally(() => setIsSaving(false));
   };
 
-  const handleBackup = () => {
-    setBackupRunning(true);
-    setTimeout(() => setBackupRunning(false), 3000);
-  };
+  // RECSAP rows pivoted to one row per (stage, TCWS) with 6/12/24h columns.
+  const recsapRows = useMemo(() => {
+    const rows = new Map<string, { stage: string; tcws: number; byHours: Record<number, number> }>();
+    for (const r of matrices?.recsap ?? []) {
+      const key = `${r.crop_stage_no}-${r.wind_signal_tcws}`;
+      if (!rows.has(key)) rows.set(key, { stage: r.crop_stage, tcws: r.wind_signal_tcws, byHours: {} });
+      rows.get(key)!.byHours[r.exposure_hours] = r.estimated_yield_loss;
+    }
+    return [...rows.values()];
+  }, [matrices]);
 
-  const handleDeleteUser = (id: number) => {
-    setConfirm({
-      msg: "Are you sure you want to deactivate this user account? This action can be reversed by an administrator.",
-      fn: () => { setUsers(u => u.map(x => x.id === id ? { ...x, active:false } : x)); setConfirm(null); },
-    });
-  };
-
-  const handleSaveEditUser = () => {
-    if (!editingUser) return;
-    setUsers(u => u.map(x => x.id === editingUser.id ? editingUser : x));
-    setEditingUser(null);
-  };
-
-  const handleAddUser = () => {
-    if (!newUser.name.trim() || !newUser.email.trim()) return;
-    const id = Math.max(...users.map(u => u.id)) + 1;
-    setUsers(u => [...u, { id, name: newUser.name, role: newUser.role, email: newUser.email, active: true }]);
-    setNewUser({ name:"", role:"GIS Specialist", email:"", password:"" });
-    setAddingUser(false);
-  };
-
-  const stages: GrowthStage[] = ["Seedling","Vegetative","Reproductive","Ripening"];
-  const signals = [1,2,3];
+  // Indemnity factors pivoted to one row per stage group, one column per
+  // yield-loss bracket (in first-seen order, which follows the seed's order).
+  const indemnity = useMemo(() => {
+    const brackets: string[] = [];
+    const groups = new Map<string, Record<string, number>>();
+    for (const r of matrices?.indemnity ?? []) {
+      const bracket = `>${r.yield_loss_min}–${r.yield_loss_max}`;
+      if (!brackets.includes(bracket)) brackets.push(bracket);
+      if (!groups.has(r.crop_stage_group)) groups.set(r.crop_stage_group, {});
+      groups.get(r.crop_stage_group)![bracket] = r.indemnity_factor;
+    }
+    return { brackets, groups: [...groups.entries()] };
+  }, [matrices]);
 
   return (
     <div className="h-full overflow-auto bg-background p-4">
-      {confirm && <ConfirmDialog message={confirm.msg} onConfirm={confirm.fn} onCancel={() => setConfirm(null)} />}
-
-      {/* Edit User Modal */}
-      {editingUser && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="bg-card border border-border rounded-2xl shadow-2xl w-[400px] overflow-hidden">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-              <p className="text-sm font-bold">Edit User Account</p>
-              <button onClick={() => setEditingUser(null)} className="text-muted-foreground hover:text-foreground">✕</button>
-            </div>
-            <div className="p-4 space-y-3">
-              {[
-                { label:"Full Name", key:"name" as const, type:"text" },
-                { label:"Email",     key:"email" as const, type:"email" },
-              ].map(f => (
-                <div key={f.key}>
-                  <label className="text-[11px] font-semibold block mb-1">{f.label}</label>
-                  <input
-                    type={f.type}
-                    value={editingUser[f.key]}
-                    onChange={e => setEditingUser({ ...editingUser, [f.key]: e.target.value })}
-                    className="w-full border border-border rounded-lg px-3 py-2 text-[11px] bg-background focus:outline-none focus:border-[#166534]"
-                  />
-                </div>
-              ))}
-              <div>
-                <label className="text-[11px] font-semibold block mb-1">Role</label>
-                <select
-                  value={editingUser.role}
-                  onChange={e => setEditingUser({ ...editingUser, role: e.target.value })}
-                  className="w-full border border-border rounded-lg px-3 py-2 text-[11px] bg-background focus:outline-none focus:border-[#166534]"
-                >
-                  <option>GIS Specialist</option>
-                  <option>System Administrator</option>
-                  <option>Data Analyst</option>
-                  <option>Field Supervisor</option>
-                </select>
-              </div>
-              <div className="flex items-center gap-2">
-                <input type="checkbox" id="activeToggle" checked={editingUser.active} onChange={e => setEditingUser({ ...editingUser, active: e.target.checked })} className="accent-[#166534]" />
-                <label htmlFor="activeToggle" className="text-[11px]">Account Active</label>
-              </div>
-            </div>
-            <div className="flex gap-2 px-4 py-3 border-t border-border justify-end">
-              <button onClick={() => setEditingUser(null)} className="px-3 py-1.5 rounded-lg border border-border text-xs hover:bg-muted transition-colors">Cancel</button>
-              <button onClick={handleSaveEditUser} className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-[#166534] text-white text-xs font-semibold hover:bg-[#14532d] transition-colors">
-                <Save size={11} /> Save Changes
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Add User Modal */}
-      {addingUser && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="bg-card border border-border rounded-2xl shadow-2xl w-[400px] overflow-hidden">
-            <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-              <p className="text-sm font-bold">Add New User Account</p>
-              <button onClick={() => setAddingUser(false)} className="text-muted-foreground hover:text-foreground">✕</button>
-            </div>
-            <div className="p-4 space-y-3">
-              {[
-                { label:"Full Name",        key:"name" as const,     type:"text"     },
-                { label:"Email Address",    key:"email" as const,    type:"email"    },
-                { label:"Temp. Password",   key:"password" as const, type:"password" },
-              ].map(f => (
-                <div key={f.key}>
-                  <label className="text-[11px] font-semibold block mb-1">{f.label}</label>
-                  <input
-                    type={f.type}
-                    value={newUser[f.key]}
-                    onChange={e => setNewUser({ ...newUser, [f.key]: e.target.value })}
-                    placeholder={f.label}
-                    className="w-full border border-border rounded-lg px-3 py-2 text-[11px] bg-background focus:outline-none focus:border-[#166534]"
-                  />
-                </div>
-              ))}
-              <div>
-                <label className="text-[11px] font-semibold block mb-1">Role</label>
-                <select
-                  value={newUser.role}
-                  onChange={e => setNewUser({ ...newUser, role: e.target.value })}
-                  className="w-full border border-border rounded-lg px-3 py-2 text-[11px] bg-background focus:outline-none focus:border-[#166534]"
-                >
-                  <option>GIS Specialist</option>
-                  <option>System Administrator</option>
-                  <option>Data Analyst</option>
-                  <option>Field Supervisor</option>
-                </select>
-              </div>
-              {(!newUser.name.trim() || !newUser.email.trim()) && (
-                <p className="text-[10px] text-amber-600">Name and email are required.</p>
-              )}
-            </div>
-            <div className="flex gap-2 px-4 py-3 border-t border-border justify-end">
-              <button onClick={() => setAddingUser(false)} className="px-3 py-1.5 rounded-lg border border-border text-xs hover:bg-muted transition-colors">Cancel</button>
-              <button
-                onClick={handleAddUser}
-                disabled={!newUser.name.trim() || !newUser.email.trim()}
-                className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg bg-[#166534] text-white text-xs font-semibold hover:bg-[#14532d] disabled:opacity-50 transition-colors"
-              >
-                <Plus size={11} /> Create Account
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {savedSuccess && (
-        <div className="fixed top-16 right-4 z-50 flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-50 border border-emerald-200 shadow-xl">
-          <CheckCircle2 size={14} className="text-emerald-600" />
-          <span className="text-xs font-medium text-emerald-700">Settings saved successfully.</span>
-        </div>
-      )}
-
       <div className="max-w-5xl mx-auto space-y-4">
         {/* Header */}
         <div className="flex items-center justify-between">
@@ -245,20 +141,67 @@ export function CalibrationModule({ coverageRatePerHa, onCoverageRateChange }: C
             <h2 className="font-bold text-foreground flex items-center gap-2">
               <Settings size={18} className="text-[#166534]" /> Calibration & Settings
             </h2>
-            <p className="text-[11px] text-muted-foreground mt-0.5">Configure system parameters, credentials, and user access.</p>
+            <p className="text-[11px] text-muted-foreground mt-0.5">Configure system parameters and review the PCIC payout tables.</p>
           </div>
           <button
             onClick={handleSave}
-            className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#166534] text-white text-xs font-semibold hover:bg-[#14532d] transition-colors"
+            disabled={!rateDirty || !rateValid || isSaving}
+            className="flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#166534] text-white text-xs font-semibold hover:bg-[#14532d] disabled:opacity-50 transition-colors"
           >
-            <Save size={13} /> Save All Settings
+            <Save size={13} /> {isSaving ? "Saving…" : "Save All Settings"}
           </button>
         </div>
 
+        {/* System Status -- moved here from Monitoring & Extraction */}
+        <Section title="System Status" icon={<Wifi size={15} />}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              {backendOk
+                ? <CheckCircle2 size={12} className="text-emerald-500 shrink-0" />
+                : <AlertTriangle size={12} className="text-amber-500 shrink-0" />
+              }
+              <span className="text-[11px]">Backend API</span>
+            </div>
+            <span className="text-[10px] text-muted-foreground">
+              {backendOk === null ? "Checking…" : backendOk ? "Connected" : "Unreachable"}
+            </span>
+          </div>
+          <div className="mt-3 pt-2 border-t border-border flex items-center gap-1.5">
+            <Clock size={10} className="text-muted-foreground" />
+            <span className="text-[10px] text-muted-foreground">Last check: {lastCheck ?? "—"}</span>
+          </div>
+        </Section>
+
+        {/* Google Earth Engine -- read-only status for SAR planted verification */}
+        <Section title="Google Earth Engine" icon={<Key size={15} />}>
+          <p className="text-[11px] text-muted-foreground mb-3">
+            Sentinel-1 SAR imagery for verifying that affected farms were planted. Credentials are set on the
+            server (<span className="font-mono">GEE_SERVICE_ACCOUNT_KEY_PATH</span> in backend/.env), not here.
+          </p>
+          <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-[11px]">
+            <span className="text-muted-foreground">Status:</span>
+            <span className="flex items-center gap-1.5">
+              {gee?.connected
+                ? <CheckCircle2 size={12} className="text-emerald-500 shrink-0" />
+                : <AlertTriangle size={12} className="text-amber-500 shrink-0" />}
+              {gee == null ? "Checking…" : gee.connected ? "Connected" : gee.configured ? "Configured, not connected" : "Not configured"}
+            </span>
+            <span className="text-muted-foreground">Project:</span>
+            <span className="font-mono">{gee?.project_id ?? "—"}</span>
+            <span className="text-muted-foreground">Service account:</span>
+            <span className="font-mono break-all">{gee?.service_account ?? "—"}</span>
+          </div>
+          {gee?.last_error && (
+            <p className="text-[10px] text-amber-600 mt-3">{gee.last_error}</p>
+          )}
+        </Section>
+
         {/* Coverage Parameters */}
-        <Section title="RSBSA Coverage Rate (Sum Insured)" icon={<DollarSign size={15} />}>
+        <Section title="RSBSA Coverage Rate (Default Amount of Cover)" icon={<DollarSign size={15} />}>
           <p className="text-[11px] text-muted-foreground mb-4">
-            The RSBSA fixed coverage rate is <strong>₱25,000 per hectare</strong> for all rice farmers. This is the only configurable rate — no crop type premium distinction. Changes apply immediately to the Assessment module.
+            Used only when an uploaded record has <strong>no Amount of Cover</strong>: AC = rate × farm area.
+            Amounts of Cover in the PABS CSV always take priority. Applies to future uploads only — records already
+            on file are not changed.
           </p>
           <div className="flex gap-4 items-end mb-4">
             <div className="flex-1 max-w-xs">
@@ -269,310 +212,111 @@ export function CalibrationModule({ coverageRatePerHa, onCoverageRateChange }: C
                 <span className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground text-[11px]">₱</span>
                 <input
                   type="number"
-                  min={1000}
-                  max={100000}
+                  min={rateBounds[0]}
+                  max={rateBounds[1]}
                   step={500}
-                  value={coverageRatePerHa}
-                  onChange={e => onCoverageRateChange(Number(e.target.value))}
+                  value={coverageRate ?? ""}
+                  disabled={coverageRate === null}
+                  onChange={e => setCoverageRate(Number(e.target.value))}
                   className="w-full border border-border rounded-lg pl-7 pr-3 py-2.5 text-[12px] font-bold focus:outline-none focus:border-[#166534] bg-background"
                 />
               </div>
-              <p className="text-[9px] text-muted-foreground mt-1">PCIC RSBSA fixed rate. Applies to all rice farmer records.</p>
+              <p className={`text-[9px] mt-1 ${coverageRate !== null && !rateValid ? "text-red-600" : "text-muted-foreground"}`}>
+                Between ₱{rateBounds[0].toLocaleString()} and ₱{rateBounds[1].toLocaleString()} per hectare.
+              </p>
             </div>
             <div className="text-[10px] text-muted-foreground pb-7">
-              Default: <strong className="text-[#166534]">₱25,000/ha</strong>
+              Saved value: <strong className="text-[#166534]">{savedRate === null ? "—" : `₱${savedRate.toLocaleString()}/ha`}</strong>
             </div>
           </div>
-          <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200">
-            <p className="text-[11px] font-semibold text-amber-700 mb-1">Live Preview — Impact at Current Rate</p>
-            <div className="grid grid-cols-3 gap-3 text-center">
-              <div>
-                <p className="text-[9px] text-muted-foreground">Rate per Hectare</p>
-                <p className="text-base font-black text-amber-700">₱{coverageRatePerHa.toLocaleString()}</p>
-              </div>
-              <div>
-                <p className="text-[9px] text-muted-foreground">Sample: 2.5 ha</p>
-                <p className="text-base font-black text-[#166534]">₱{(2.5 * coverageRatePerHa).toLocaleString()}</p>
-              </div>
-              <div>
-                <p className="text-[9px] text-muted-foreground">At 40% ind. factor</p>
-                <p className="text-base font-black text-[#1e3a5f]">₱{(2.5 * coverageRatePerHa * 0.4).toLocaleString()}</p>
+          {coverageRate !== null && rateValid && (
+            <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200">
+              <p className="text-[11px] font-semibold text-amber-700 mb-1">Preview — default AC for a record with no Amount of Cover</p>
+              <div className="grid grid-cols-3 gap-3 text-center">
+                <div>
+                  <p className="text-[9px] text-muted-foreground">Rate per Hectare</p>
+                  <p className="text-base font-black text-amber-700">₱{coverageRate.toLocaleString()}</p>
+                </div>
+                <div>
+                  <p className="text-[9px] text-muted-foreground">Sample: 2.5 ha → AC</p>
+                  <p className="text-base font-black text-[#166534]">₱{(2.5 * coverageRate).toLocaleString()}</p>
+                </div>
+                <div>
+                  <p className="text-[9px] text-muted-foreground">Payout at IF 146 (AC/1000 × IF)</p>
+                  <p className="text-base font-black text-[#1e3a5f]">₱{((2.5 * coverageRate) / 1000 * 146).toLocaleString()}</p>
+                </div>
               </div>
             </div>
-          </div>
-          <p className="text-[10px] text-muted-foreground mt-2">
-            Per-record overrides can be applied in the Assessment module by clicking the edit icon on any row's Sum Insured column.
-          </p>
+          )}
         </Section>
 
-        {/* Damage Factor Table */}
-        <Section title="Signal Damage Factor Table" icon={<Settings size={15} />}>
+        {/* PCIC matrices -- the real payout lookup, read-only */}
+        <Section title="PCIC Yield Loss Matrix (RECSAP)" icon={<Settings size={15} />} badge="Read-only">
           <p className="text-[11px] text-muted-foreground mb-3">
-            Edit the percentage damage factor applied per growth stage and signal number. Changes take effect on the next analysis run.
+            Step 1 of the payout: estimated yield loss % by crop stage, TCWS signal and hours of exposure.
           </p>
-          <div className="overflow-x-auto">
-            <table className="text-[11px] w-full">
-              <thead>
-                <tr className="bg-[#166534] text-white">
-                  <th className="px-3 py-2 text-left font-semibold">Growth Stage</th>
-                  {signals.map(s => (
-                    <th key={s} className="px-3 py-2 text-center font-semibold">
-                      Signal No. {s}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody>
-                {stages.map(stage => (
-                  <tr key={stage} className="border-t border-border hover:bg-muted/30">
-                    <td className="px-3 py-2.5 font-semibold">{stage}</td>
-                    {signals.map(sig => (
-                      <td key={sig} className="px-3 py-2.5 text-center">
-                        <div className="flex items-center justify-center gap-1">
-                          <input
-                            type="number"
-                            min={0} max={100}
-                            value={damageFactor[stage][sig]}
-                            onChange={e => setDamageFactor(df => ({
-                              ...df,
-                              [stage]: { ...df[stage], [sig]: Number(e.target.value) }
-                            }))}
-                            className="w-16 text-center border border-border rounded px-2 py-1 bg-background text-[11px] focus:outline-none focus:border-[#166534]"
-                          />
-                          <span className="text-muted-foreground">%</span>
-                        </div>
-                      </td>
-                    ))}
+          {matrixError ? (
+            <p className="text-[11px] text-red-600">{matrixError}</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="text-[11px] w-full">
+                <thead>
+                  <tr className="bg-[#166534] text-white">
+                    <th className="px-3 py-2 text-left font-semibold">Crop Stage</th>
+                    <th className="px-3 py-2 text-center font-semibold">TCWS</th>
+                    {EXPOSURE_HOURS.map(h => <th key={h} className="px-3 py-2 text-center font-semibold">{h}h</th>)}
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <p className="text-[10px] text-muted-foreground mt-2">
-            Source: PCIC Standard Indemnification Guidelines — values must match official PCIC forms for Finance Division compatibility.
-          </p>
+                </thead>
+                <tbody>
+                  {recsapRows.map(r => (
+                    <tr key={`${r.stage}-${r.tcws}`} className="border-t border-border hover:bg-muted/30">
+                      <td className="px-3 py-2 font-semibold">{r.stage}</td>
+                      <td className="px-3 py-2 text-center">{r.tcws}</td>
+                      {EXPOSURE_HOURS.map(h => (
+                        <td key={h} className="px-3 py-2 text-center">{r.byHours[h] == null ? "—" : `${r.byHours[h]}%`}</td>
+                      ))}
+                    </tr>
+                  ))}
+                  {matrices && recsapRows.length === 0 && (
+                    <tr><td colSpan={5} className="px-3 py-3 text-center text-muted-foreground">No active rows.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
         </Section>
 
-        {/* GEE Credentials */}
-        <Section title="Google Earth Engine Credentials" icon={<Key size={15} />}>
+        <Section title="PCIC Indemnity Factor Matrix" icon={<Settings size={15} />} badge="Read-only">
           <p className="text-[11px] text-muted-foreground mb-3">
-            Configure Google Cloud Project credentials for SAR (Synthetic Aperture Radar) imagery analysis via Google Earth Engine.
+            Step 2: indemnity factor (IF) by crop stage group and yield-loss bracket. Payout I = (AC / 1000) × IF.
           </p>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="text-[11px] font-medium block mb-1">GCP Project ID</label>
-              <input
-                value={geeProjectId}
-                onChange={e => setGeeProjectId(e.target.value)}
-                className="w-full border border-border rounded-lg px-3 py-2 text-[11px] bg-background focus:outline-none focus:border-[#166534]"
-                placeholder="your-gcp-project-id"
-              />
+          {matrixError ? (
+            <p className="text-[11px] text-red-600">{matrixError}</p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="text-[11px] w-full">
+                <thead>
+                  <tr className="bg-[#166534] text-white">
+                    <th className="px-3 py-2 text-left font-semibold whitespace-nowrap">Stage Group</th>
+                    {indemnity.brackets.map(b => <th key={b} className="px-3 py-2 text-center font-semibold whitespace-nowrap">{b}%</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {indemnity.groups.map(([group, values]) => (
+                    <tr key={group} className="border-t border-border hover:bg-muted/30">
+                      <td className="px-3 py-2 font-semibold whitespace-nowrap">{group}</td>
+                      {indemnity.brackets.map(b => (
+                        <td key={b} className="px-3 py-2 text-center">{values[b] ?? "—"}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-            <div>
-              <label className="text-[11px] font-medium block mb-1">EEC Capacity Allocated</label>
-              <input
-                defaultValue="1000"
-                className="w-full border border-border rounded-lg px-3 py-2 text-[11px] bg-background focus:outline-none focus:border-[#166534]"
-                placeholder="e.g. 1000"
-              />
-              <p className="text-[9px] text-muted-foreground mt-1">Earth Engine Compute Units (EEC) quota</p>
-            </div>
-            <div className="col-span-2">
-              <label className="text-[11px] font-medium block mb-1">Service Account API Key</label>
-              <div className="relative">
-                <input
-                  type={showGeeKey ? "text" : "password"}
-                  value={geeApiKey}
-                  onChange={e => setGeeApiKey(e.target.value)}
-                  className="w-full border border-border rounded-lg px-3 py-2 pr-10 text-[11px] bg-background focus:outline-none focus:border-[#166534] font-mono"
-                />
-                <button
-                  onClick={() => setShowGeeKey(v => !v)}
-                  className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
-                >
-                  {showGeeKey ? <EyeOff size={13} /> : <Eye size={13} />}
-                </button>
-              </div>
-              <p className="text-[9px] text-muted-foreground mt-1">Used to authenticate SAR imagery requests for crop area analysis within farm polygons.</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2 mt-3 p-2.5 rounded-lg bg-blue-50 dark:bg-blue-950/30 border border-blue-200">
-            <Server size={12} className="text-blue-600 shrink-0" />
-            <p className="text-[10px] text-blue-700">Connection status: <span className="font-bold text-emerald-600">Active</span> — Last SAR query: 01 Nov 2024, 08:30 PHT</p>
-          </div>
-        </Section>
-
-        {/* PAGASA Parser Settings */}
-        <Section title="PAGASA Parser & Notification Settings" icon={<Bell size={15} />}>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="text-[11px] font-medium block mb-1">TCB Polling Interval (hours)</label>
-              <input
-                type="number" min={1} max={24}
-                value={parserInterval}
-                onChange={e => setParserInterval(Number(e.target.value))}
-                className="w-full border border-border rounded-lg px-3 py-2 text-[11px] bg-background focus:outline-none focus:border-[#166534]"
-              />
-              <p className="text-[9px] text-muted-foreground mt-1">How often to check the PAGASA website for new bulletins during an active typhoon.</p>
-            </div>
-            <div>
-              <label className="text-[11px] font-medium block mb-1">Alert Email Recipients</label>
-              <input
-                defaultValue="a.reyes@pcic.gov.ph, gis-team@pcic.gov.ph"
-                className="w-full border border-border rounded-lg px-3 py-2 text-[11px] bg-background focus:outline-none focus:border-[#166534]"
-              />
-              <p className="text-[9px] text-muted-foreground mt-1">Comma-separated email addresses notified when a new TCB is parsed.</p>
-            </div>
-            <div className="flex items-center justify-between p-3 rounded-lg border border-border">
-              <div>
-                <p className="text-[11px] font-medium">Email Alerts</p>
-                <p className="text-[9px] text-muted-foreground">Send email when new TCB is downloaded</p>
-              </div>
-              <button onClick={() => setEmailAlerts(v => !v)} className={emailAlerts ? "text-[#166534]" : "text-muted-foreground"}>
-                {emailAlerts ? <ToggleRight size={24} /> : <ToggleLeft size={24} />}
-              </button>
-            </div>
-            <div className="flex items-center justify-between p-3 rounded-lg border border-border">
-              <div>
-                <p className="text-[11px] font-medium">On-Screen Pop-up Alerts</p>
-                <p className="text-[9px] text-muted-foreground">Show in-app notification on new bulletin</p>
-              </div>
-              <button className="text-[#166534]">
-                <ToggleRight size={24} />
-              </button>
-            </div>
-          </div>
-        </Section>
-
-        {/* Session & Security */}
-        <Section title="Session & Security Settings" icon={<Shield size={15} />}>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="text-[11px] font-medium block mb-1">Session Timeout (minutes)</label>
-              <select
-                value={sessionTimeout}
-                onChange={e => setSessionTimeout(Number(e.target.value))}
-                className="w-full border border-border rounded-lg px-3 py-2 text-[11px] bg-background focus:outline-none focus:border-[#166534]"
-              >
-                {[0,5,10,15,30].map(v => <option key={v} value={v}>{v === 0 ? "Disabled" : `${v} minutes`}</option>)}
-              </select>
-              <p className="text-[9px] text-muted-foreground mt-1">Auto-lock terminal after inactivity. Last session is retained on re-login.</p>
-            </div>
-            <div className="flex items-center justify-between p-3 rounded-lg border border-border">
-              <div>
-                <p className="text-[11px] font-medium">Auto-Save Work</p>
-                <p className="text-[9px] text-muted-foreground">Prevent data loss on session timeout</p>
-              </div>
-              <button className="text-[#166534]">
-                <ToggleRight size={24} />
-              </button>
-            </div>
-          </div>
-        </Section>
-
-        {/* Database Backup */}
-        <Section title="Database Backup & Restore" icon={<Database size={15} />} defaultOpen={false}>
-          <div className="grid grid-cols-3 gap-3 mb-3">
-            {[
-              { label:"Last Backup",    value:"30 Oct 2024",   ok:false },
-              { label:"Backup Size",    value:"124 MB",        ok:true  },
-              { label:"Stored Backups", value:"14 versions",   ok:true  },
-            ].map((s,i) => (
-              <div key={i} className="bg-muted/40 rounded-lg p-3 border border-border">
-                <p className="text-[10px] text-muted-foreground">{s.label}</p>
-                <p className={`text-sm font-bold mt-0.5 ${s.ok?"text-foreground":"text-amber-600"}`}>{s.value}</p>
-              </div>
-            ))}
-          </div>
-          <div className="flex gap-2">
-            <button
-              onClick={() => {
-                setConfirm({
-                  msg: "This will create a full backup of all farmer records, TCB bulletins, and system settings. Continue?",
-                  fn: () => { handleBackup(); setConfirm(null); },
-                });
-              }}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-[#1e3a5f] text-white text-[11px] font-medium hover:bg-[#172f4d] transition-colors"
-            >
-              {backupRunning
-                ? <><RefreshCw size={12} className="animate-spin" />Backing up…</>
-                : <><Database size={12} />Run Backup Now</>
-              }
-            </button>
-            <button
-              onClick={() => setConfirm({
-                msg: "This will overwrite all current data with the selected backup. This action cannot be undone. Are you sure?",
-                fn: () => setConfirm(null),
-              })}
-              className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-border text-[11px] hover:bg-muted transition-colors text-destructive"
-            >
-              <RefreshCw size={12} /> Restore from Backup
-            </button>
-          </div>
-          <div className="flex items-center gap-2 mt-3">
-            <label className="flex items-center gap-1.5 text-[11px] cursor-pointer">
-              <input type="checkbox" checked={autoBackup} onChange={e=>setAutoBackup(e.target.checked)} className="accent-[#166534]" />
-              Automatic daily backup at 23:00 PHT
-            </label>
-          </div>
-        </Section>
-
-        {/* User Management */}
-        <Section title="User Account Management" icon={<Users size={15} />} defaultOpen={false}>
-          <div className="mb-3 flex items-center justify-between">
-            <p className="text-[11px] text-muted-foreground">Manage system access for GIS specialists and administrators.</p>
-            <button
-              onClick={() => setAddingUser(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#166534] text-white text-[11px] hover:bg-[#14532d] transition-colors"
-            >
-              <Plus size={11} /> Add User
-            </button>
-          </div>
-          <table className="w-full text-[11px]">
-            <thead>
-              <tr className="bg-muted/60 text-muted-foreground">
-                <th className="px-3 py-2 text-left font-semibold">Name</th>
-                <th className="px-3 py-2 text-left font-semibold">Role</th>
-                <th className="px-3 py-2 text-left font-semibold">Email</th>
-                <th className="px-3 py-2 text-left font-semibold">Status</th>
-                <th className="px-3 py-2 text-left font-semibold">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {users.map(u => (
-                <tr key={u.id} className="border-t border-border">
-                  <td className="px-3 py-2.5 font-medium">{u.name}</td>
-                  <td className="px-3 py-2.5 text-muted-foreground">{u.role}</td>
-                  <td className="px-3 py-2.5 text-muted-foreground font-mono text-[10px]">{u.email}</td>
-                  <td className="px-3 py-2.5">
-                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-medium ${u.active?"bg-emerald-100 text-emerald-700":"bg-gray-100 text-gray-500"}`}>
-                      {u.active ? "Active" : "Inactive"}
-                    </span>
-                  </td>
-                  <td className="px-3 py-2.5">
-                    <div className="flex items-center gap-1">
-                      <button
-                        onClick={() => setEditingUser(u)}
-                        className="p-1 hover:bg-muted rounded text-[#1e3a5f]"
-                        title="Edit"
-                      >
-                        <Settings size={11} />
-                      </button>
-                      {u.active && (
-                        <button
-                          className="p-1 hover:bg-muted rounded text-destructive"
-                          title="Deactivate"
-                          onClick={() => handleDeleteUser(u.id)}
-                        >
-                          <Trash2 size={11} />
-                        </button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          )}
+          <p className="text-[10px] text-muted-foreground mt-2">
+            Source: PCIC Rice Indemnity Factor Table. Changed only by database migration, so payouts stay matched to official PCIC forms.
+          </p>
         </Section>
 
         <div className="pb-6" />

@@ -6,16 +6,46 @@ AgriSureGIS is a localized WebGIS platform built to automate typhoon parametric 
 Traditional insurance validation depends on physical inspections of damaged areas after a typhoon, which takes weeks and is logistically difficult. AgriSureGIS automates this by intersecting geographical farm polygons with typhoon wind footprint models and computing indemnities based on biological growth stages.
 
 ## 2. Three-Tier System Architecture
-- **Presentation Layer:** Developed using React and Leaflet JS, styled with Tailwind CSS. Renders interactive maps showing farm boundaries (from GPX files), typhoon trajectories, and wind footprint layers.
-- **Web-GIS Application Layer:** FastAPI coordinates API endpoints.
-  - Uses `BeautifulSoup` to scrape new bulletins from PAGASA.
+- **Presentation Layer:** React + TypeScript with Leaflet JS, styled with Tailwind CSS. Renders interactive maps showing farm boundaries (from GPX/GeoPackage surveys) and typhoon trajectories. Polygons are fetched per viewport (`GET /api/farms/geometry`), not loaded wholesale, so the browser never holds the full dataset. Installable as a PWA.
+- **Web-GIS Application Layer:** FastAPI coordinates API endpoints, with GeoServer serving spatial layers (farm boundaries, administrative boundaries) to the Presentation Layer via WMS/WFS.
+  - Uses `BeautifulSoup` + `httpx` to scrape new bulletins from PAGASA, on an APScheduler background poll.
   - Uses `pdfplumber` to extract typhoon metrics from bulletin PDFs.
   - Uses `GeoPandas` and `Shapely` to perform geometric intersections.
-- **Database Layer:** Localized PostgreSQL database with the PostGIS extension, managed via SQLAlchemy and GeoAlchemy2.
+  - Uses `gpxpy` and a GeoPackage reader to turn field surveys into farm polygons.
+  - Calls Google Earth Engine for Sentinel-1 SAR planted verification (optional).
+  - Enforces authentication and roles itself (signed session tokens, `require_admin`), and records every mutating call to the Activity Log.
+- **Database Layer:** Localized PostgreSQL database with the PostGIS extension, managed via SQLAlchemy and GeoAlchemy2. An optional Redis cache fronts the Farm Records listing; a `mv_farm_latest_insurance` materialized view keeps the "latest policy per farm" lookup to one indexed hit.
+
+> **Note on the wind footprint.** Exposure is **not** computed by intersecting farm
+> polygons with a drawn wind footprint. It is a `(province, municipality)` text join
+> between parsed TCWS signal areas (`tbl_tcb_signals`) and administrative boundaries,
+> so it is municipality-granular. Any doc describing a geometric footprint
+> intersection is describing an intention, not the implementation.
+
+> **Exposure hours (2026-10-22, `ExposureCalculatorService.build_area_exposures`).**
+> PAGASA publishes no per-municipality effective times, so hours are **estimated from
+> bulletin issuance times** and labelled as such in the UI:
+> - A municipality's signal from bulletin *k* holds from `issued_at[k]` until the next
+>   bulletin of the same typhoon. A level change closes one interval and opens the next;
+>   being absent from a later bulletin, a "no signal hoisted" bulletin, or the final
+>   bulletin lifts it at that bulletin's issue time.
+> - Intervals sit on one per-typhoon timeline, so they never overlap; returning to a
+>   level adds to that level. Duplicate bulletin numbers count once; input order doesn't matter.
+> - A signal still hoisted in the latest bulletin is counted **up to that bulletin's
+>   issue time** (flagged "ongoing"); nothing after it counts until a later bulletin arrives.
+>   Gaps over 12h between bulletins are counted but flagged. Bulletins whose issue time
+>   couldn't be parsed are left out.
+> - Per municipality: Signal 1–5 hours, **Total Exposure = H1 + H2 + H3 + H4 + H5**,
+>   Max Signal = highest level ever listed, and **payout hours = hours under the Max
+>   Signal** (PCIC's `SN3_12` = Signal 3 for 12h). Both exposure tables read the same rows
+>   (`GET /api/bulletins/typhoon/{id}/exposure`). Recomputed whenever a bulletin is saved or corrected.
+> - "The northern portion of X" **without** a town list assigns no municipality; it is
+>   stored in `tbl_tcb_unresolved_clauses` and shown as a warning, never widened to all of X.
 
 ## 3. Parametric Damage Calculations
 The calculation engine operates strictly on the predefined PCIC Typhoon-Induced Strong Winds Matrix.
-- **Indemnity Formula:** `I = (AC / 1000) * IF * Area`
-- **Yield Loss (YL) Matrices:** Calculated by crossing exposure duration (6h, 12h, 24h) with the TCWS Signal Level (2 to 5) and the growth stage (Booting, Flowering, Maturity).
-- **Indemnity Factor (IF) Lookup:** Determined by linking the calculated YL% with the crop's vegetative/reproductive/maturity stage.
-- **Exporting:** The final assessment yields a payout report extending the original PCIC formatting with parsed parameters and final indemnity payout calculations.\n
+- **Indemnity Formula:** `I = (AC / 1000) * IF` — farm area is **not** a factor (`app/core/indemnity_calc.py`).
+- **Yield Loss (YL) Matrices:** `tbl_recsap_matrix`, crossing exposure duration (6h, 12h, 24h) with the TCWS Signal Level (2 to 5) and the growth stage (Booting, Flowering, Maturity). The hours used are the **payout hours** (accumulated under the area's Max Signal, not Total Exposure), bucketed **down** to those brackets; under 6 hours yields no rule.
+- **Indemnity Factor (IF) Lookup:** `tbl_indemnity_factor_matrix`, linking the YL% bracket (exclusive-lower, inclusive-upper) with PCIC's 5-group crop-stage taxonomy — `Early Vegetative | Late Vegetative | Reproductive | Late Reproductive | Maturity`. This is a **separate taxonomy** from `tbl_recsap_matrix`'s 3-value `crop_stage_no`, and the two are resolved independently (`app/services/crop_stage_resolver.py` → `tbl_crop_stage_mapping`), because neither is a function of the other: Milking and Flowering share `crop_stage_no` 2 while sitting in Late Reproductive and Reproductive respectively.
+- **Advisory SAR check:** Sentinel-1 planted verification runs alongside the assessment but its verdict is **never** read by the calculation or the export.
+- **Exporting:** Two shapes — the legacy PCIC row layout with computed columns appended, and PCIC's exact PABS "final output" headers. The final PABS export also locks each paid policy as used for that typhoon, so it cannot be claimed again for a later storm.\n
