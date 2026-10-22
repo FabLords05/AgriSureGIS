@@ -389,7 +389,8 @@ class BulletinParserService:
         """
         Fetches all active PAGASA bulletin PDF links, downloads/parses/saves each one,
         and returns [{"tcb_id", "title", "bulletin_count"}, ...] for whichever were
-        processed. Returns [] if there are no active links or every download/parse
+        newly inserted -- not ones already in the database from an earlier poll.
+        Returns [] if there are no active links or every download/parse
         attempt fails — never raises for a per-link failure, since callers (the manual
         /parse route, and the scheduled background job) each decide separately whether
         an empty result is worth surfacing as an error. Does propagate
@@ -403,7 +404,7 @@ class BulletinParserService:
             try:
                 pdf_path = await cls.download_bulletin_pdf(link, temp_dir)
                 parsed_data = cls.parse_bulletin_text(pdf_path)
-                bulletin = cls.save_bulletin_to_db(parsed_data, db)
+                bulletin, created = cls.upsert_bulletin(parsed_data, db)
 
                 if os.path.exists(pdf_path):
                     os.remove(pdf_path)
@@ -419,6 +420,10 @@ class BulletinParserService:
                     except ValueError:
                         pass  # shouldn't happen (bulletin/typhoon just saved together), but don't crash the scrape loop over it
 
+                # Already-saved bulletins PAGASA still lists are not "created"
+                # -- returning them made every poll re-alert every bulletin.
+                if not created:
+                    continue
                 bulletins_created.append({
                     "tcb_id": bulletin.tcb_id,
                     "title": bulletin.title,
@@ -482,6 +487,18 @@ class BulletinParserService:
         """
         Saves parsed bulletin data to the PostGIS database.
         """
+        bulletin, _ = cls.upsert_bulletin(parsed_data, db)
+        return bulletin
+
+    @classmethod
+    def upsert_bulletin(cls, parsed_data: dict, db: Session) -> tuple[TropicalCycloneBulletin, bool]:
+        """
+        save_bulletin_to_db plus whether a new row was actually inserted (True)
+        or an already-saved bulletin was matched (False). PAGASA keeps every
+        bulletin of an active storm posted, so each poll re-sees all of them --
+        callers that alert on "new TCB arrived" must only act on True, or every
+        poll re-sends every bulletin (the bug fixed 2026-10-22).
+        """
         reference_time = parsed_data.get("issued_at") or datetime.now(timezone.utc)
         typhoon = cls.get_or_create_typhoon(parsed_data["typhoon_name"], reference_time, db)
 
@@ -494,7 +511,8 @@ class BulletinParserService:
         signals = parsed_data.get("signals") or {}
         max_signal_level, tcws_areas = _raw_tcws_columns(signals, parsed_data.get("no_signal_hoisted", False))
 
-        if not bulletin:
+        created = bulletin is None
+        if created:
             # Create geometry Point
             center_geom = WKTElement(f"POINT({parsed_data['longitude']} {parsed_data['latitude']})", srid=4326)
 
@@ -559,7 +577,7 @@ class BulletinParserService:
         if changed:
             db.commit()
 
-        return bulletin
+        return bulletin, created
 
     @staticmethod
     def _seed_tcb_signals(bulletin: TropicalCycloneBulletin, signals: dict, db: Session) -> None:

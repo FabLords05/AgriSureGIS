@@ -23,6 +23,19 @@ from app.models import models
 
 logger = logging.getLogger("agrisuregis.main")
 
+# Without a handler, Python only prints WARNING and up, so every INFO line
+# from our own loggers ("agrisuregis.*" and the `__name__` ones under "app.*")
+# was silently dropped -- e.g. why a TCB alert was skipped. Scoped to those two
+# namespaces, not the root logger, so httpx/apscheduler INFO noise stays off.
+_log_handler = logging.StreamHandler()
+_log_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+for _name in ("agrisuregis", "app"):
+    _app_logger = logging.getLogger(_name)
+    if not _app_logger.handlers:
+        _app_logger.addHandler(_log_handler)
+    _app_logger.setLevel(logging.INFO)
+    _app_logger.propagate = False
+
 # POST /api/users/login and /api/users/logout self-log a distinct LOGIN/LOGOUT
 # action from inside their own route bodies (see app/api/users.py) --
 # excluded here to avoid double-logging them as a generic "POST".

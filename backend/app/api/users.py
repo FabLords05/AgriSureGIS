@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
 import bcrypt
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
 
@@ -9,6 +9,7 @@ from app.core.activity_log import record_activity
 from app.core.database import get_db
 from app.core.security import create_access_token, get_current_user, require_admin
 from app.models.models import SystemUser
+from app.services.email_alert_service import send_account_status_email
 
 router = APIRouter(prefix="/users", tags=["users"])
 
@@ -251,11 +252,23 @@ def update_me(payload: UpdateMeRequest, db: Session = Depends(get_db), current_u
 
 
 @router.patch("/{user_id}")
-def update_user(user_id: int, payload: UpdateUserRequest, db: Session = Depends(get_db), _admin: SystemUser = Depends(require_admin)):
-    """Admin edit / activate / deactivate (Calibration's Edit modal + Deactivate button)."""
+def update_user(
+    user_id: int,
+    payload: UpdateUserRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    _admin: SystemUser = Depends(require_admin),
+):
+    """
+    Admin edit / activate / deactivate (Calibration's Edit modal + Deactivate
+    button). When is_active actually changes, the affected user is emailed
+    about it (any role) after the response is sent, so the admin's save never
+    waits on the mail server.
+    """
     user = db.query(SystemUser).filter(SystemUser.user_id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
+    was_active = user.is_active
 
     if payload.role is not None:
         _require_role(payload.role)
@@ -277,4 +290,12 @@ def update_user(user_id: int, payload: UpdateUserRequest, db: Session = Depends(
         db.rollback()
         raise HTTPException(status_code=409, detail="An account with this email already exists.")
     db.refresh(user)
+
+    if user.is_active != was_active:
+        background_tasks.add_task(
+            send_account_status_email,
+            user.email,
+            f"{user.firstname} {user.lastname}".strip(),
+            user.is_active,
+        )
     return {"status": "success", "data": _user_to_dict(user)}

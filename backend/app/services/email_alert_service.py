@@ -4,7 +4,8 @@ belongs to a typhoon PAGASA's status page currently lists as active. Replaces
 the old Calibration screen mockup (a hardcoded "Alert Email Recipients" text
 field + a decorative on/off toggle, neither wired to anything) with actual
 backend automation -- no admin UI involved at all now; see FUNCTION_CHANGES.md
-for the 2026-08-16 entry.
+for the 2026-08-16 entry. Also sends the account activated/deactivated email
+(send_account_status_email, added 2026-10-22) over the same SMTP settings.
 
 Same "no-op unless configured" philosophy as farms_cache.py's optional Redis
 cache: without SMTP_HOST set in backend/.env, send_new_bulletin_alerts() does
@@ -76,9 +77,11 @@ def _active_typhoon_bulletins(created: list[dict], db: Session) -> list[Tropical
 
 def send_new_bulletin_alerts(created: list[dict], db: Session) -> None:
     """
-    Emails every active tbl_system_users row about whichever of the
-    just-created bulletins (see scrape_and_save_all's return shape) belong to
-    a currently-active typhoon. Silently does nothing if SMTP isn't
+    Emails every active tbl_system_users row, one email per bulletin, about
+    whichever of the just-created bulletins (see scrape_and_save_all's return
+    shape) belong to a currently-active typhoon. A bulletin whose typhoon is
+    not active when it arrives is skipped for good, not retried on a later
+    poll (Fabio's decision, 2026-10-22). Silently does nothing if SMTP isn't
     configured, there's nothing alert-worthy, or there are no active user
     accounts to notify -- never raises, so a failure here can't take down the
     scrape/parse request or the scheduler thread that called it.
@@ -103,30 +106,81 @@ def send_new_bulletin_alerts(created: list[dict], db: Session) -> None:
         logger.info("No active user accounts to alert.")
         return
 
-    subject = "AgriSureGIS: New PAGASA Tropical Cyclone Bulletin" + ("s" if len(bulletins) > 1 else "")
-    lines = [
-        "A new Tropical Cyclone Bulletin has been parsed for an active typhoon.",
-        "",
-    ]
+    # One email per new TCB (Fabio's decision, 2026-10-22), not one digest
+    # per poll -- each bulletin arriving is its own notification.
+    messages = []
     for b in bulletins:
-        lines.append(f"- {b.typhoon.name}: {b.title} (Bulletin #{b.bulletin_count}, {b.category})")
-    lines += ["", "Log in to AgriSureGIS to review the full bulletin and exposure impact."]
-
-    msg = MIMEText("\n".join(lines))
-    msg["Subject"] = subject
-    msg["From"] = config["sender"]
-    # Sent BCC-style -- every active user is in the sendmail() envelope
-    # recipient list below, not in a visible header, so recipients can't see
-    # each other's addresses. The To: header is set to the sender itself
-    # (a common convention for broadcast mail with no single "primary"
-    # recipient) rather than left blank.
-    msg["To"] = config["sender"]
+        body = "\n".join([
+            "A new Tropical Cyclone Bulletin has been parsed for an active typhoon.",
+            "",
+            f"- {b.typhoon.name}: {b.title} (Bulletin #{b.bulletin_count}, {b.category})",
+            "",
+            "Log in to AgriSureGIS to review the full bulletin and exposure impact.",
+        ])
+        subject = f"AgriSureGIS: New PAGASA Tropical Cyclone Bulletin #{b.bulletin_count} for {b.typhoon.name}"
+        # Sent BCC-style -- every active user is in the sendmail() envelope
+        # recipient list, not in a visible header, so recipients can't see
+        # each other's addresses. The To: header is set to the sender itself
+        # (a common convention for broadcast mail with no single "primary"
+        # recipient) rather than left blank.
+        messages.append(_compose(config, config["sender"], subject, body))
 
     try:
-        with smtplib.SMTP(config["host"], config["port"], timeout=10) as server:
-            server.starttls()
-            server.login(config["user"], config["password"])
-            server.sendmail(config["sender"], recipients, msg.as_string())
-        logger.info("Sent bulletin alert email to %d active user(s).", len(recipients))
+        _send(config, recipients, messages)
+        logger.info("Sent %d bulletin alert email(s) to %d active user(s).", len(messages), len(recipients))
     except Exception:
         logger.exception("Failed to send bulletin alert email.")
+
+
+def send_account_status_email(email: str, name: str, activated: bool) -> None:
+    """
+    Tells a user their account was activated or deactivated by an
+    administrator (PATCH /api/users/{user_id}). Sent to that user only, any
+    role. Same no-op/never-raises rules as send_new_bulletin_alerts, since
+    it runs as a background task after the admin's save has already
+    committed. Takes plain values, not the SystemUser row, because the
+    request's DB session is closed by the time the task runs.
+    """
+    config = _smtp_config()
+    if not config:
+        logger.info("SMTP not configured (SMTP_HOST/SMTP_USER/SMTP_PASSWORD) -- skipping account status email.")
+        return
+
+    if activated:
+        subject = "AgriSureGIS: Your account has been activated"
+        status_line = "Your AgriSureGIS account has been activated by an administrator. You can now log in."
+    else:
+        subject = "AgriSureGIS: Your account has been deactivated"
+        status_line = ("Your AgriSureGIS account has been deactivated by an administrator. "
+                       "You can no longer log in or receive bulletin alerts.")
+    body = "\n".join([
+        f"Hello {name},",
+        "",
+        status_line,
+        "",
+        "If you think this is a mistake, please contact your system administrator.",
+    ])
+
+    try:
+        _send(config, [email], [_compose(config, email, subject, body)])
+        logger.info("Sent account %s email to %s.", "activation" if activated else "deactivation", email)
+    except Exception:
+        logger.exception("Failed to send account status email.")
+
+
+def _compose(config: dict, to_header: str, subject: str, body: str) -> MIMEText:
+    msg = MIMEText(body)
+    msg["Subject"] = subject
+    msg["From"] = config["sender"]
+    msg["To"] = to_header
+    return msg
+
+
+def _send(config: dict, recipients: list[str], messages: list[MIMEText]) -> None:
+    """One SMTP login for every message in the batch. Raises on failure --
+    callers log it, so a mail problem never escapes to their own caller."""
+    with smtplib.SMTP(config["host"], config["port"], timeout=10) as server:
+        server.starttls()
+        server.login(config["user"], config["password"])
+        for msg in messages:
+            server.sendmail(config["sender"], recipients, msg.as_string())

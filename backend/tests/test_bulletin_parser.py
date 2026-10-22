@@ -849,6 +849,32 @@ class BulletinParserSaveToDbTests(unittest.TestCase):
         self.assertTrue(result.is_final)
         mock_db.commit.assert_called_once()
 
+    def test_upsert_bulletin_reports_created_for_a_new_bulletin(self):
+        mock_db = self._build_mock_db(boundaries=[])
+
+        bulletin, created = BulletinParserService.upsert_bulletin(self._luzon_parsed_data(), mock_db)
+
+        self.assertTrue(created)
+        self.assertEqual(bulletin.tcb_id, 100)
+
+    def test_upsert_bulletin_reports_not_created_for_an_already_saved_bulletin(self):
+        # PAGASA keeps every bulletin of an active storm posted, so each poll
+        # re-sees them -- that must not count as a new TCB (2026-10-22).
+        existing_bulletin = TropicalCycloneBulletin(title="Bulletin No. 11 for KIYAPO", bulletin_count=11)
+        existing_bulletin.tcb_id = 12
+        existing_bulletin.max_signal_level = 2
+        existing_typhoon = Typhoon(name="KIYAPO", year=2026, is_active=True)
+        existing_typhoon.typhoon_id = 4
+        mock_db = self._build_mock_db(
+            boundaries=[], existing_typhoon=existing_typhoon, existing_bulletin=existing_bulletin,
+        )
+
+        bulletin, created = BulletinParserService.upsert_bulletin(self._luzon_parsed_data(), mock_db)
+
+        self.assertFalse(created)
+        self.assertIs(bulletin, existing_bulletin)
+        mock_db.add.assert_not_called()
+
     def test_save_bulletin_to_db_stores_track_columns_on_new_bulletin(self):
         mock_db = self._build_mock_db(boundaries=[])
         forecast = [{"label": "12-Hour Forecast 2:00 AM", "lat": 9.7, "lon": 134.4, "location": None}]
@@ -1054,13 +1080,13 @@ class ScrapeAndSaveAllTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(BulletinParserService, "fetch_active_bulletin_links", new_callable=AsyncMock) as mock_fetch, \
              patch.object(BulletinParserService, "download_bulletin_pdf", new_callable=AsyncMock) as mock_download, \
              patch.object(BulletinParserService, "parse_bulletin_text") as mock_parse, \
-             patch.object(BulletinParserService, "save_bulletin_to_db") as mock_save, \
+             patch.object(BulletinParserService, "upsert_bulletin") as mock_save, \
              patch("os.path.exists", return_value=False):
             mock_fetch.return_value = ["https://pagasa.example/bad.pdf", "https://pagasa.example/good.pdf"]
             mock_download.side_effect = [Exception("download failed"), "temp_bulletins/good.pdf"]
             mock_parse.return_value = {"raw_text": ""}
             saved_bulletin = MagicMock(tcb_id=100, title="Bulletin No. 5 for LEON", bulletin_count=5)
-            mock_save.return_value = saved_bulletin
+            mock_save.return_value = (saved_bulletin, True)
 
             result = await BulletinParserService.scrape_and_save_all(MagicMock())
 
@@ -1071,12 +1097,12 @@ class ScrapeAndSaveAllTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(BulletinParserService, "fetch_active_bulletin_links", new_callable=AsyncMock) as mock_fetch, \
              patch.object(BulletinParserService, "download_bulletin_pdf", new_callable=AsyncMock) as mock_download, \
              patch.object(BulletinParserService, "parse_bulletin_text") as mock_parse, \
-             patch.object(BulletinParserService, "save_bulletin_to_db") as mock_save, \
+             patch.object(BulletinParserService, "upsert_bulletin") as mock_save, \
              patch("os.path.exists", return_value=False):
             mock_fetch.return_value = ["https://pagasa.example/tcb5.pdf"]
             mock_download.return_value = "temp_bulletins/tcb5.pdf"
             mock_parse.return_value = {"raw_text": ""}
-            mock_save.return_value = MagicMock(tcb_id=100, title="Bulletin No. 5 for LEON", bulletin_count=5)
+            mock_save.return_value = (MagicMock(tcb_id=100, title="Bulletin No. 5 for LEON", bulletin_count=5), True)
 
             result = await BulletinParserService.scrape_and_save_all(MagicMock())
 
@@ -1085,17 +1111,37 @@ class ScrapeAndSaveAllTests(unittest.IsolatedAsyncioTestCase):
             [{"tcb_id": 100, "title": "Bulletin No. 5 for LEON", "bulletin_count": 5, "is_final": False}],
         )
 
+    async def test_already_saved_bulletins_are_not_returned(self):
+        # Every poll re-sees all of an active storm's posted PDFs; only the
+        # genuinely new one may reach the alert step (2026-10-22 fix).
+        with patch.object(BulletinParserService, "fetch_active_bulletin_links", new_callable=AsyncMock) as mock_fetch, \
+             patch.object(BulletinParserService, "download_bulletin_pdf", new_callable=AsyncMock) as mock_download, \
+             patch.object(BulletinParserService, "parse_bulletin_text") as mock_parse, \
+             patch.object(BulletinParserService, "upsert_bulletin") as mock_save, \
+             patch("os.path.exists", return_value=False):
+            mock_fetch.return_value = ["https://pagasa.example/tcb4.pdf", "https://pagasa.example/tcb5.pdf"]
+            mock_download.side_effect = ["temp_bulletins/tcb4.pdf", "temp_bulletins/tcb5.pdf"]
+            mock_parse.return_value = {"raw_text": ""}
+            mock_save.side_effect = [
+                (MagicMock(tcb_id=99, title="Bulletin No. 4 for LEON", bulletin_count=4), False),
+                (MagicMock(tcb_id=100, title="Bulletin No. 5 for LEON", bulletin_count=5), True),
+            ]
+
+            result = await BulletinParserService.scrape_and_save_all(MagicMock())
+
+        self.assertEqual([r["tcb_id"] for r in result], [100])
+
     async def test_final_bulletin_triggers_assessment_calculation(self):
         with patch.object(BulletinParserService, "fetch_active_bulletin_links", new_callable=AsyncMock) as mock_fetch, \
              patch.object(BulletinParserService, "download_bulletin_pdf", new_callable=AsyncMock) as mock_download, \
              patch.object(BulletinParserService, "parse_bulletin_text") as mock_parse, \
-             patch.object(BulletinParserService, "save_bulletin_to_db") as mock_save, \
+             patch.object(BulletinParserService, "upsert_bulletin") as mock_save, \
              patch("app.services.bulletin_parser.AssessmentService.calculate_for_bulletin") as mock_calc, \
              patch("os.path.exists", return_value=False):
             mock_fetch.return_value = ["https://pagasa.example/tcb21f.pdf"]
             mock_download.return_value = "temp_bulletins/tcb21f.pdf"
             mock_parse.return_value = {"raw_text": "", "is_final": True}
-            mock_save.return_value = MagicMock(tcb_id=200, title="Bulletin No. 21 for FRANCISCO", bulletin_count=21, typhoon_id=9)
+            mock_save.return_value = (MagicMock(tcb_id=200, title="Bulletin No. 21 for FRANCISCO", bulletin_count=21, typhoon_id=9), True)
             mock_db = MagicMock()
 
             result = await BulletinParserService.scrape_and_save_all(mock_db)
@@ -1107,13 +1153,13 @@ class ScrapeAndSaveAllTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(BulletinParserService, "fetch_active_bulletin_links", new_callable=AsyncMock) as mock_fetch, \
              patch.object(BulletinParserService, "download_bulletin_pdf", new_callable=AsyncMock) as mock_download, \
              patch.object(BulletinParserService, "parse_bulletin_text") as mock_parse, \
-             patch.object(BulletinParserService, "save_bulletin_to_db") as mock_save, \
+             patch.object(BulletinParserService, "upsert_bulletin") as mock_save, \
              patch("app.services.bulletin_parser.AssessmentService.calculate_for_bulletin") as mock_calc, \
              patch("os.path.exists", return_value=False):
             mock_fetch.return_value = ["https://pagasa.example/tcb11.pdf"]
             mock_download.return_value = "temp_bulletins/tcb11.pdf"
             mock_parse.return_value = {"raw_text": "", "is_final": False}
-            mock_save.return_value = MagicMock(tcb_id=100, title="Bulletin No. 11 for KIYAPO", bulletin_count=11, typhoon_id=3)
+            mock_save.return_value = (MagicMock(tcb_id=100, title="Bulletin No. 11 for KIYAPO", bulletin_count=11, typhoon_id=3), True)
 
             await BulletinParserService.scrape_and_save_all(MagicMock())
 
@@ -1217,12 +1263,12 @@ class DownloadBulletinPdfTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(BulletinParserService, "fetch_active_bulletin_links", new_callable=AsyncMock) as mock_fetch, \
              patch.object(BulletinParserService, "download_bulletin_pdf", new_callable=AsyncMock) as mock_download, \
              patch.object(BulletinParserService, "parse_bulletin_text") as mock_parse, \
-             patch.object(BulletinParserService, "save_bulletin_to_db") as mock_save, \
+             patch.object(BulletinParserService, "upsert_bulletin") as mock_save, \
              patch("os.path.exists", return_value=False):
             mock_fetch.return_value = ["https://pagasa.example/TCB%2311_inday.pdf", "https://pagasa.example/good.pdf"]
             mock_download.side_effect = [httpx.ReadTimeout("slow"), "temp_bulletins/good.pdf"]
             mock_parse.return_value = {"raw_text": ""}
-            mock_save.return_value = MagicMock(tcb_id=100, title="Bulletin No. 5 for LEON", bulletin_count=5)
+            mock_save.return_value = (MagicMock(tcb_id=100, title="Bulletin No. 5 for LEON", bulletin_count=5), True)
 
             with self.assertLogs("app.services.bulletin_parser", level="WARNING") as logs:
                 result = await BulletinParserService.scrape_and_save_all(MagicMock())

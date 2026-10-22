@@ -163,8 +163,8 @@ async def upload_bulletin_pdf(file: UploadFile = File(...), db: Session = Depend
             
         # Parse and save
         parsed_data = BulletinParserService.parse_bulletin_text(temp_path)
-        bulletin = BulletinParserService.save_bulletin_to_db(parsed_data, db)
-        
+        bulletin, created = BulletinParserService.upsert_bulletin(parsed_data, db)
+
         # Clean up
         if os.path.exists(temp_path):
             os.remove(temp_path)
@@ -179,18 +179,20 @@ async def upload_bulletin_pdf(file: UploadFile = File(...), db: Session = Depend
         # succeed with an empty list and deactivate every typhoon right before
         # the is_active gate is checked. Typhoon.is_active therefore reflects
         # the last successful scheduled sync, which is the freshest available.
-        try:
-            send_new_bulletin_alerts(
-                [{
-                    "tcb_id": bulletin.tcb_id,
-                    "title": bulletin.title,
-                    "bulletin_count": bulletin.bulletin_count,
-                    "is_final": bulletin.is_final,
-                }],
-                db,
-            )
-        except Exception as alert_error:
-            print(f"Bulletin alert email step failed: {alert_error}")
+        # Re-uploading a PDF that's already saved is not a new TCB, so no alert.
+        if created:
+            try:
+                send_new_bulletin_alerts(
+                    [{
+                        "tcb_id": bulletin.tcb_id,
+                        "title": bulletin.title,
+                        "bulletin_count": bulletin.bulletin_count,
+                        "is_final": bulletin.is_final,
+                    }],
+                    db,
+                )
+            except Exception as alert_error:
+                print(f"Bulletin alert email step failed: {alert_error}")
 
         return {
             "status": "success",

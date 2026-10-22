@@ -4,6 +4,65 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-22] - One Email per New TCB; Account Activated/Deactivated Email (Sprint 3)
+
+A new TCB arrived and the GIS Specialist got no alert. When an email did come,
+it listed every TCB the storm had. The cause: `scrape_and_save_all()` returned
+every PDF PAGASA still had posted, including bulletins already saved in earlier
+polls. The alert therefore re-listed all of them, and could re-send on every
+15-minute poll while the typhoon was active. Separately, the backend had no
+logging handler, so the INFO-level skip/send lines never reached the console.
+Per Fabio: one email per genuinely new TCB. A TCB is alerted only if its typhoon
+is active when it arrives, otherwise it is skipped (not retried later), and
+there is no schema change. Also new: the affected user (any role) is emailed
+when an admin activates or deactivates their account.
+
+### 1. File: `backend/app/services/bulletin_parser.py`
+* New **`upsert_bulletin(parsed_data, db) -> (bulletin, created)`**: the old
+  `save_bulletin_to_db` body, now also returning whether a row was inserted
+  (`True`) or an existing bulletin matched (`False`).
+* **`save_bulletin_to_db()`**: thin wrapper returning just the bulletin, so
+  existing callers (simulation scripts, tests) are unchanged.
+* **`scrape_and_save_all()`**: only returns newly inserted bulletins. Also
+  fixes Monitoring's "Parsed N new bulletin(s)" count, which counted re-seen
+  ones. The final-bulletin assessment step is unchanged.
+
+### 2. File: `backend/app/services/email_alert_service.py`
+* **`send_new_bulletin_alerts()`**: one email per new bulletin. The subject is
+  `AgriSureGIS: New PAGASA Tropical Cyclone Bulletin #<n> for <TYPHOON>`, all
+  sent over one SMTP login. The `is_active` gate and BCC-style recipients are
+  unchanged.
+* New **`send_account_status_email(email, name, activated)`**: tells that one
+  user their account was activated/deactivated. Same no-op-if-unconfigured and
+  never-raises rules.
+* New helpers **`_compose()`** / **`_send()`**, shared by both.
+
+### 3. File: `backend/app/api/bulletins.py`
+* **`upload_bulletin_pdf()`**: uses `upsert_bulletin` and only alerts when the
+  upload created a new bulletin. Re-uploading a saved PDF no longer emails.
+
+### 4. File: `backend/app/api/users.py`
+* **`update_user()`** (`PATCH /api/users/{user_id}`): when `is_active` actually
+  changes, queues `send_account_status_email` as a FastAPI background task, so
+  the admin's save doesn't wait on Brevo. Other edits send nothing.
+
+### 5. File: `backend/app/main.py`
+* Adds a console handler at INFO for the `agrisuregis.*` and `app.*` loggers
+  only (not the root logger, so httpx/apscheduler stay quiet). Lines like "No
+  newly-parsed bulletins belong to a currently-active typhoon" and "Sent N
+  bulletin alert email(s)" now show in the uvicorn console.
+
+### 6. Tests
+* `tests/test_bulletin_parser.py`: scrape tests patch `upsert_bulletin`. New
+  tests: `upsert_bulletin` reports created/not-created, and
+  `scrape_and_save_all` drops already-saved bulletins.
+* `tests/test_email_alert_service.py`: the digest test is replaced by
+  `test_one_email_per_new_bulletin`. The upload wiring test now covers
+  "re-upload sends no alert". New `AccountStatusEmailTests` and
+  `UpdateUserRouteWiringTests`.
+
+---
+
 ## [2026-10-13] - Assessment & Reporting: Export the SAR Field Verification List (Sprint 3)
 
 Per Cristian: a way to export the farmers the automatic SAR planted check
