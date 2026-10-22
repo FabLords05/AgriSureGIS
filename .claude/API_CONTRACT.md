@@ -28,8 +28,9 @@ out of `backend/app/api/` — this file documents what exists, not what is plann
   - 401 messages: `"Not authenticated."`, `"Session expired."`,
     `"Invalid session token."`, `"Account not found or deactivated."`.
 - **Activity logging:** an HTTP middleware in `backend/app/main.py` records every
-  **mutating** (`POST`/`PUT`/`PATCH`/`DELETE`) request to `tbl_activity_log` as it
-  finishes, attributed to `request.state.user`. `/api/users/login` and
+  **mutating** (`POST`/`PUT`/`PATCH`/`DELETE`) request, plus the two CSV export
+  GETs, to `tbl_activity_log` as it finishes, attributed to
+  `request.state.user`, with a detailed `remarks` sentence (see §2). `/api/users/login` and
   `/api/users/logout` are excluded there because they self-log a more specific
   `LOGIN`/`LOGOUT` action from inside their own route bodies.
 - **Pagination:** keyset pagination exists on **`GET /api/farms/` only**
@@ -75,10 +76,14 @@ Note the prefix: it is **`/api/users/...`**, not `/api/auth/...`.
 ## 2. Activity Log (`/api/activity-log`) — admin-only
 
 * **GET `/api/activity-log/`**
-  - **Query:** `limit` (default 200, 1-1000), `user_id` (optional, narrows to one account).
-  - **Description:** Every login, logout and mutating backend call, newest first. Capped by `limit` because this table has no upper bound on growth.
-  - **Response:** `{ "status": "success", "data": [ { "log_id", "user_name", "user_email", "action", "endpoint", "summary", "status_code", "created_at" } ] }`
+  - **Query:** `limit` (default 200, 1-1000), `user_id` (optional, narrows to one account), `action_type` (optional, one label from `/filters`' `action_types`, e.g. `"Uploaded a CSV file"`; 400 if unknown).
+  - **Description:** Every login, logout and mutating backend call, plus the two CSV export GETs (`/api/assessments/export`, `/api/sar/field-verify/export`), the background CSV ingestion's outcome (`action: "INGEST"`), and the scheduled PAGASA TCB ingestion (`action: "SYSTEM"`, `endpoint: "scheduler/pagasa-poll"`, no user). Newest first. Capped by `limit` because this table has no upper bound on growth.
+  - **Response:** `{ "status": "success", "data": [ { "log_id", "user_id", "user_name", "user_email", "action", "endpoint", "summary", "remarks", "status_code", "created_at" } ] }`
+  - `remarks` (2026-10-22) is a full sentence saying exactly what was done: which file or record, before → after values, how many rows were accepted, skipped or rejected and why, and, for a failed request, the error message the user saw (`Rejected: ...` / `Failed: ...`). Routes set it with `note_activity()` (`app/core/activity_log.py`). Passwords are never included.
   - `summary` is a human-readable label from `_ENDPOINT_SUMMARIES` in `app/api/activity_log.py` (e.g. `"Uploaded a CSV file"`, `"Logged in"`, `"Failed login attempt"`). A mutating route added without a matching entry falls through to the raw `"{ACTION} {endpoint}"` string, so nothing is ever hidden — but new routes should get an entry.
+* **GET `/api/activity-log/filters`** (2026-10-22)
+  - **Description:** Options for the Activity Log tab's User and Action dropdowns.
+  - **Response:** `{ "status": "success", "data": { "users": [ { "user_id", "name", "email", "role" } ], "action_types": [ "Logged in", ..., "Uploaded a CSV file", ... ] } }`. `users` = every account with at least one log entry, admins included.
 
 ## 3. Spatial Data & Profile Ingestion (`/api/upload`)
 
@@ -258,6 +263,64 @@ pass, no field visit) or YELLOW `field_verify` (anything else). SAR never return
   - **Description:** Per-typhoon insurance usage status from `tbl_insurance_usage` (see `AssessmentService._sync_insurance_usage`). Without `typhoon_id`, returns every typhoon a policy has been assessed against — the same policy can be used for one typhoon and unused for another, tracked independently, so callers that want "is it used right now" must scope to a typhoon.
   - **Response:** `{ "status": "success", "data": [ { usage_id, insurance_records_id, typhoon_id, policy_no, farmer_id, farmer_name, is_used, assessment_id, marked_at, finalized_at } ] }`, newest `marked_at` first. `finalized_at` is set once the final PABS CSV export locks the usage.
 
+## 10a. Admin Settings (`/api/settings`) — 2026-10-22
+
+* **GET `/api/settings`** (any signed-in user)
+  - **Response:** `{ "status": "success", "data": { "coverage_rate_per_ha": 25000, "coverage_rate_min": 1000, "coverage_rate_max": 100000, "auto_backup_enabled": true } }`
+* **PUT `/api/settings/coverage-rate`** (admin)
+  - **Body:** `{ "coverage_rate_per_ha": 30000 }`. **400** outside ₱1,000–100,000.
+  - The RSBSA rate is the **default** Amount of Cover: at CSV upload, a record with a blank or zero `AmountofCover` gets `rate × area_size`. CSV values always win, and records already on file are not changed.
+* **PUT `/api/settings/auto-backup`** (admin)
+  - **Body:** `{ "enabled": false }`. Toggles the nightly 23:00 PHT backup.
+* **GET `/api/settings/matrices`** (admin, read-only)
+  - **Response:** `{ "data": { "recsap": [ { crop_stage_no, crop_stage, wind_signal_tcws, exposure_hours, estimated_yield_loss } ], "indemnity": [ { crop_stage_group, yield_loss_min, yield_loss_max, indemnity_factor } ] } }`
+  - Active rows only. The matrices are changed only by migration.
+
+## 10b. Database Backup & Archive (`/api/archives`, `/api/backups`) — 2026-10-22
+
+Archives live in a **separate, read-only database** (`backend/archive_schema.sql`). Every archive endpoint answers **503** if `ARCHIVE_DATABASE_URL` / `ARCHIVE_WRITER_DATABASE_URL` are unset.
+
+* **GET `/api/archives/eligibility`** (any signed-in user)
+  - **Response:** `{ "data": { eligible, reason, eligible_at, clear_after_days: 7, counts: { farmers, farms, policies, assessments }, typhoons: [ { typhoon_id, name, year, last_bulletin_at, clear_after } ], label, archive_configured, confirm_word: "CLEAR" } }`
+  - Eligible only when all of these hold:
+    - there is live data
+    - at least one typhoon was assessed, locked or SAR-checked against it
+    - now ≥ every such typhoon's last bulletin + 7 days
+* **POST `/api/archives`** (any signed-in user: Admin or GIS Specialist)
+  - **Body:** `{ "confirm": "CLEAR" }`
+  - Runs a safety `pg_dump` (sent to Google Drive), then copies every uploaded PABS record and polygon into the archive, verifies the counts, and deletes them from live.
+  - Typhoons, bulletins, signals, exposure summaries and boundaries are copied but kept live.
+  - **Errors:**
+    - **400:** not eligible, wrong confirmation, or the dump/copy failed. Nothing is deleted.
+    - **409:** another archive is already running.
+    - **503:** the archive database is not configured.
+  - **Response:** `{ "data": { archive_id, label, row_counts: { arc_farms: 1180, ... }, record_count, dump_file_name, gdrive_uploaded, gdrive_error } }`
+* **GET `/api/archives/typhoons`** (any signed-in user)
+  - **Response:** `{ "data": [ { typhoon_id, name, year, archive_id, label, archived_at } ] }`, newest archive per typhoon.
+  - Returns `[]` when the archive is not configured.
+  - Assessment & Reporting uses it to tag archived typhoons.
+* **GET `/api/archives/typhoon/{typhoon_id}/pabs-rows`** (any signed-in user, read-only)
+  - **Response:** `{ "data": { archive_id, label, archived_at, rows: [...] } }`. The rows have the same shape as `GET /api/assessments/pabs-summary`.
+  - **404** if the typhoon was never archived.
+* **GET `/api/archives`** (admin)
+  - Lists `{ archive_id, label, typhoons, archived_at, archived_by_name, row_counts, record_count, dump_file_name, gdrive_file_id }`, newest first.
+* **GET `/api/archives/{id}/records?q=&page=1&page_size=50`** (admin)
+  - **Response:** `{ total, page, page_size, rows: [ { farmer_name, farmers_id, farm_reference, province, municipality, barangay, area_size, policy_no, amount_cover, typhoon_name, typhoon_year, wind_signal, crop_stage, indemnity_factor, final_indemnity_payment, ... } ] }`
+  - One row per policy × computed assessment.
+* **GET `/api/archives/{id}/farms?bbox=w,s,e,n`** (admin)
+  - Returns a GeoJSON FeatureCollection of archived farm polygons with `total_payout`, plus `truncated` (capped at 5,000) and `extent`.
+* **GET `/api/archives/{id}/exposure`** (admin)
+  - Returns GeoJSON: exposure-area municipality outlines (`kind: "exposure"`, `max_signal_level`) and typhoon tracks (`kind: "track"`).
+* **GET `/api/archives/{id}/export`** (admin)
+  - CSV of every records row. Logged to the Activity Log.
+* **GET `/api/backups`** (admin)
+  - **Response:** `{ backups: [ { backup_id, kind, file_name, size_bytes, status, error, gdrive_uploaded, gdrive_error, created_at, file_available } ], last_backup, stored_count, gdrive_configured, archive_configured }`
+* **POST `/api/backups`** (admin)
+  - Runs `pg_dump -Fc` now. **500** if pg_dump fails. A Drive upload failure is reported, not raised.
+* **GET `/api/backups/{id}/download`** (admin)
+  - The `.dump` file. **404** if it is no longer on the server. Logged.
+* **Restore is not offered in-app.** It stays a manual `pg_restore`, and archives are never restored into live.
+
 ## 11. Unauthenticated utility endpoints
 
 * **GET `/`** — `{"message": "Welcome to the AgriSureGIS Backend!"}`
@@ -267,6 +330,6 @@ pass, no field visit) or YELLOW `field_verify` (anything else). SAR never return
 
 Things the UI or older docs may imply, but which have **no backend endpoint**:
 
-- **Database backup / restore.** `frontend/src/app/components/DatabaseBackupModule.tsx` makes no API calls — it is UI only. Backups are Fabio's own `pg_dump`/`pg_restore` operations outside the app.
-- **Amount-of-cover calibration writes.** Nothing persists an `AC` setting; the assessment reads `amount_cover` off each `tbl_insurance_records` row.
+- **Database restore.** Backups and archiving are real since 2026-10-22 (§10b). Restoring a dump stays Fabio's own `pg_restore`, run by hand.
+- **Editing the PCIC matrices.** They are shown read-only (§10a) and change only by migration. The assessment still reads `amount_cover` off each `tbl_insurance_records` row; the coverage-rate setting only fills in a blank AC at upload time.
 - **GeoServer layers.** WMS/WFS layers go from GeoServer to the browser (through the Vite dev proxy), not through FastAPI — see `.claude/GEOSERVER_SETUP.md`.

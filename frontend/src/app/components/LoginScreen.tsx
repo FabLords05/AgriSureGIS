@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Eye, EyeOff, LogIn, Shield, User, AlertCircle, UserPlus, ArrowLeft, CheckCircle2 } from "lucide-react";
+import { Eye, EyeOff, LogIn, User, AlertCircle, UserPlus, ArrowLeft, CheckCircle2 } from "lucide-react";
 import { loginUser, registerUser } from "@/lib/api";
 import agrisureLogo from "@/assets/agrisuregis-logo.png";
 import pcicLogo from "@/assets/pcic-logo.webp";
@@ -8,13 +8,11 @@ interface LoginScreenProps {
   onLogin: (user: { name: string; role: string; email: string; session_timeout_minutes: number }, token: string) => void;
 }
 
-type RegRole = "GIS Specialist" | "System Administrator";
-
 interface RegForm {
   fullName: string;
   email: string;
   employeeId: string;
-  role: RegRole;
+  role: "GIS Specialist";
   password: string;
   confirmPassword: string;
   division: string;
@@ -114,34 +112,19 @@ function RegistrationPanel({ onBack }: { onBack: () => void }) {
         </div>
 
         <form onSubmit={handleSubmit} className="px-6 pt-4 pb-5 space-y-3">
-          {/* Role selector — only GIS Specialist and System Administrator */}
+          {/* Access role -- fixed to GIS Specialist (2026-10-22). System
+              Administrator accounts are provisioned by the superuser, not
+              requested here; the backend rejects any other role. */}
           <div>
             <p className="text-[11px] font-semibold text-gray-500 uppercase tracking-wider mb-2">Access Role</p>
-            <div className="grid grid-cols-2 gap-2">
-              {(["GIS Specialist", "System Administrator"] as RegRole[]).map(r => {
-                const active = form.role === r;
-                return (
-                  <button
-                    key={r}
-                    type="button"
-                    onClick={() => update("role", r)}
-                    className={`flex items-center gap-2 p-2.5 rounded-xl border-2 transition-all text-left ${
-                      active ? "border-[#166534] bg-[#166534]/5" : "border-gray-200 hover:border-gray-300"
-                    }`}
-                  >
-                    <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 ${active ? "bg-[#166534]" : "bg-gray-100"}`}>
-                      {r === "GIS Specialist"
-                        ? <User size={12} className={active ? "text-white" : "text-gray-400"} />
-                        : <Shield size={12} className={active ? "text-white" : "text-gray-400"} />
-                      }
-                    </div>
-                    <p className={`text-[10px] font-bold leading-tight ${active ? "text-[#166534]" : "text-gray-600"}`}>{r}</p>
-                  </button>
-                );
-              })}
+            <div className="flex items-center gap-2 p-2.5 rounded-xl border-2 border-[#166534] bg-[#166534]/5">
+              <div className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0 bg-[#166534]">
+                <User size={12} className="text-white" />
+              </div>
+              <p className="text-[10px] font-bold leading-tight text-[#166534]">GIS Specialist</p>
             </div>
             <p className="text-[9px] text-gray-400 mt-1.5">
-              Only GIS Specialists and System Administrators may register. Farmer accounts are managed separately through the RSBSA system.
+              Only GIS Specialists may request access. Farmer accounts are managed separately through the RSBSA system.
             </p>
           </div>
 
@@ -306,7 +289,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
           />
           <p className="text-white text-xs font-bold leading-tight tracking-widest uppercase">Philippine Crop Insurance Corporation</p>
         </div>
-        <span className="text-white/30 text-[10px]">v2.1.0-beta</span>
+        <span className="text-white/60 text-[11px]">v2.1.0-beta</span>
       </div>
 
       {/* Center -- overflow-y-auto is a safety net for very short viewports;
@@ -324,42 +307,42 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
                 className="h-[clamp(3rem,8vh,4rem)] w-auto mx-auto mb-[clamp(0.25rem,1vh,0.5rem)]"
               />
               <h1 className="text-white text-2xl font-black tracking-tight">AgriSureGIS</h1>
-              <p className="text-white/80 text-sm mt-1">Automated Disaster Risk Assessment System</p>
-              <p className="text-white/60 text-xs mt-0.5">Parametric Indemnification · PAGASA TCB Integration · Google Earth Engine</p>
+              <p className="text-white/90 text-base mt-1">Automated Disaster Risk Assessment System</p>
+              <p className="text-white/75 text-[13px] mt-0.5">Parametric Indemnification · PAGASA TCB Integration · Google Earth Engine</p>
             </div>
 
             {/* Login Card */}
             <div className="bg-white rounded-2xl shadow-2xl overflow-hidden">
               {/* Card Header */}
               <div className="px-6 pt-[clamp(0.75rem,2vh,1.5rem)] pb-[clamp(0.5rem,1.2vh,1rem)] border-b border-gray-100 text-center">
-                <p className="text-sm font-bold text-gray-800">Sign in to your account</p>
-                <p className="text-[11px] text-gray-400 mt-0.5">Enter your institutional email and password</p>
+                <p className="text-base font-bold text-gray-800">Sign in to your account</p>
+                <p className="text-xs text-gray-500 mt-0.5">Enter your institutional email and password</p>
               </div>
 
               {/* Form */}
               <form onSubmit={handleSubmit} className="px-6 pt-[clamp(0.75rem,2vh,1.5rem)] pb-[clamp(0.75rem,2vh,1.5rem)]">
                 {/* Email */}
                 <div className="mb-[clamp(0.4rem,1.2vh,0.75rem)]">
-                  <label className="block text-[11px] font-semibold text-gray-600 mb-1.5">Institutional Email</label>
+                  <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">Institutional Email</label>
                   <input
                     type="email"
                     value={email}
                     onChange={e => { setEmail(e.target.value); setError(null); }}
                     placeholder="yourname@pcic.gov.ph"
-                    className="w-full border border-gray-200 rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:border-[#166534] focus:ring-1 focus:ring-[#166534]/30 transition-all placeholder:text-gray-300"
+                    className="w-full border border-gray-200 rounded-xl px-3.5 py-2.5 text-sm focus:outline-none focus:border-[#166534] focus:ring-1 focus:ring-[#166534]/30 transition-all placeholder:text-gray-400"
                   />
                 </div>
 
                 {/* Password */}
                 <div className="mb-[clamp(0.5rem,1.5vh,1rem)]">
-                  <label className="block text-[11px] font-semibold text-gray-600 mb-1.5">Password</label>
+                  <label className="block text-[13px] font-semibold text-gray-700 mb-1.5">Password</label>
                   <div className="relative">
                     <input
                       type={showPw ? "text" : "password"}
                       value={password}
                       onChange={e => { setPassword(e.target.value); setError(null); }}
                       placeholder="••••••••"
-                      className="w-full border border-gray-200 rounded-xl px-3.5 py-2.5 pr-11 text-sm focus:outline-none focus:border-[#166534] focus:ring-1 focus:ring-[#166534]/30 transition-all placeholder:text-gray-300"
+                      className="w-full border border-gray-200 rounded-xl px-3.5 py-2.5 pr-11 text-sm focus:outline-none focus:border-[#166534] focus:ring-1 focus:ring-[#166534]/30 transition-all placeholder:text-gray-400"
                     />
                     <button
                       type="button"
@@ -375,7 +358,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
                 {error && (
                   <div className="flex items-start gap-2 p-3 rounded-xl bg-red-50 border border-red-100 mb-4">
                     <AlertCircle size={13} className="text-red-500 shrink-0 mt-0.5" />
-                    <p className="text-[11px] text-red-600">{error}</p>
+                    <p className="text-xs text-red-600">{error}</p>
                   </div>
                 )}
 
@@ -396,7 +379,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
                   <button
                     type="button"
                     onClick={() => setView("register")}
-                    className="text-xs font-semibold text-[#166534] hover:text-[#14532d] hover:underline underline-offset-2 transition-colors inline-flex items-center gap-1"
+                    className="text-sm font-semibold text-[#166534] hover:text-[#14532d] hover:underline underline-offset-2 transition-colors inline-flex items-center gap-1"
                   >
                     <UserPlus size={12} /> Request System Access
                   </button>
@@ -405,7 +388,7 @@ export function LoginScreen({ onLogin }: LoginScreenProps) {
             </div>
 
             {/* Footer note */}
-            <p className="text-center text-white/50 text-[11px] mt-[clamp(0.4rem,1vh,0.75rem)]">
+            <p className="text-center text-white/70 text-xs mt-[clamp(0.4rem,1vh,0.75rem)]">
               Authorized Personnel Only · PCIC-GIS AgriSureGIS System · For technical support contact the ICT Division
             </p>
           </div>

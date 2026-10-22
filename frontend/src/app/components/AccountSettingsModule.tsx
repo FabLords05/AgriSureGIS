@@ -3,6 +3,7 @@ import { UserCog, Save, KeyRound } from "lucide-react";
 import { updateMe, SystemUser } from "@/lib/api";
 import { CurrentUser } from "@/lib/authStorage";
 import { HeaderHideMode } from "@/lib/headerHideModeStorage";
+import { ArchiveClearCard } from "./ArchiveClearCard";
 
 // New self-service tab (2026-08-16) -- every role gets this (see Header.tsx's
 // ACCOUNT_MODULE), unlike UserManagementModule.tsx which is the admin-only
@@ -201,6 +202,14 @@ export function AccountSettingsModule({ currentUser, onUpdated, headerHideMode, 
             </button>
           </div>
         </div>
+
+        {/* Archive & Clear (2026-10-22) -- GIS Specialists only here; admins
+            have the same card on the Database Backup tab. A full reload
+            afterwards so no screen keeps showing the cleared farms (the farm
+            list's refresh() merges over existing rows, it never drops them). */}
+        {currentUser.role !== "System Administrator" && (
+          <ArchiveClearCard onArchived={() => window.location.reload()} />
+        )}
 
         <div className="pb-6" />
       </div>

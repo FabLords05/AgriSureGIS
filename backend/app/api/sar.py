@@ -42,6 +42,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.api.assessments import _export_filename
 from app.api.farms import _affected_farm_ids
+from app.core.activity_log import note_activity, plural
 from app.core.database import get_db
 from app.core.farmer_name import format_surname_first
 from app.core.security import get_current_user
@@ -153,6 +154,23 @@ def _load_affected_polygons(db: Session, typhoon_id: int, event_date: date) -> t
     return [(farm_id, json.loads(geojson)) for farm_id, geojson in rows], skipped
 
 
+def _activity_typhoon_label(db: Session, typhoon_id: int) -> str:
+    """Typhoon name for Activity Log remarks, falling back to its id."""
+    name = getattr(db.get(Typhoon, typhoon_id), "name", None)
+    return name if isinstance(name, str) else f"typhoon #{typhoon_id}"
+
+
+def _activity_farm_label(farm) -> str:
+    """'farm #12 (FARMID 345, JUAN DELA CRUZ)' for Activity Log remarks."""
+    bits = []
+    if getattr(farm, "csv_farm_reference", None):
+        bits.append(f"FARMID {farm.csv_farm_reference}")
+    farmer = getattr(farm, "farmer", None)
+    if farmer is not None:
+        bits.append(f"{farmer.first_name} {farmer.last_name}".strip())
+    return f"farm #{farm.farm_id}" + (f" ({', '.join(bits)})" if bits else "")
+
+
 @router.post("/layer")
 def get_planted_layer(body: LayerRequest, db: Session = Depends(get_db)):
     """
@@ -163,6 +181,8 @@ def get_planted_layer(body: LayerRequest, db: Session = Depends(get_db)):
     isn't configured, 422 if there's nothing to draw, 502 if Earth Engine
     itself fails.
     """
+    typhoon_label = _activity_typhoon_label(db, body.typhoon_id)
+    note_activity(f"Request SAR planted layer for {typhoon_label}.")
     event_date = _event_date(db, body.typhoon_id)
     if not gee_sar_service.gee_configured():
         raise HTTPException(status_code=503, detail="Google Earth Engine is not configured on the server.")
@@ -187,6 +207,11 @@ def get_planted_layer(body: LayerRequest, db: Session = Depends(get_db)):
     except Exception as exc:  # Earth Engine computation/quota errors
         raise HTTPException(status_code=502, detail=f"Earth Engine request failed: {exc}")
 
+    note_activity(
+        f"Loaded SAR planted layer for {typhoon_label} (event {event_date.isoformat()}): "
+        f"{plural(len(polygons), 'farm polygon')}"
+        f"{' (capped)' if capped else ''}, {skipped_no_geom:,} affected farm(s) skipped for having no GPX boundary."
+    )
     return {
         "status": "success",
         "data": {
@@ -226,7 +251,11 @@ def set_verification(
     current_user: SystemUser = Depends(get_current_user),
 ):
     """Record (or change) the Specialist's verdict for one farm and typhoon."""
-    if db.get(Farm, farm_id) is None:
+    typhoon_label = _activity_typhoon_label(db, body.typhoon_id)
+    verdict = "Planted" if body.is_planted else "Not planted"
+    note_activity(f"Mark farm #{farm_id} as {verdict} for {typhoon_label}.")
+    farm = db.get(Farm, farm_id)
+    if farm is None:
         raise HTTPException(status_code=404, detail="Farm not found.")
     row = (
         db.query(PlantedVerification)
@@ -234,8 +263,15 @@ def set_verification(
         .first()
     )
     if row is None:
+        previous = "unchecked"
         row = PlantedVerification(farm_id=farm_id, typhoon_id=body.typhoon_id)
         db.add(row)
+    else:
+        previous = "Planted" if row.is_planted else "Not planted"
+    note_activity(
+        f"Marked {_activity_farm_label(farm)} as {verdict} for {typhoon_label} (was {previous})"
+        + (f'; notes: "{body.notes}".' if body.notes else ".")
+    )
     row.is_planted = body.is_planted
     row.notes = body.notes
     row.verified_by = current_user.user_id
@@ -254,6 +290,12 @@ def clear_verification(farm_id: int, typhoon_id: int = Query(...), db: Session =
         .delete()
     )
     db.commit()
+    farm = db.get(Farm, farm_id)
+    note_activity(
+        f"Cleared the planted verification of {_activity_farm_label(farm) if farm else f'farm #{farm_id}'} "
+        f"for {_activity_typhoon_label(db, typhoon_id)}"
+        + (" (back to unchecked)." if deleted else " (it had no verdict recorded).")
+    )
     return {"status": "success", "deleted": deleted}
 
 
@@ -412,6 +454,8 @@ def run_planted_check(
     needed but not configured; 502 Earth Engine failure.
     """
     typhoon_id = body.typhoon_id
+    typhoon_label = _activity_typhoon_label(db, typhoon_id)
+    note_activity(f"Run SAR planted check for {typhoon_label}.")
     event_date = _event_date(db, typhoon_id)
 
     farms = _load_affected_farms(db, typhoon_id, event_date)
@@ -488,6 +532,13 @@ def run_planted_check(
     summary = _summary(rows)
     summary["fetched_from_gee"] = len(fetch)
     summary["from_cache"] = len(candidates) - len(fetch)
+    reasons = ", ".join(f"{r['count']:,} {r['label']}" for r in summary["reasons"])
+    note_activity(
+        f"Ran SAR planted check for {typhoon_label} (window {start.isoformat()} to {end.isoformat()}): "
+        f"{plural(summary['checked'], 'farm')} checked -- {summary['planted']:,} planted, "
+        f"{summary['field_verify']:,} need field verification{f' ({reasons})' if reasons else ''}; "
+        f"{len(fetch):,} fetched from Earth Engine, {summary['from_cache']:,} from cache."
+    )
     return {"status": "success", "data": {"summary": summary, "results": [_check_to_dict(r) for r in rows]}}
 
 
@@ -607,6 +658,7 @@ def get_field_verify_list(typhoon_id: int = Query(...), db: Session = Depends(ge
 def export_field_verify_csv(typhoon_id: int = Query(...), db: Session = Depends(get_db)):
     """The same list as a CSV download. 422 if the planted check has never
     been run for the typhoon."""
+    note_activity(f"Export SAR field verification CSV for {_activity_typhoon_label(db, typhoon_id)}.")
     data = _field_verify_list(db, typhoon_id)
     if data["checked"] == 0:
         raise HTTPException(status_code=422, detail="The SAR planted check hasn't been run for this typhoon yet.")
@@ -616,6 +668,10 @@ def export_field_verify_csv(typhoon_id: int = Query(...), db: Session = Depends(
     buffer = io.StringIO()
     dataframe.to_csv(buffer, index=False, float_format="%.2f")
     filename = _export_filename([data["typhoon_name"]], "SAR_Field_Verification")
+    note_activity(
+        f'Exported SAR field verification CSV "{filename}" for {data["typhoon_name"]}: '
+        f"{plural(len(data['rows']), 'farm')} to verify on site (of {data['checked']:,} checked)."
+    )
     return StreamingResponse(
         iter([buffer.getvalue()]),
         media_type="text/csv",

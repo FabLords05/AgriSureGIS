@@ -6,12 +6,13 @@ from sqlalchemy.orm import Session
 import os
 import shutil
 
+from app.core.activity_log import describe_new_bulletins, note_activity, plural
 from app.core.database import get_db
 from app.core.scheduler import reschedule_bulletin_job
 from app.core.security import get_current_user
 from app.services.bulletin_parser import BulletinParserService, PagasaScrapeError
 from app.services.email_alert_service import send_new_bulletin_alerts
-from app.services.exposure_calculator import ExposureCalculatorService
+from app.services.exposure_calculator import METHODOLOGY_NOTE, ExposureCalculatorService, serialize_summary
 from app.services.pagasa_status_scraper import PagasaStatusService
 from app.models.models import (
     AdminBoundary,
@@ -20,6 +21,7 @@ from app.models.models import (
     ParserSettings,
     TropicalCycloneBulletin,
     TcbSignal,
+    TcbUnresolvedClause,
     Typhoon,
 )
 
@@ -63,11 +65,16 @@ def update_parser_settings(payload: ParserSettingsUpdate, request: Request, db: 
     background scraper job to match, without requiring a backend restart.
     """
     settings = _get_or_create_settings(db)
+    previous = settings.polling_interval_minutes
     settings.polling_interval_minutes = payload.polling_interval_minutes
     db.commit()
     db.refresh(settings)
 
     reschedule_bulletin_job(request.app.state.scheduler, settings.polling_interval_minutes)
+    note_activity(
+        f"Changed the TCB polling interval from {previous} to {settings.polling_interval_minutes} minutes; "
+        "background scraper rescheduled."
+    )
 
     return {"polling_interval_minutes": settings.polling_interval_minutes}
 
@@ -109,6 +116,7 @@ async def trigger_pagasa_scrape(db: Session = Depends(get_db)):
     """
     Triggers web scraping of the PAGASA portal to download and parse any active bulletins.
     """
+    note_activity("Manual PAGASA TCB scrape.")
     try:
         links = await BulletinParserService.fetch_active_bulletin_links()
     except PagasaScrapeError:
@@ -121,6 +129,12 @@ async def trigger_pagasa_scrape(db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="No active bulletin PDFs found on PAGASA portal.")
 
     bulletins_created = await BulletinParserService.scrape_and_save_all(db, TEMP_DIR)
+    remarks = f"Manual PAGASA TCB scrape: {plural(len(links), 'bulletin PDF')} listed on the portal, "
+    if bulletins_created:
+        remarks += f"{len(bulletins_created)} new ingested -- {describe_new_bulletins(bulletins_created, db)}."
+    else:
+        remarks += "no new bulletins (all already on file, or none could be parsed)."
+    note_activity(remarks)
 
     # Independent of the TCB scrape above -- a failure here shouldn't hide a
     # successful bulletin parse, and vice versa (see PagasaStatusService).
@@ -150,6 +164,7 @@ async def upload_bulletin_pdf(file: UploadFile = File(...), db: Session = Depend
     """
     Allows manual upload of a PAGASA bulletin PDF if the scraping portal is offline.
     """
+    note_activity(f'Manual TCB PDF upload "{file.filename}".')
     if not file.filename.endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are supported.")
         
@@ -164,6 +179,14 @@ async def upload_bulletin_pdf(file: UploadFile = File(...), db: Session = Depend
         # Parse and save
         parsed_data = BulletinParserService.parse_bulletin_text(temp_path)
         bulletin, created = BulletinParserService.upsert_bulletin(parsed_data, db)
+        if created:
+            # Same as the scrape loop: exposure tables follow new bulletins.
+            BulletinParserService.recompute_exposure(bulletin.typhoon_id, db)
+        described = describe_new_bulletins([{"tcb_id": bulletin.tcb_id, "title": bulletin.title}], db)
+        note_activity(
+            f'Manually uploaded TCB PDF "{file.filename}": '
+            + (f"ingested {described}." if created else f"{described} was already on file; nothing new saved.")
+        )
 
         # Clean up
         if os.path.exists(temp_path):
@@ -216,30 +239,91 @@ def compute_exposure(tcb_id: int, db: Session = Depends(get_db)):
     parsed so far. Sprint 3 scope only — does not compute yield loss or payouts
     (that depends on Sprint 4's RecsapMatrix/RiskAssessment work).
     """
+    note_activity(f"Compute exposure for TCB #{tcb_id}.")
     bulletin = db.query(TropicalCycloneBulletin).filter(TropicalCycloneBulletin.tcb_id == tcb_id).first()
     if bulletin is None:
         raise HTTPException(status_code=404, detail="Bulletin not found.")
 
     summaries = ExposureCalculatorService.compute_for_typhoon(bulletin.typhoon_id, db)
+    typhoon = db.get(Typhoon, bulletin.typhoon_id) if bulletin.typhoon_id else None
+    eligible = sum(1 for s in summaries if s.is_eligible_6hr)
+    note_activity(
+        f"Computed exposure for {typhoon.name if typhoon else 'unknown typhoon'} "
+        f"(from TCB #{tcb_id}, Bulletin #{bulletin.bulletin_count}): "
+        f"{plural(len(summaries), 'municipality', 'municipalities')} exposed, "
+        f"{eligible:,} with 6+ hours of exposure (payout-eligible)."
+    )
 
     return {
         "status": "success",
         "typhoon_id": bulletin.typhoon_id,
         "boundaries_computed": len(summaries),
-        "summaries": [
+        "summaries": [serialize_summary(s) for s in summaries],
+    }
+
+
+def _exposure_context(typhoon_id: int, db: Session) -> dict:
+    """What both exposure tables show around the rows: the interpretation
+    used, bulletins left out for an unreadable issue time, and TCWS clauses
+    that resolved to no municipality (incl. partial coverage with no town
+    list, which is never expanded to the whole province)."""
+    bulletins = (
+        db.query(TropicalCycloneBulletin.tcb_id, TropicalCycloneBulletin.bulletin_count,
+                 TropicalCycloneBulletin.issued_at_parsed)
+        .filter(TropicalCycloneBulletin.typhoon_id == typhoon_id)
+        .all()
+    )
+    count_by_tcb = {b.tcb_id: b.bulletin_count for b in bulletins}
+    unresolved = (
+        db.query(TcbUnresolvedClause)
+        .filter(TcbUnresolvedClause.tcb_id.in_(list(count_by_tcb) or [-1]))
+        .order_by(TcbUnresolvedClause.tcb_id, TcbUnresolvedClause.signal_level.desc())
+        .all()
+    )
+    return {
+        "methodology": METHODOLOGY_NOTE,
+        "bulletin_count": len(bulletins),
+        "bulletins_without_issue_time": sorted(b.bulletin_count for b in bulletins if b.issued_at_parsed is False),
+        "unresolved_clauses": [
             {
-                "summary_id": s.summary_id,
-                "boundary_id": s.boundary_id,
-                "province": s.province,
-                "municipality": s.municipality,
-                "max_signal_level": s.max_signal_level,
-                "start_time": s.start_time,
-                "end_time": s.end_time,
-                "total_exposure_hours": float(s.total_exposure_hours),
-                "is_eligible_6hr": s.is_eligible_6hr,
+                "bulletin_count": count_by_tcb.get(u.tcb_id),
+                "signal_level": u.signal_level,
+                "island_group": u.island_group,
+                "clause": u.clause,
+                "reason": u.reason,
             }
-            for s in summaries
+            for u in unresolved
         ],
+    }
+
+
+@router.get("/typhoon/{typhoon_id}/exposure")
+def get_typhoon_exposure(typhoon_id: int, db: Session = Depends(get_db)):
+    """
+    Read-only per-municipality exposure for one typhoon: Max Signal, hours
+    under each of Signal 1-5, and Total Exposure (their sum). The single
+    source both the Main Dashboard Exposure Summary and Assessment &
+    Reporting's Areas Affected table read, so they always agree. Rows are
+    (re)computed by ExposureCalculatorService whenever a bulletin is saved
+    or corrected, or by POST /{tcb_id}/compute-exposure.
+    """
+    typhoon = db.query(Typhoon).filter(Typhoon.typhoon_id == typhoon_id).first()
+    if typhoon is None:
+        raise HTTPException(status_code=404, detail="Typhoon not found.")
+
+    summaries = (
+        db.query(AreaExposureSummary)
+        .filter(AreaExposureSummary.typhoon_id == typhoon_id)
+        .order_by(AreaExposureSummary.max_signal_level.desc(), AreaExposureSummary.province,
+                  AreaExposureSummary.municipality)
+        .all()
+    )
+    return {
+        "status": "success",
+        "typhoon_id": typhoon_id,
+        "typhoon_name": typhoon.name,
+        "areas": [serialize_summary(s) for s in summaries],
+        **_exposure_context(typhoon_id, db),
     }
 
 
@@ -315,17 +399,7 @@ def get_typhoon_summary(typhoon_id: int, db: Session = Depends(get_db)):
         "status": "success",
         "typhoon_id": typhoon_id,
         "typhoon_name": typhoon.name,
-        "areas_hit": [
-            {
-                "province": s.province,
-                "municipality": s.municipality,
-                "max_signal_level": s.max_signal_level,
-                "start_time": s.start_time,
-                "end_time": s.end_time,
-                "total_exposure_hours": float(s.total_exposure_hours),
-            }
-            for s in summaries
-        ],
+        "areas_hit": [serialize_summary(s) for s in summaries],
         "max_signal_level": max(s.max_signal_level for s in summaries),
         "start_time": overall_start,
         "end_time": overall_end,
