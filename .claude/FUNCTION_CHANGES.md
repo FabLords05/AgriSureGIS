@@ -4,6 +4,42 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-22] - PSGC Lookup: Three More Barangay Spellings (Supersedes Two From the Entry Below)
+
+Second pass over the same legacy-system reconciliation as the
+"PSGC Lookup: Four Barangay Spellings" entry further down this file. Data only
+— no function, route, schema or API surface touched.
+
+### 1. File: `backend/app/data/psgc_nationwide_boundaries.csv`
+* `0203114030` Isabela / City of Ilagan — `Cabiseria 3` → `Cabisera 3`.
+  **Supersedes** the earlier `Cabeseria 3` → `Cabiseria 3`; the legacy spelling
+  drops the second `e` as well. Note this barangay is now the only `Cabisera`
+  in Ilagan — its siblings (`Cabeseria 19`, `23`, `25`, `6 & 24`) keep the
+  `Cabeseria` spelling, which is how the legacy data has it.
+* `0203125012` Isabela / Reina Mercedes — `Nappaccu Grande` → `Napaccu Grande`.
+* `0203125013` Isabela / Reina Mercedes — `Napaccu Pequeño` → `Nappaccu Pequeño`,
+  **reverting** the earlier change. The two edits above are one correction: the
+  single-`p` `Napaccu` spelling belongs to *Grande*, not *Pequeño*. The pair is
+  deliberately asymmetric in the legacy system — `Napaccu Grande` and
+  `Nappaccu Pequeño` — so this is not a typo to be "tidied up" later.
+
+Same rationale as the earlier entry: `_resolve_psgc_code` /
+`_municipality_alias_variants` in `backend/app/api/upload.py` only retry naming
+*conventions* (`X CITY` ↔ `CITY OF X`, `STA.` ↔ `SANTA`, trailing `(...)`), never
+letter-level spelling, so a mismatched CSV row is reported as a genuine
+missing-PSGC miss and the ingest row is rejected.
+
+### Status / Next Steps
+* PSGC codes unchanged — no foreign key moves.
+* Still needs the admin-boundary seed re-run to reach `tbl_admin_boundaries`;
+  fresh ingests use the CSV directly. This is now pending for **seven** rows
+  across the two entries, not four.
+* No automated test covers PSGC spelling; validation is an upload of a real
+  PABS export containing these barangays and confirming they no longer appear
+  in the rejected-rows report.
+
+---
+
 ## [2026-10-22] - Archive & Clear Confirmed With the User's Password
 
 The Archive & Clear dialog asked the user to type `CLEAR`. It now asks for the signed-in user's own password, checked on the server, so an unattended signed-in session can't clear the live records.
