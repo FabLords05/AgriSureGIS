@@ -24,6 +24,9 @@ function formatDateTime(iso: string | null): string {
 
 // How often a running assessment calculation's progress is polled.
 const ASSESSMENT_POLL_MS = 500;
+// Wind Velocity filter: always the payout-eligible TCWS levels (2-5), not
+// just the signals present in the loaded rows (2026-10-22, per Cristian).
+const WIND_SIGNAL_OPTIONS = ["All", "2", "3", "4", "5"];
 
 // TYPHOON_NAME isn't sortable (2026-10-13, per Cristian -- unnecessary).
 type SortField = "FARMER_NAME" | "province" | "municipality" | "barangay" | "AREA" | "PERIOD_OF_EXPOSURE" | "wind_signal" | "crop_stage" | "AC";
@@ -509,15 +512,22 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
   const isArchivedView = showArchived && archivedView !== null;
   const displayRows = isArchivedView ? archivedView.rows : rows;
 
+  // Only the selected typhoon's affected municipalities (every typhoon's when
+  // none is selected), not every town in the loaded rows.
   const municipalities = useMemo(() => {
-    const set = new Set(displayRows.map(r => r.municipality).filter((m): m is string => !!m));
+    const set = new Set(
+      displayRows
+        .filter(r => selectedTyphoonName === null || r.TYPHOON_NAME === selectedTyphoonName)
+        .map(r => r.municipality)
+        .filter((m): m is string => !!m),
+    );
     return ["All", ...Array.from(set).sort()];
-  }, [displayRows]);
+  }, [displayRows, selectedTyphoonName]);
 
-  const signals = useMemo(() => {
-    const set = new Set(displayRows.map(r => r.wind_signal).filter((s): s is number => s != null));
-    return ["All", ...Array.from(set).sort((a, b) => a - b).map(String)];
-  }, [displayRows]);
+  // A town picked under another typhoon would leave the table empty.
+  useEffect(() => {
+    if (!municipalities.includes(filterMuni)) setFilterMuni("All");
+  }, [municipalities, filterMuni]);
 
   const filtered = useMemo(() => displayRows
     .filter(r => selectedTyphoonName === null || r.TYPHOON_NAME === selectedTyphoonName)
@@ -630,7 +640,7 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
             onChange={e => setFilterSignal(e.target.value)}
             className="text-[11px] border border-border rounded px-2 py-1 bg-background"
           >
-            {signals.map(s => <option key={s} value={s}>{s === "All" ? "All Wind Velocities" : `Signal ${s}`}</option>)}
+            {WIND_SIGNAL_OPTIONS.map(s => <option key={s} value={s}>{s === "All" ? "All Wind Velocities" : `Signal ${s}`}</option>)}
           </select>
           {/* Disabled for an archived typhoon: the PABS export locks the
               exported policies as used, and archived rows are read-only. */}
