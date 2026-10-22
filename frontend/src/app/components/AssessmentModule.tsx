@@ -2,12 +2,13 @@ import { useState, useMemo, useEffect } from "react";
 import { toast } from "sonner";
 import {
   Download, Eye, ChevronDown, ChevronUp, ArrowUpDown,
-  FileSpreadsheet, RefreshCw, AlertCircle, Calculator, MapPin,
+  FileSpreadsheet, RefreshCw, AlertCircle, Calculator, MapPin, Lock,
 } from "lucide-react";
 import {
   getAssessmentsPabsSummary, downloadAssessmentsPabsCsv, getBulletins, getTyphoonSummary, calculateAssessments,
-  getBulletinSignals, getFieldVerifyList, downloadFieldVerifyCsv,
+  getBulletinSignals, getFieldVerifyList, downloadFieldVerifyCsv, getArchivedTyphoons, getArchivedTyphoonRows,
   PabsAssessmentRow, Bulletin, TyphoonSummary, TyphoonSummaryArea, TcbSignal, FieldVerifyList, FieldVerifyRow,
+  ArchivedTyphoon, ArchivedTyphoonRows,
 } from "@/lib/api";
 
 function formatDateTime(iso: string | null): string {
@@ -404,6 +405,14 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
   const [fieldVerify, setFieldVerify] = useState<FieldVerifyList | null>(null);
   const [showFieldVerifyModal, setShowFieldVerifyModal] = useState(false);
 
+  // Archived typhoons (2026-10-22): after Archive & Clear a typhoon's rows
+  // leave the live DB, so selecting it shows them from the archive instead,
+  // read-only. Keyed by name, same as the deduped typhoon list below.
+  const [archivedByName, setArchivedByName] = useState<Map<string, ArchivedTyphoon>>(new Map());
+  const [archivedView, setArchivedView] = useState<ArchivedTyphoonRows | null>(null);
+  const [isLoadingArchived, setIsLoadingArchived] = useState(false);
+  const [archivedError, setArchivedError] = useState<string | null>(null);
+
   useEffect(() => {
     setFieldVerify(null);
     setShowFieldVerifyModal(false);
@@ -468,6 +477,9 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
   useEffect(() => {
     loadSummary();
     getBulletins().then(setBulletins).catch(() => setBulletins([]));
+    getArchivedTyphoons()
+      .then(res => setArchivedByName(new Map(res.data.map(t => [t.name, t]))))
+      .catch(() => setArchivedByName(new Map()));
   }, []);
 
   // One row per typhoon NAME (not typhoon_id) -- a bulletin-title parsing bug
@@ -487,16 +499,6 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
     return Array.from(byName.values());
   }, [bulletins]);
 
-  const municipalities = useMemo(() => {
-    const set = new Set(rows.map(r => r.municipality).filter((m): m is string => !!m));
-    return ["All", ...Array.from(set).sort()];
-  }, [rows]);
-
-  const signals = useMemo(() => {
-    const set = new Set(rows.map(r => r.wind_signal).filter((s): s is number => s != null));
-    return ["All", ...Array.from(set).sort((a, b) => a - b).map(String)];
-  }, [rows]);
-
   // Rows carry TYPHOON_NAME as a plain string (not a typhoon_id), which
   // sidesteps the bulletin-title-parsing quirk noted above `typhoons` --
   // matching by name is exactly how that list is already deduped/selected.
@@ -504,7 +506,40 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
     ? null
     : typhoons.find(t => t.typhoon_id === selectedTyphoonId)?.typhoon_name ?? null;
 
-  const filtered = useMemo(() => rows
+  // An archived typhoon with no live rows left is shown from the archive.
+  // Live rows win if it was assessed again after a clear (they're current;
+  // the archive stays viewable from Database Backup).
+  const selectedArchive = selectedTyphoonName ? archivedByName.get(selectedTyphoonName) ?? null : null;
+  const hasLiveRowsForSelected = selectedTyphoonName !== null && rows.some(r => r.TYPHOON_NAME === selectedTyphoonName);
+  const showArchived = selectedArchive !== null && !hasLiveRowsForSelected && !isLoading;
+
+  useEffect(() => {
+    setArchivedView(null);
+    setArchivedError(null);
+    if (!showArchived || selectedArchive === null) return;
+    let cancelled = false;
+    setIsLoadingArchived(true);
+    getArchivedTyphoonRows(selectedArchive.typhoon_id)
+      .then(res => { if (!cancelled) setArchivedView(res.data); })
+      .catch(error => { if (!cancelled) setArchivedError(error instanceof Error ? error.message : "Failed to load archived records."); })
+      .finally(() => { if (!cancelled) setIsLoadingArchived(false); });
+    return () => { cancelled = true; };
+  }, [showArchived, selectedArchive]);
+
+  const isArchivedView = showArchived && archivedView !== null;
+  const displayRows = isArchivedView ? archivedView.rows : rows;
+
+  const municipalities = useMemo(() => {
+    const set = new Set(displayRows.map(r => r.municipality).filter((m): m is string => !!m));
+    return ["All", ...Array.from(set).sort()];
+  }, [displayRows]);
+
+  const signals = useMemo(() => {
+    const set = new Set(displayRows.map(r => r.wind_signal).filter((s): s is number => s != null));
+    return ["All", ...Array.from(set).sort((a, b) => a - b).map(String)];
+  }, [displayRows]);
+
+  const filtered = useMemo(() => displayRows
     .filter(r => selectedTyphoonName === null || r.TYPHOON_NAME === selectedTyphoonName)
     .filter(r => filterMuni === "All" || r.municipality === filterMuni)
     .filter(r => filterSignal === "All" || r.wind_signal === Number(filterSignal))
@@ -513,7 +548,7 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
       const vb = b[sortField] ?? (typeof b[sortField] === "number" ? 0 : "");
       const cmp = typeof va === "number" && typeof vb === "number" ? va - vb : String(va).localeCompare(String(vb));
       return sortDir === "asc" ? cmp : -cmp;
-    }), [rows, selectedTyphoonName, filterMuni, filterSignal, sortField, sortDir]);
+    }), [displayRows, selectedTyphoonName, filterMuni, filterSignal, sortField, sortDir]);
 
   const handleSort = (f: SortField) => {
     if (sortField === f) setSortDir(d => d === "asc" ? "desc" : "asc");
@@ -569,7 +604,14 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
                   : "bg-background border-border hover:bg-muted/50"
               }`}
             >
-              <p className="text-[13px] font-bold">Typhoon {t.typhoon_name}</p>
+              <p className="text-[13px] font-bold flex items-center gap-1.5">
+                Typhoon {t.typhoon_name}
+                {archivedByName.has(t.typhoon_name) && (
+                  <span className="flex items-center gap-0.5 text-[9px] font-semibold px-1.5 py-0.5 rounded-full border border-border text-muted-foreground">
+                    <Lock size={8} /> Archived
+                  </span>
+                )}
+              </p>
               <p className="text-[12px] text-foreground/70">{t.bulletin_count} bulletins (TCB 1-{t.bulletin_count})</p>
             </button>
           ))}
@@ -610,9 +652,12 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
           >
             {signals.map(s => <option key={s} value={s}>{s === "All" ? "All Wind Velocities" : `Signal ${s}`}</option>)}
           </select>
+          {/* Disabled for an archived typhoon: the PABS export locks the
+              exported policies as used, and archived rows are read-only. */}
           <button
             onClick={() => setShowCsvPreview(true)}
-            disabled={filtered.length === 0}
+            disabled={filtered.length === 0 || showArchived}
+            title={showArchived ? "Archived typhoons are read-only" : undefined}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#166534] text-white text-[11px] font-medium hover:bg-[#14532d] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
           >
             <Eye size={11} /> Review & Export CSV (PABS Format)
@@ -632,6 +677,9 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
           </p>
           {isLoadingTyphoonSummary && <RefreshCw size={11} className="animate-spin text-muted-foreground" />}
           <div className="ml-auto flex items-center gap-2">
+            {/* Archived typhoon: only View Areas Affected stays -- its farms
+                are no longer live, so SAR export and Compute don't apply. */}
+            {!showArchived && <>
             {fieldVerify && fieldVerify.checked === 0 && (
               <span className="text-[9px] text-muted-foreground">Run the SAR planted check in Spatial Analysis first</span>
             )}
@@ -651,13 +699,14 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
                 <span className="px-1.5 rounded-full bg-[#ca8a04] text-white font-bold tabular-nums">{fieldVerify.rows.length}</span>
               )}
             </button>
+            </>}
             <button
               onClick={() => setShowAreasModal(true)}
               className="flex items-center gap-1 px-2 py-1 rounded border border-[#1e3a5f]/30 text-[#1e3a5f] text-[9px] font-medium hover:bg-[#1e3a5f]/10 transition-colors"
             >
               <MapPin size={10} /> View Areas Affected
             </button>
-            {typhoonSummary && typhoonSummary.areas_hit.length > 0 && (
+            {!showArchived && typhoonSummary && typhoonSummary.areas_hit.length > 0 && (
               <button
                 onClick={handleComputeAssessments}
                 disabled={isComputingAssessments}
@@ -669,6 +718,19 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
             )}
           </div>
         </div>
+      )}
+
+      {showArchived && selectedArchive && (
+        <div className="mx-3 mt-2 flex items-center gap-2 px-3 py-2 rounded-xl shrink-0 border border-amber-300 bg-amber-50 dark:bg-amber-950/30 text-[10px] text-amber-800 dark:text-amber-300">
+          <Lock size={11} className="shrink-0" />
+          <span>
+            <strong>Read-only</strong> — from archive #{selectedArchive.archive_id} ({selectedArchive.label}),
+            archived {formatDateTime(selectedArchive.archived_at)}. These records were cleared from the live system.
+          </span>
+        </div>
+      )}
+      {archivedError && (
+        <p className="mx-3 mt-2 px-3 py-2 text-[10px] text-red-600 border border-border rounded-xl shrink-0">{archivedError}</p>
       )}
 
       {typhoonSummaryError && (
@@ -688,11 +750,13 @@ export function AssessmentModule(_props: AssessmentModuleProps) {
         />
       )}
 
-      {isLoading && rows.length === 0 ? (
+      {(isLoading && rows.length === 0) || (showArchived && isLoadingArchived) ? (
         <div className="flex-1 flex items-center justify-center">
-          <p className="text-[11px] text-muted-foreground">Loading assessment summary…</p>
+          <p className="text-[11px] text-muted-foreground">
+            {showArchived ? "Loading archived records…" : "Loading assessment summary…"}
+          </p>
         </div>
-      ) : rows.length === 0 ? (
+      ) : displayRows.length === 0 ? (
         <div className="flex-1 flex flex-col items-center justify-center gap-2 text-center px-8">
           <p className="text-sm font-semibold">No assessments computed yet</p>
           <p className="text-[11px] text-muted-foreground">Assessments will appear here once computed for any typhoon.</p>

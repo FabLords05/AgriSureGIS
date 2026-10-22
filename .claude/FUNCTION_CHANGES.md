@@ -4,6 +4,35 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-22] - Archived Typhoons Readable in Assessment & Reporting
+
+Cristian asked for this as a follow-up to Archive & Clear. After a clear, the typhoon still appears in Assessment & Reporting's list (typhoons and bulletins stay live), but its rows had moved to the archive, so clicking it only said "No assessments computed yet". Now it shows those rows read-only, straight from the archive.
+
+### 1. File: `backend/app/services/archive_service.py`
+* **`archived_typhoons()`**: every archived typhoon, with the newest archive that holds it.
+* **`archived_typhoon_assessments(typhoon_id)`**: that typhoon's computed assessments from its newest archive, joined to policy, farm, farmer and boundary, plus the typhoon's max sustained winds from the archived bulletins.
+
+### 2. File: `backend/app/api/archives.py`
+* **`GET /api/archives/typhoons`** (any signed-in user): returns an empty list (not 503) when the archive isn't configured.
+* **`GET /api/archives/typhoon/{id}/pabs-rows`** (any signed-in user):
+  * Rows come back in the same shape as `GET /api/assessments/pabs-summary`.
+  * S and REMARKS are looked up live by `matrix_id` with the existing `_yield_loss_fraction` / `_pabs_remarks`; the PCIC matrices are never cleared.
+  * **404** if the typhoon was never archived.
+
+### 3. File: `frontend/src/app/components/AssessmentModule.tsx` / `frontend/src/lib/api.ts`
+* `getArchivedTyphoons()` and `getArchivedTyphoonRows()`.
+* Archived typhoons get a 🔒 **Archived** tag in the list.
+* Selecting one with no live rows loads the archived rows into the same table and totals, under a read-only banner. Live rows take priority if the typhoon was assessed again after a clear.
+* For an archived typhoon:
+  * Compute Assessments and the SAR Field Verification export are hidden.
+  * Review & Export CSV (PABS) is disabled, because that export locks policies as used.
+  * View Areas Affected works as before.
+
+### 4. File: `backend/tests/test_archive_service.py`
+* New tests: rows come back in the live PABS shape, a never-archived typhoon gives 404, and an unconfigured archive lists no archived typhoons.
+
+---
+
 ## [2026-10-22] - Admin Panel & Database Backup Made Real; Archive & Clear
 
 An audit found admin controls that looked real but weren't:

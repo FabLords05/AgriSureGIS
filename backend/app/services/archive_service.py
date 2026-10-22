@@ -417,6 +417,63 @@ def archive_records_all(archive_id: int):
             yield dict(r)
 
 
+def archived_typhoons() -> list[dict]:
+    """Every typhoon held in some archive, with the newest archive holding it.
+    Typhoon ids are stable -- typhoons stay live through Archive & Clear -- so
+    Assessment & Reporting can match these against its live typhoon list."""
+    with archive_reader_engine().connect() as conn:
+        rows = conn.execute(text("""
+            SELECT DISTINCT ON (t.typhoon_id) t.typhoon_id, t.name, t.year,
+                   b.archive_id, b.label, b.archived_at
+            FROM arc_typhoons t
+            JOIN tbl_archive_batch b ON b.archive_id = t.archive_id
+            ORDER BY t.typhoon_id, b.archived_at DESC
+        """)).mappings().all()
+    return [dict(r) for r in rows]
+
+
+def archived_typhoon_assessments(typhoon_id: int) -> dict | None:
+    """One typhoon's computed assessments from the newest archive holding it,
+    joined to their farm/farmer/policy/boundary -- the raw material for the
+    PABS-shaped rows app/api/archives.py builds. None if never archived."""
+    with archive_reader_engine().connect() as conn:
+        batch = conn.execute(text("""
+            SELECT b.archive_id, b.label, b.archived_at
+            FROM arc_typhoons t JOIN tbl_archive_batch b ON b.archive_id = t.archive_id
+            WHERE t.typhoon_id = :tid
+            ORDER BY b.archived_at DESC LIMIT 1
+        """), {"tid": typhoon_id}).mappings().first()
+        if batch is None:
+            return None
+        params = {"aid": batch["archive_id"], "tid": typhoon_id}
+        rows = conn.execute(text("""
+            SELECT ra.assessment_id, ra.insurance_records_id, ra.matrix_id, ra.period_of_exposure,
+                   ra.wind_velocity, ra.crop_stage, ra.final_indemnity_payment, ra.assessment_date,
+                   s.typhoon_id, t.name AS typhoon_name,
+                   ir.policy_no, ir.amount_cover,
+                   f.csv_farm_reference, f.area_size,
+                   COALESCE(bd.province, f.province) AS province,
+                   COALESCE(bd.municipality, f.municipality) AS municipality,
+                   COALESCE(bd.barangay, f.barangay) AS barangay,
+                   fp.farmers_id, fp.last_name, fp.first_name, fp.middle_name
+            FROM arc_risk_assessment ra
+            JOIN arc_area_exposure_summary s ON s.archive_id = ra.archive_id AND s.summary_id = ra.summary_id
+            LEFT JOIN arc_typhoons t ON t.archive_id = s.archive_id AND t.typhoon_id = s.typhoon_id
+            LEFT JOIN arc_insurance_records ir
+                   ON ir.archive_id = ra.archive_id AND ir.insurance_records_id = ra.insurance_records_id
+            LEFT JOIN arc_farms f ON f.archive_id = ir.archive_id AND f.farm_id = ir.farm_id
+            LEFT JOIN arc_admin_boundaries bd ON bd.archive_id = f.archive_id AND bd.boundary_id = f.boundary_id
+            LEFT JOIN arc_farmers fp ON fp.archive_id = ir.archive_id AND fp.farmer_id = ir.farmer_id
+            WHERE ra.archive_id = :aid AND s.typhoon_id = :tid AND ra.matrix_id IS NOT NULL
+            ORDER BY ra.assessment_date DESC
+        """), params).mappings().all()
+        max_winds = conn.execute(text("""
+            SELECT max(max_sustained_winds) FROM arc_tropical_cyclone_bulletins
+            WHERE archive_id = :aid AND typhoon_id = :tid
+        """), params).scalar()
+    return {**dict(batch), "max_winds": max_winds, "rows": [dict(r) for r in rows]}
+
+
 # Browsers stall drawing tens of thousands of polygons; the viewer asks per
 # map viewport (bbox), like the live Spatial Analysis map.
 MAX_MAP_FARMS = 5000

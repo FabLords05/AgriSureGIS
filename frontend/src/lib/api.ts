@@ -1184,6 +1184,32 @@ export function downloadArchiveCsv(archiveId: number): Promise<void> {
   return downloadCsv(`/api/archives/${archiveId}/export`, `archive_${archiveId}.csv`);
 }
 
+// Assessment & Reporting's archived typhoons (Admin + GIS Specialist, read-only).
+export interface ArchivedTyphoon {
+  typhoon_id: number;
+  name: string;
+  year: number;
+  archive_id: number;
+  label: string;
+  archived_at: string;
+}
+
+export interface ArchivedTyphoonRows {
+  archive_id: number;
+  label: string;
+  archived_at: string;
+  // Same shape as getAssessmentsPabsSummary()'s rows.
+  rows: PabsAssessmentRow[];
+}
+
+export function getArchivedTyphoons(): Promise<{ status: string; data: ArchivedTyphoon[] }> {
+  return request<{ status: string; data: ArchivedTyphoon[] }>('/api/archives/typhoons');
+}
+
+export function getArchivedTyphoonRows(typhoonId: number): Promise<{ status: string; data: ArchivedTyphoonRows }> {
+  return request<{ status: string; data: ArchivedTyphoonRows }>(`/api/archives/typhoon/${typhoonId}/pabs-rows`);
+}
+
 export function getBackups(): Promise<{ status: string; data: BackupOverview }> {
   return request<{ status: string; data: BackupOverview }>('/api/backups');
 }

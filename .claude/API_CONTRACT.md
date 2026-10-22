@@ -295,6 +295,13 @@ Archives live in a **separate, read-only database** (`backend/archive_schema.sql
     - **409:** another archive is already running.
     - **503:** the archive database is not configured.
   - **Response:** `{ "data": { archive_id, label, row_counts: { arc_farms: 1180, ... }, record_count, dump_file_name, gdrive_uploaded, gdrive_error } }`
+* **GET `/api/archives/typhoons`** (any signed-in user)
+  - **Response:** `{ "data": [ { typhoon_id, name, year, archive_id, label, archived_at } ] }`, newest archive per typhoon.
+  - Returns `[]` when the archive is not configured.
+  - Assessment & Reporting uses it to tag archived typhoons.
+* **GET `/api/archives/typhoon/{typhoon_id}/pabs-rows`** (any signed-in user, read-only)
+  - **Response:** `{ "data": { archive_id, label, archived_at, rows: [...] } }`. The rows have the same shape as `GET /api/assessments/pabs-summary`.
+  - **404** if the typhoon was never archived.
 * **GET `/api/archives`** (admin)
   - Lists `{ archive_id, label, typhoons, archived_at, archived_by_name, row_counts, record_count, dump_file_name, gdrive_file_id }`, newest first.
 * **GET `/api/archives/{id}/records?q=&page=1&page_size=50`** (admin)

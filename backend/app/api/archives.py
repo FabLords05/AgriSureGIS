@@ -11,16 +11,19 @@ Archives are read-only and are never restored into the live DB.
 import csv
 import io
 import re
+from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
+from app.api.assessments import PABS_PREVALENCE, _pabs_remarks, _yield_loss_fraction
 from app.core.activity_log import note_activity, plural
 from app.core.database import ArchiveNotConfiguredError, archive_configured, get_db
+from app.core.farmer_name import format_surname_first
 from app.core.security import get_current_user, require_admin
-from app.models.models import BackupLog, SystemUser
+from app.models.models import BackupLog, RecsapMatrix, SystemUser
 from app.services import archive_service
 from app.services.archive_service import CONFIRM_WORD, ArchiveBusyError, ArchiveError
 from app.services.backup_service import BackupError, backup_file_path, gdrive_configured, run_backup
@@ -84,6 +87,82 @@ def archive_and_clear(
         f'Safety dump {result["dump_file_name"]} {drive}.'
     )
     return {"status": "success", "data": result}
+
+
+# ─── Archived typhoons in Assessment & Reporting (Admin + GIS Specialist) ────
+# Clicking an archived typhoon in Assessment & Reporting shows its rows from
+# the archive, read-only. Same row shape as GET /api/assessments/pabs-summary
+# so the screen renders them with the same table.
+
+@router.get("/archives/typhoons")
+def list_archived_typhoons():
+    """Which typhoons are archived (and in which archive). Empty, not 503,
+    when the archive isn't configured -- the Assessment screen just shows no
+    Archived tags then."""
+    if not archive_configured():
+        return {"status": "success", "data": []}
+    try:
+        data = archive_service.archived_typhoons()
+    except ArchiveNotConfiguredError:
+        data = []
+    return {"status": "success", "data": data}
+
+
+@router.get("/archives/typhoon/{typhoon_id}/pabs-rows")
+def get_archived_typhoon_rows(typhoon_id: int, db: Session = Depends(get_db)):
+    try:
+        archived = archive_service.archived_typhoon_assessments(typhoon_id)
+    except ArchiveNotConfiguredError as exc:
+        raise _not_configured(exc)
+    if archived is None:
+        raise HTTPException(status_code=404, detail="This typhoon has not been archived.")
+
+    # The PCIC matrices are never cleared, so S and REMARKS are looked up live
+    # by matrix_id exactly as the live table does.
+    matrix_ids = {r["matrix_id"] for r in archived["rows"] if r["matrix_id"] is not None}
+    matrices = (
+        {m.matrix_id: m for m in db.query(RecsapMatrix).filter(RecsapMatrix.matrix_id.in_(matrix_ids)).all()}
+        if matrix_ids else {}
+    )
+
+    rows = []
+    for r in archived["rows"]:
+        stand_in = SimpleNamespace(matrix=matrices.get(r["matrix_id"]))
+        rows.append({
+            "assessment_id": r["assessment_id"],
+            "FARMER_NAME": format_surname_first(SimpleNamespace(**r), with_middle_initial=True),
+            "FARMERID": r["farmers_id"],
+            "FARMID": r["csv_farm_reference"],
+            "IRID": None,
+            "CIC_NO": r["policy_no"],
+            "AREA": float(r["area_size"]) if r["area_size"] is not None else None,
+            "TYPHOON_NAME": r["typhoon_name"],
+            "PERIOD_OF_EXPOSURE": r["period_of_exposure"],
+            "WIND_VELOCITY": archived["max_winds"],
+            "AC": float(r["amount_cover"]) if r["amount_cover"] is not None else None,
+            "FINAL_INDEMNITY_PAYMENT": float(r["final_indemnity_payment"]) if r["final_indemnity_payment"] is not None else None,
+            "P": PABS_PREVALENCE,
+            "S": _yield_loss_fraction(stand_in),
+            "REMARKS": _pabs_remarks(stand_in),
+            "municipality": r["municipality"],
+            "province": r["province"],
+            "barangay": r["barangay"],
+            "wind_signal": r["wind_velocity"],
+            "crop_stage": r["crop_stage"],
+            "insurance_records_id": r["insurance_records_id"],
+            "typhoon_id": r["typhoon_id"],
+            "final_indemnity_payment": float(r["final_indemnity_payment"]) if r["final_indemnity_payment"] is not None else None,
+        })
+
+    return {
+        "status": "success",
+        "data": {
+            "archive_id": archived["archive_id"],
+            "label": archived["label"],
+            "archived_at": archived["archived_at"],
+            "rows": rows,
+        },
+    }
 
 
 # ─── Viewing archives (Admin, read-only) ─────────────────────────────────────

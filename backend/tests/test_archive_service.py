@@ -133,6 +133,42 @@ class ArchiveAndClearTests(unittest.TestCase):
             archive_service._archive_lock.release()
 
 
+class ArchivedTyphoonRowsTests(unittest.TestCase):
+    """Assessment & Reporting's read-only view of an archived typhoon."""
+
+    _ROW = {
+        "assessment_id": 41, "insurance_records_id": 7, "matrix_id": None, "period_of_exposure": 12,
+        "wind_velocity": 3, "crop_stage": "Flowering", "final_indemnity_payment": 3650, "assessment_date": NOW,
+        "typhoon_id": 1, "typhoon_name": "OPONG", "policy_no": "P-001", "amount_cover": 25000,
+        "csv_farm_reference": "1979999", "area_size": 1.5, "province": "BUKIDNON", "municipality": "TALAKAG",
+        "barangay": "SAN ISIDRO", "farmers_id": "111", "last_name": "CRUZ", "first_name": "ANA", "middle_name": None,
+    }
+
+    def test_rows_come_back_in_the_live_pabs_shape(self):
+        archived = {"archive_id": 2, "label": "OPONG 2026", "archived_at": NOW, "max_winds": 150, "rows": [self._ROW]}
+        with patch.object(archives_api.archive_service, "archived_typhoon_assessments", return_value=archived):
+            result = archives_api.get_archived_typhoon_rows(1, db=MagicMock())
+
+        (row,) = result["data"]["rows"]
+        self.assertEqual(result["data"]["archive_id"], 2)
+        self.assertEqual(row["CIC_NO"], "P-001")
+        self.assertEqual(row["AC"], 25000.0)
+        self.assertEqual(row["WIND_VELOCITY"], 150)
+        self.assertEqual(row["wind_signal"], 3)
+        self.assertEqual(row["FARMID"], "1979999")
+        self.assertTrue(row["FARMER_NAME"].startswith("CRUZ"))
+
+    def test_never_archived_typhoon_is_404(self):
+        with patch.object(archives_api.archive_service, "archived_typhoon_assessments", return_value=None):
+            with self.assertRaises(HTTPException) as ctx:
+                archives_api.get_archived_typhoon_rows(99, db=MagicMock())
+        self.assertEqual(ctx.exception.status_code, 404)
+
+    def test_archive_not_configured_lists_no_archived_typhoons(self):
+        with patch.object(archives_api, "archive_configured", return_value=False):
+            self.assertEqual(archives_api.list_archived_typhoons()["data"], [])
+
+
 class ArchiveRouteTests(unittest.TestCase):
     def test_wrong_confirmation_word_is_rejected_before_anything_runs(self):
         with patch.object(archives_api.archive_service, "archive_and_clear") as run:
