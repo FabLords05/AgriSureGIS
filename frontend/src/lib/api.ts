@@ -959,3 +959,240 @@ export function downloadFieldVerifyCsv(typhoonId: number): Promise<void> {
   return downloadCsv(`/api/sar/field-verify/export?typhoon_id=${typhoonId}`,
                      `sar_field_verification_typhoon_${typhoonId}.csv`);
 }
+
+// ─── Admin Panel settings (2026-10-22) ──────────────────────────────────────
+// Backs CalibrationModule.tsx -- see backend/app/api/settings.py. The coverage
+// rate is the DEFAULT Amount of Cover (₱/ha x farm area) applied at upload only
+// to records with no AmountofCover; CSV values always win.
+export interface SystemSettings {
+  coverage_rate_per_ha: number;
+  coverage_rate_min: number;
+  coverage_rate_max: number;
+  auto_backup_enabled: boolean;
+}
+
+export function getSystemSettings(): Promise<{ status: string; data: SystemSettings }> {
+  return request<{ status: string; data: SystemSettings }>('/api/settings');
+}
+
+export function updateCoverageRate(rate: number): Promise<{ status: string; data: SystemSettings }> {
+  return request<{ status: string; data: SystemSettings }>('/api/settings/coverage-rate', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ coverage_rate_per_ha: rate }),
+  });
+}
+
+export function updateAutoBackup(enabled: boolean): Promise<{ status: string; data: SystemSettings }> {
+  return request<{ status: string; data: SystemSettings }>('/api/settings/auto-backup', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  });
+}
+
+// Read-only: the real two-step PCIC lookup the payout engine uses.
+export interface RecsapMatrixRow {
+  crop_stage_no: number;
+  crop_stage: string;
+  wind_signal_tcws: number;
+  exposure_hours: number;
+  estimated_yield_loss: number;
+}
+
+export interface IndemnityMatrixRow {
+  crop_stage_group: string;
+  yield_loss_min: number;
+  yield_loss_max: number;
+  indemnity_factor: number;
+}
+
+export interface PcicMatrices {
+  recsap: RecsapMatrixRow[];
+  indemnity: IndemnityMatrixRow[];
+}
+
+export function getPcicMatrices(): Promise<{ status: string; data: PcicMatrices }> {
+  return request<{ status: string; data: PcicMatrices }>('/api/settings/matrices');
+}
+
+// ─── Database Backup & Archive (2026-10-22) ─────────────────────────────────
+// See backend/app/api/archives.py. Archive & Clear is open to every signed-in
+// user; everything else here is admin-only. Archives are read-only.
+export interface ArchiveTyphoon {
+  typhoon_id: number;
+  name: string;
+  year: number;
+  last_bulletin_at: string | null;
+  clear_after: string | null;
+}
+
+export interface ArchiveEligibility {
+  eligible: boolean;
+  reason: string | null;
+  eligible_at: string | null;
+  clear_after_days: number;
+  counts: { farmers: number; farms: number; policies: number; assessments: number };
+  typhoons: ArchiveTyphoon[];
+  label: string;
+  archive_configured: boolean;
+  confirm_word: string;
+}
+
+export interface ArchiveResult {
+  archive_id: number;
+  label: string;
+  row_counts: Record<string, number>;
+  record_count: number;
+  dump_file_name: string;
+  gdrive_uploaded: boolean;
+  gdrive_error: string | null;
+}
+
+export interface ArchiveBatch {
+  archive_id: number;
+  label: string;
+  typhoons: ArchiveTyphoon[];
+  archived_at: string;
+  archived_by_name: string | null;
+  row_counts: Record<string, number>;
+  record_count: number;
+  dump_file_name: string | null;
+  gdrive_file_id: string | null;
+}
+
+export interface ArchiveRecord {
+  insurance_records_id: number;
+  farm_id: number | null;
+  farmers_id: string | null;
+  farmer_name: string | null;
+  farm_reference: string | null;
+  province: string | null;
+  municipality: string | null;
+  barangay: string | null;
+  area_size: number | null;
+  policy_no: string | null;
+  program_type: string | null;
+  effectivity_date: string | null;
+  expiry_date: string | null;
+  amount_cover: number | null;
+  typhoon_name: string | null;
+  typhoon_year: number | null;
+  wind_signal: number | null;
+  crop_stage: string | null;
+  period_of_exposure: number | null;
+  wind_velocity: number | null;
+  indemnity_factor: number | null;
+  estimated_damage: number | null;
+  final_indemnity_payment: number | null;
+  assessment_date: string | null;
+}
+
+export interface ArchiveRecordsPage {
+  total: number;
+  page: number;
+  page_size: number;
+  rows: ArchiveRecord[];
+}
+
+export interface ArchiveFarmProperties {
+  farm_id: number;
+  municipality: string | null;
+  barangay: string | null;
+  area_size: number | null;
+  csv_farm_reference: string | null;
+  farmer_name: string | null;
+  total_payout: number;
+}
+
+export interface ArchiveFarmsCollection {
+  type: 'FeatureCollection';
+  features: Array<{ type: 'Feature'; geometry: GeoJsonMultiPolygon; properties: ArchiveFarmProperties }>;
+  truncated: boolean;
+  // [west, south, east, north] of every farm in the archive.
+  extent: [number, number, number, number] | null;
+}
+
+export interface ArchiveExposureProperties {
+  kind: 'exposure' | 'track';
+  typhoon_id: number;
+  typhoon_name: string | null;
+  typhoon_year: number | null;
+  province?: string;
+  municipality?: string;
+  max_signal_level?: number;
+  total_exposure_hours?: number;
+}
+
+export interface ArchiveExposureCollection {
+  type: 'FeatureCollection';
+  features: Array<{ type: 'Feature'; geometry: { type: string; coordinates: unknown }; properties: ArchiveExposureProperties }>;
+}
+
+export interface BackupEntry {
+  backup_id: number;
+  kind: 'manual' | 'scheduled' | 'archive';
+  file_name: string | null;
+  size_bytes: number | null;
+  status: 'success' | 'failed';
+  error: string | null;
+  gdrive_uploaded: boolean;
+  gdrive_error: string | null;
+  created_at: string;
+  file_available: boolean;
+}
+
+export interface BackupOverview {
+  backups: BackupEntry[];
+  last_backup: BackupEntry | null;
+  stored_count: number;
+  gdrive_configured: boolean;
+  archive_configured: boolean;
+}
+
+export function getArchiveEligibility(): Promise<{ status: string; data: ArchiveEligibility }> {
+  return request<{ status: string; data: ArchiveEligibility }>('/api/archives/eligibility');
+}
+
+export function archiveAndClear(confirm: string): Promise<{ status: string; data: ArchiveResult }> {
+  return request<{ status: string; data: ArchiveResult }>('/api/archives', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ confirm }),
+  });
+}
+
+export function getArchives(): Promise<{ status: string; data: ArchiveBatch[] }> {
+  return request<{ status: string; data: ArchiveBatch[] }>('/api/archives');
+}
+
+export function getArchiveRecords(archiveId: number, q: string, page: number, pageSize = 50): Promise<{ status: string; data: ArchiveRecordsPage }> {
+  const params = new URLSearchParams({ q, page: String(page), page_size: String(pageSize) });
+  return request<{ status: string; data: ArchiveRecordsPage }>(`/api/archives/${archiveId}/records?${params}`);
+}
+
+export function getArchiveFarms(archiveId: number, bbox?: [number, number, number, number]): Promise<ArchiveFarmsCollection> {
+  const query = bbox ? `?bbox=${bbox.map(v => v.toFixed(5)).join(',')}` : '';
+  return request<ArchiveFarmsCollection>(`/api/archives/${archiveId}/farms${query}`);
+}
+
+export function getArchiveExposure(archiveId: number): Promise<ArchiveExposureCollection> {
+  return request<ArchiveExposureCollection>(`/api/archives/${archiveId}/exposure`);
+}
+
+export function downloadArchiveCsv(archiveId: number): Promise<void> {
+  return downloadCsv(`/api/archives/${archiveId}/export`, `archive_${archiveId}.csv`);
+}
+
+export function getBackups(): Promise<{ status: string; data: BackupOverview }> {
+  return request<{ status: string; data: BackupOverview }>('/api/backups');
+}
+
+export function runBackupNow(): Promise<{ status: string; data: BackupEntry }> {
+  return request<{ status: string; data: BackupEntry }>('/api/backups', { method: 'POST' });
+}
+
+// Same authenticated blob-download path as the CSV exports, just a .dump file.
+export function downloadBackup(backup: BackupEntry): Promise<void> {
+  return downloadCsv(`/api/backups/${backup.backup_id}/download`, backup.file_name ?? `backup_${backup.backup_id}.dump`);
+}

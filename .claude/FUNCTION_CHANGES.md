@@ -4,6 +4,145 @@ This file tracks granular, function-level modifications made in the codebase, do
 
 ---
 
+## [2026-10-22] - Admin Panel & Database Backup Made Real; Archive & Clear
+
+An audit found admin controls that looked real but weren't:
+* Save All Settings only showed a toast.
+* The RSBSA coverage rate was never read by anything.
+* The Signal Damage Factor table was mock data unrelated to the real two-matrix payout engine.
+* Session Timeout and Auto-Save duplicated Account Settings.
+* The whole Database Backup tab was a mock.
+
+Cristian decided:
+* The coverage rate becomes a persisted **default** Amount of Cover.
+* The PCIC matrices are shown **read-only**.
+* The duplicate session controls are removed.
+* Backup becomes real `pg_dump` backups to Google Drive, plus **Archive & Clear**:
+  * Once every assessed typhoon is 7 days past its last bulletin, an Admin or GIS Specialist can move all uploaded PABS records and polygons into a separate **read-only archive database**.
+  * PCIC re-exports the data from PABS for the next typhoon.
+  * Archives are viewable as a table and a map, and are never restored.
+
+### 1. File: `backend/migrations/2026-10-22_system_settings_backup_log.sql` (new) / `backend/init_schema.sql`
+* `tbl_system_settings (setting_key PK, setting_value JSONB, updated_at, updated_by)`, seeded with `coverage_rate_per_ha = 25000` and `auto_backup_enabled = true`.
+* `tbl_backup_log`: one row per app-run `pg_dump` (`manual` / `scheduled` / `archive`). Holds the file, size, Drive file id and errors.
+
+### 2. File: `backend/archive_schema.sql` (new)
+* Schema for the separate `agrisure_archive` database.
+* Batch table: `tbl_archive_batch`.
+* Copied and then deleted from live: `arc_farmers`, `arc_farms` (with polygons), `arc_insurance_records`, `arc_risk_assessment`, `arc_insurance_usage`, `arc_planted_verification`, `arc_sar_planted_check`, `arc_sar_observation`.
+* Typhoon context, copied but kept live: `arc_typhoons`, `arc_tropical_cyclone_bulletins`, `arc_tcb_signals`, `arc_area_exposure_summary`, plus the referenced `arc_admin_boundaries` polygons.
+* Read-only is enforced in the database:
+  * role `agrisure_archive_reader`: SELECT only
+  * role `agrisure_archive_writer`: SELECT + INSERT only
+  * a statement trigger on every table rejects UPDATE, DELETE and TRUNCATE
+
+### 3. File: `backend/app/core/database.py`
+* `archive_reader_engine()` / `archive_writer_engine()` are built lazily from `ARCHIVE_DATABASE_URL` / `ARCHIVE_WRITER_DATABASE_URL`.
+* `ArchiveNotConfiguredError` is raised when a URL is unset, so the backend still starts without the archive.
+* `archive_configured()` reports whether both URLs are set.
+
+### 4. File: `backend/app/core/system_settings.py` (new) / `backend/app/models/models.py`
+* `get_setting()`, `set_setting()` and `get_coverage_rate()` read/write the settings, with `DEFAULTS` as the fallback.
+* New ORM models: `SystemSetting`, `BackupLog`.
+
+### 5. File: `backend/app/services/backup_service.py` (new)
+* **`run_backup(db, kind, user_id)`**:
+  * Runs `pg_dump -Fc` into `BACKUP_DIR` (default `backend/backups/`, gitignored). The password goes via `PGPASSWORD`, never on the command line.
+  * Uploads the dump to Google Drive when configured.
+  * Logs the run to `tbl_backup_log`.
+  * A failed Drive upload is recorded but never fails the backup.
+* **`upload_to_gdrive()`**: personal-Gmail OAuth refresh token, scope `drive.file`. Uses `googleapiclient`, which already ships with earthengine-api, so there is no new dependency.
+* **`backup_file_path()`**: resolves a dump on disk and refuses any path outside `BACKUP_DIR`.
+
+### 6. File: `backend/app/services/archive_service.py` (new)
+* **`eligibility(db)`**:
+  * Looks at every typhoon the live data was assessed, locked or SAR-checked against.
+  * Clearable only when there is live data, at least one such typhoon, and now ≥ each typhoon's last bulletin + `CLEAR_AFTER_DAYS` (7).
+* **`archive_and_clear(db, user)`** runs in this order:
+  1. Re-checks eligibility.
+  2. Takes a safety `pg_dump`.
+  3. In one REPEATABLE READ snapshot: counts rows, copies every table into the archive in one archive transaction, and verifies the counts.
+  4. Deletes from live, children before parents.
+  5. Commits the archive, then live.
+
+  If anything fails before the commit, nothing is deleted. A rows-uploaded-mid-archive case is neither archived nor deleted. A module lock stops two concurrent runs.
+* Read-only viewers, all using the reader login:
+  * `list_archives()`
+  * `archive_records()` and `archive_records_all()`: policy × assessment rows
+  * `archive_farms_geojson()`: farm polygons with total payout, bbox-scoped and capped at 5,000
+  * `archive_exposure_geojson()`: exposure municipality outlines plus the typhoon track
+
+### 7. File: `backend/app/api/settings.py` (new)
+* `GET /api/settings`
+* `PUT /api/settings/coverage-rate` (admin, ₱1,000–100,000)
+* `PUT /api/settings/auto-backup` (admin)
+* `GET /api/settings/matrices` (admin, read-only RECSAP and indemnity rows)
+
+### 8. File: `backend/app/api/archives.py` (new)
+* Any signed-in user:
+  * `GET /api/archives/eligibility`
+  * `POST /api/archives` (body `{"confirm": "CLEAR"}`)
+* Admin only:
+  * `GET /api/archives`
+  * `GET /api/archives/{id}/records`, `/farms`, `/exposure`, `/export` (CSV)
+  * `GET`/`POST /api/backups`
+  * `GET /api/backups/{id}/download`
+
+### 9. File: `backend/app/api/upload.py`
+* `_ingest_row()`: a blank or zero `AmountofCover` now becomes `coverage_rate_per_ha × farm.area_size` (it used to be ₱0, which made every payout for that policy ₱0). CSV values always win.
+* `_IngestCaches.coverage_rate_per_ha` reads the rate once per upload.
+* `_RowIngestResult.defaulted_ac` flags each defaulted row; the count goes into the Activity Log remarks and the job result as `rows_defaulted_ac`.
+
+### 10. File: `backend/app/core/scheduler.py`
+* **`run_scheduled_backup()`**: a cron job at 23:00 Asia/Manila (`BACKUP_JOB_ID`).
+* It reads `auto_backup_enabled` each night, so toggling it needs no reschedule.
+* Results go to the Activity Log as `SYSTEM`.
+
+### 11. File: `backend/app/main.py`
+* Registers the settings and archives routers.
+* The archive CSV export and backup downloads are now audited GETs (`_LOGGED_GET_PATTERN`).
+
+### 12. File: `backend/scripts/gdrive_authorize.py` (new)
+* A one-time OAuth loopback consent that prints `GDRIVE_REFRESH_TOKEN`. It uses only the standard library and httpx.
+
+### 13. Frontend
+* `lib/api.ts`: typed clients for every endpoint above.
+* `CalibrationModule.tsx`:
+  * The coverage rate loads from and saves to the API; Save All Settings does a real PUT.
+  * The two PCIC matrices are rendered read-only.
+  * The Session & Security section and the mock `DAMAGE_FACTORS` table are removed.
+* `App.tsx`: the dead `coverageRatePerHa` state and its props are removed.
+* `DatabaseBackupModule.tsx`:
+  * Rewritten with real last-backup/size/count, a Drive status card and a backup history with dump downloads.
+  * Run Backup Now and the 23:00 auto-backup toggle are real.
+  * Adds Archive & Clear, and an archive list with View/CSV.
+  * "Restore from Backup" is removed on purpose; restore stays a manual `pg_restore`.
+* `ArchiveClearCard.tsx` (new):
+  * Shows eligibility, live counts and per-typhoon clearable dates, and the caution text.
+  * Requires typing CLEAR to confirm, then shows the result.
+  * Used on the admin Backup tab, and at the bottom of Account Settings for GIS Specialists only. The Specialist page reloads after a clear so no screen keeps showing cleared farms.
+* `ArchiveViewer.tsx` (new):
+  * Read-only Table mode: search and pages.
+  * Map mode: Esri imagery; farm polygons coloured by payout, loaded per viewport; exposure outlines by TCWS; the typhoon track.
+  * CSV download.
+* Deleted the unused `SettingsModule.tsx`, `SpatialModule.tsx` and `Login.tsx` (imported nowhere).
+
+### 14. Tests
+* `tests/test_archive_service.py` (new) covers:
+  * the 6 vs 7 day boundary
+  * the latest typhoon setting the wait
+  * no data or no assessed typhoon is not clearable
+  * a copy mismatch aborts with no DELETE and no commit
+  * delete order
+  * a concurrent run is refused
+  * a wrong confirmation word is rejected
+* `tests/test_settings_api.py` (new) covers rate validation and persistence, and the admin-only guard.
+* `tests/test_upload_csv_ingestion.py`:
+  * The fake DB gains `tbl_system_settings`.
+  * New tests: a blank AC defaults to rate × area; a zero AC uses an admin-changed rate; a CSV AC always wins.
+
+---
+
 ## [2026-10-22] - Closing the App Logs Out (Sprint 3)
 
 Explicit request: closing the app should log the user out. Before this, the

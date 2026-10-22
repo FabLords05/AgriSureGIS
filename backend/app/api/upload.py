@@ -25,6 +25,7 @@ from app.core.database import SessionLocal, get_db
 from app.core.farms_cache import invalidate_farms_cache
 from app.core.farms_view import refresh_farm_latest_insurance_view
 from app.core.security import get_current_user
+from app.core.system_settings import COVERAGE_RATE_KEY, DEFAULTS, get_coverage_rate
 from app.models import models
 from app.services.crop_stage_resolver import CropStageResolver
 from app.services.gpkg_parser import GpkgParserService
@@ -405,6 +406,9 @@ class _IngestCaches:
     # is a ~17-row lookup nothing in this path writes to, so it is loaded once and
     # never invalidated per row.
     crop_stage: CropStageResolver | None = None
+    # Admin Panel's default RSBSA rate, ₱/ha (2026-10-22) -- the Amount of Cover
+    # for a row whose AmountofCover is blank or zero. Read once per upload.
+    coverage_rate_per_ha: Decimal = Decimal(DEFAULTS[COVERAGE_RATE_KEY])
 
 
 def _prefetch_caches(prepared_rows: list[tuple[int, dict[str, Any]]], db: Session) -> _IngestCaches:
@@ -425,6 +429,7 @@ def _prefetch_caches(prepared_rows: list[tuple[int, dict[str, Any]]], db: Sessio
     """
     caches = _IngestCaches()
     caches.crop_stage = CropStageResolver.load(db)
+    caches.coverage_rate_per_ha = Decimal(str(get_coverage_rate(db)))
 
     # tbl_admin_boundaries now covers the whole country (~42k barangay-level
     # rows as of the nationwide PSGC expansion, 2026-08-20) -- still cheaper to
@@ -468,6 +473,8 @@ class _RowIngestResult:
     farmer: models.FarmerProfile
     farm_reference: str | None
     farm: models.Farm
+    # True when amount_cover came from the default rate, not the CSV.
+    defaulted_ac: bool = False
 
 
 def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> _RowIngestResult:
@@ -583,9 +590,10 @@ def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> 
             farm.area_size, farm.csv_farm_reference,
         )
 
-    def _result(outcome: str) -> _RowIngestResult:
+    def _result(outcome: str, defaulted_ac: bool = False) -> _RowIngestResult:
         return _RowIngestResult(
             outcome=outcome,
+            defaulted_ac=defaulted_ac,
             boundary_key=boundary_key,
             boundary=boundary,
             farmers_id=farmer_payload["farmers_id"],
@@ -609,6 +617,14 @@ def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> 
     if insurance is not None:
         return _result("skipped")
 
+    # CSV value always wins. Only a blank/zero AmountofCover falls back to the
+    # Admin Panel's RSBSA rate x farm area (2026-10-22) -- it used to become
+    # ₱0, which silently made every payout for that policy ₱0.
+    amount_cover = payload["insurance"]["amount_cover"]
+    defaulted_ac = not amount_cover
+    if defaulted_ac:
+        amount_cover = (caches.coverage_rate_per_ha * Decimal(str(farm.area_size or 0))).quantize(Decimal("0.01"))
+
     insurance = models.InsuranceRecord(
         farmer_id=farmer.farmer_id,
         farm_id=farm.farm_id,
@@ -617,7 +633,7 @@ def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> 
         product_name=payload["insurance"]["product_name"],
         effectivity_date=payload["insurance"]["effectivity_date"],
         expiry_date=payload["insurance"]["expiry_date"],
-        amount_cover=payload["insurance"]["amount_cover"] or 0,
+        amount_cover=amount_cover,
     )
     db.add(insurance)
     db.flush()
@@ -657,7 +673,7 @@ def _ingest_row(payload: dict[str, Any], db: Session, caches: _IngestCaches) -> 
             final_indemnity_payment=estimated_damage,
         )
     )
-    return _result("inserted")
+    return _result("inserted", defaulted_ac)
 
 
 # How many individual rejected rows/features a remark spells out before
@@ -712,6 +728,7 @@ def _run_csv_ingestion(job_id: str, filename: str, dataframe: pd.DataFrame, user
         inserted_rows = 0
         skipped_rows = 0
         failed_rows = 0
+        defaulted_ac_rows = 0
         failures: list[dict[str, Any]] = []
 
         # Parsing a row (prepare_row_payload) never touches the DB, so failures here
@@ -746,6 +763,7 @@ def _run_csv_ingestion(job_id: str, filename: str, dataframe: pd.DataFrame, user
                     result = _ingest_row(payload, db, caches)
                     if result.outcome == "inserted":
                         inserted_rows += 1
+                        defaulted_ac_rows += result.defaulted_ac
                     else:
                         skipped_rows += 1
                     savepoint.commit()
@@ -819,6 +837,11 @@ def _run_csv_ingestion(job_id: str, filename: str, dataframe: pd.DataFrame, user
             f"{inserted_rows:,} accepted (new policies imported), "
             f"{skipped_rows:,} skipped (already on file), {failed_rows:,} rejected."
         )
+        if defaulted_ac_rows:
+            remarks += (
+                f" {plural(defaulted_ac_rows, 'policy', 'policies')} had no Amount of Cover and used the default "
+                f"₱{caches.coverage_rate_per_ha:,.2f}/ha x farm area."
+            )
         if failures:
             remarks += " Rejected: " + _describe_failures(failures, _csv_failure_label) + "."
         _log_csv_outcome(user_id, 200, remarks)
@@ -830,6 +853,7 @@ def _run_csv_ingestion(job_id: str, filename: str, dataframe: pd.DataFrame, user
             "rows_inserted": inserted_rows,
             "rows_skipped": skipped_rows,
             "rows_failed": failed_rows,
+            "rows_defaulted_ac": defaulted_ac_rows,
             "failures": failures[:50],
         })
     except Exception as exc:

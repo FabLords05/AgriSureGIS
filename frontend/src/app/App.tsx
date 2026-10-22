@@ -124,7 +124,6 @@ export default function App() {
   // instead, and only clears back to null (reaching LoginScreen) once the
   // user clicks through it.
   const [logoutReason, setLogoutReason]   = useState<LogoutReason | null>(null);
-  const [coverageRatePerHa, setCoverageRatePerHa] = useState(25000);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [selectedBulletin, setSelectedBulletin] = useState<Bulletin | null>(null);
   const seenMaxTcbId = useRef<number | null>(null);
@@ -567,10 +566,7 @@ export default function App() {
             ) : activeModule === "activity" ? (
               <ActivityLogModule />
             ) : (
-              <CalibrationModule
-                coverageRatePerHa={coverageRatePerHa}
-                onCoverageRateChange={setCoverageRatePerHa}
-              />
+              <CalibrationModule />
             )
           ) : (
             <>

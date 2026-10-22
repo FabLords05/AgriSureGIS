@@ -1,4 +1,5 @@
 import logging
+import re
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Depends, HTTPException, Request
@@ -10,6 +11,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 # Import our database connection and models
 from app.api.activity_log import router as activity_log_router
+from app.api.archives import router as archives_router
 from app.api.upload import router as upload_router
 from app.api.bulletins import router as bulletins_router
 from app.api.assessments import router as assessments_router
@@ -17,6 +19,7 @@ from app.api.farms import router as farms_router
 from app.api.insurance import router as insurance_router
 from app.api.sar import router as sar_router
 from app.api.typhoons import router as typhoons_router
+from app.api.settings import router as settings_router
 from app.api.system import router as system_router
 from app.api.users import router as users_router
 from app.core.activity_log import (
@@ -54,6 +57,9 @@ _MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 # insured farmers' data out of the system (2026-10-22). Every other GET (page
 # loads, polling) stays unlogged -- it would bury the real actions.
 _LOGGED_GET_PATHS = {"/api/assessments/export", "/api/sar/field-verify/export"}
+# Same idea for the 2026-10-22 Database Backup & Archive downloads, whose
+# paths carry an id: archive CSVs and raw pg_dump files.
+_LOGGED_GET_PATTERN = re.compile(r"^/api/(archives/\d+/export|backups/\d+/download)$")
 
 
 @asynccontextmanager
@@ -83,6 +89,8 @@ app.include_router(typhoons_router, prefix="/api")
 app.include_router(system_router, prefix="/api")
 app.include_router(users_router, prefix="/api")
 app.include_router(activity_log_router, prefix="/api")
+app.include_router(settings_router, prefix="/api")
+app.include_router(archives_router, prefix="/api")
 
 @app.get("/")
 def root():
@@ -125,7 +133,8 @@ async def activity_log_middleware(request: Request, call_next):
     """
     logged = (
         (request.method in _MUTATING_METHODS and request.url.path not in _SELF_LOGGED_PATHS)
-        or (request.method == "GET" and request.url.path in _LOGGED_GET_PATHS)
+        or (request.method == "GET" and (request.url.path in _LOGGED_GET_PATHS
+                                         or _LOGGED_GET_PATTERN.match(request.url.path)))
     )
     if not logged:
         return await call_next(request)

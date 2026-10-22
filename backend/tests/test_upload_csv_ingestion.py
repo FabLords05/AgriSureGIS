@@ -184,6 +184,9 @@ def _build_mock_db():
         _stage_mapping(source_label="panicle initiation/booting", pcic_stage="PI/BS", crop_stage_no=None, stage_group=None),
     ):
         tables[models.CropStageMapping].add(mapping)
+    # tbl_system_settings -- empty, so the default coverage rate (₱25,000/ha)
+    # applies; a test seeds a row to exercise an admin-changed rate.
+    tables[models.SystemSetting] = _FakeTable()
     counters = {model: 0 for model in _PK_FIELDS}
     added_instances: list = []
     query_call_counts: dict = {}
@@ -361,6 +364,38 @@ class UploadCsvIngestionTests(unittest.TestCase):
 
         farms = mock_db.tables[models.Farm].rows
         self.assertEqual(len(farms), 2)
+
+    def test_blank_amount_of_cover_defaults_to_rate_times_area(self):
+        csv_text = _csv(_row("POL-1", "Cruz", "Ana", farmers_id="111", farmid="5001", area="2.5", amount_cover=""))
+        mock_db = _build_mock_db()
+
+        result = _run_ingestion(csv_text, mock_db)
+
+        (insurance,) = mock_db.tables[models.InsuranceRecord].rows
+        self.assertEqual(insurance.amount_cover, Decimal("62500.00"))
+        self.assertEqual(result["rows_defaulted_ac"], 1)
+
+    def test_zero_amount_of_cover_uses_admin_changed_rate(self):
+        csv_text = _csv(_row("POL-1", "Cruz", "Ana", farmers_id="111", farmid="5001", area="2", amount_cover="0"))
+        mock_db = _build_mock_db()
+        mock_db.tables[models.SystemSetting].add(
+            SimpleNamespace(setting_key="coverage_rate_per_ha", setting_value=30000)
+        )
+
+        _run_ingestion(csv_text, mock_db)
+
+        (insurance,) = mock_db.tables[models.InsuranceRecord].rows
+        self.assertEqual(insurance.amount_cover, Decimal("60000.00"))
+
+    def test_csv_amount_of_cover_always_wins_over_the_default(self):
+        csv_text = _csv(_row("POL-1", "Cruz", "Ana", farmers_id="111", farmid="5001", area="2", amount_cover="12345"))
+        mock_db = _build_mock_db()
+
+        result = _run_ingestion(csv_text, mock_db)
+
+        (insurance,) = mock_db.tables[models.InsuranceRecord].rows
+        self.assertEqual(insurance.amount_cover, Decimal("12345"))
+        self.assertEqual(result["rows_defaulted_ac"], 0)
 
     def test_insurance_record_farmer_id_and_product_name_are_set(self):
         csv_text = _HEADER + "\n" + (

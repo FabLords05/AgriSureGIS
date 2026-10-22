@@ -50,3 +50,45 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+# ── Archive database (2026-10-22) ────────────────────────────────────────────
+# A separate, read-only PostgreSQL database (agrisure_archive -- see
+# backend/archive_schema.sql) that Archive & Clear copies uploaded PABS data
+# into before deleting it from the live DB. Two logins: the reader (SELECT
+# only) backs every viewing endpoint; the writer (SELECT + INSERT, no
+# UPDATE/DELETE) is used only inside archive_service.archive_and_clear.
+#
+# Same "no-op unless configured" philosophy as GEE/SMTP: with either URL unset
+# the backend still starts, and only the archive endpoints answer 503.
+ARCHIVE_DATABASE_URL = os.getenv("ARCHIVE_DATABASE_URL")
+ARCHIVE_WRITER_DATABASE_URL = os.getenv("ARCHIVE_WRITER_DATABASE_URL")
+
+_archive_engines: dict[str, object] = {}
+
+
+class ArchiveNotConfiguredError(RuntimeError):
+    pass
+
+
+def _archive_engine(url: str | None, which: str):
+    if not url:
+        env = "ARCHIVE_DATABASE_URL" if which == "reader" else "ARCHIVE_WRITER_DATABASE_URL"
+        raise ArchiveNotConfiguredError(
+            f"The archive database is not configured ({env} is not set in backend/.env)."
+        )
+    if which not in _archive_engines:
+        _archive_engines[which] = create_engine(url, pool_size=2, max_overflow=3, pool_pre_ping=True)
+    return _archive_engines[which]
+
+
+def archive_configured() -> bool:
+    return bool(ARCHIVE_DATABASE_URL and ARCHIVE_WRITER_DATABASE_URL)
+
+
+def archive_reader_engine():
+    return _archive_engine(ARCHIVE_DATABASE_URL, "reader")
+
+
+def archive_writer_engine():
+    return _archive_engine(ARCHIVE_WRITER_DATABASE_URL, "writer")

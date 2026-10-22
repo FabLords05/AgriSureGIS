@@ -22,6 +22,8 @@ DROP TABLE IF EXISTS tbl_farmers_profile CASCADE;
 DROP TABLE IF EXISTS tbl_system_users CASCADE;
 DROP TABLE IF EXISTS tbl_parser_settings CASCADE;
 DROP TABLE IF EXISTS tbl_activity_log CASCADE;
+DROP TABLE IF EXISTS tbl_backup_log CASCADE;
+DROP TABLE IF EXISTS tbl_system_settings CASCADE;
 
 -- 3. Build the Core Lookup Tables First (Parents)
 CREATE TABLE tbl_system_users (
@@ -377,6 +379,34 @@ CREATE TABLE tbl_sar_planted_check (
 );
 
 CREATE INDEX idx_sar_planted_check_typhoon ON tbl_sar_planted_check (typhoon_id);
+
+-- 5d. Admin settings + backup history (2026-10-22 -- see
+-- migrations/2026-10-22_system_settings_backup_log.sql for what each is for).
+CREATE TABLE tbl_system_settings (
+    setting_key VARCHAR(50) PRIMARY KEY,
+    setting_value JSONB NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_by INT REFERENCES tbl_system_users(user_id) ON DELETE SET NULL
+);
+
+INSERT INTO tbl_system_settings (setting_key, setting_value) VALUES
+    ('coverage_rate_per_ha', '25000'),
+    ('auto_backup_enabled', 'true');
+
+CREATE TABLE tbl_backup_log (
+    backup_id SERIAL PRIMARY KEY,
+    kind VARCHAR(20) NOT NULL CHECK (kind IN ('manual', 'scheduled', 'archive')),
+    file_name VARCHAR(255),
+    size_bytes BIGINT,
+    gdrive_file_id VARCHAR(255),
+    status VARCHAR(20) NOT NULL CHECK (status IN ('success', 'failed')),
+    error TEXT,
+    gdrive_error TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_by INT REFERENCES tbl_system_users(user_id) ON DELETE SET NULL
+);
+
+CREATE INDEX idx_backup_log_created_at ON tbl_backup_log (created_at DESC);
 
 CREATE INDEX idx_activity_log_created_at ON tbl_activity_log (created_at DESC);
 CREATE INDEX idx_activity_log_user_id ON tbl_activity_log (user_id);

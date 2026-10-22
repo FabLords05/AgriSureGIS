@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, Boolean, UniqueConstraint, func
+from sqlalchemy import BigInteger, Column, Date, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, Boolean, UniqueConstraint, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from geoalchemy2 import Geometry
@@ -444,3 +444,33 @@ class ParserSettings(Base):
     # converts (x * 60) any existing value for already-provisioned DBs.
     polling_interval_minutes = Column(Integer, nullable=False, default=180)
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
+class SystemSetting(Base):
+    """Admin-editable key/value settings (2026-10-22) -- see
+    migrations/2026-10-22_system_settings_backup_log.sql and
+    app/core/system_settings.py for the keys and their defaults."""
+
+    __tablename__ = "tbl_system_settings"
+
+    setting_key = Column(String(50), primary_key=True)
+    setting_value = Column(JSONB, nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    updated_by = Column(Integer, ForeignKey("tbl_system_users.user_id", ondelete="SET NULL"), nullable=True)
+
+
+class BackupLog(Base):
+    """One row per pg_dump the app runs -- see app/services/backup_service.py."""
+
+    __tablename__ = "tbl_backup_log"
+
+    backup_id = Column(Integer, primary_key=True, index=True)
+    kind = Column(String(20), nullable=False)  # manual | scheduled | archive
+    file_name = Column(String(255))
+    size_bytes = Column(BigInteger)
+    gdrive_file_id = Column(String(255))
+    status = Column(String(20), nullable=False)  # success | failed
+    error = Column(Text)
+    gdrive_error = Column(Text)
+    created_at = Column(DateTime, server_default=func.now())
+    created_by = Column(Integer, ForeignKey("tbl_system_users.user_id", ondelete="SET NULL"), nullable=True)

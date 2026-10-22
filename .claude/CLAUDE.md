@@ -71,7 +71,8 @@ Full roster and ownership rules: [.claude/TEAM.md](.claude/TEAM.md) and
   verification. See `DEVELOPMENT_PLAN.md` for per-task status and
   [.claude/FUNCTION_CHANGES.md](.claude/FUNCTION_CHANGES.md) (kept current) for
   the detail.
-* **Known gaps:** no database backup/restore endpoint (UI only); end-to-end
+* **Known gaps:** no in-app restore (backups and Archive & Clear are real
+  since 2026-10-22; restore is a manual `pg_restore`); end-to-end
   manual validation against real PCIC figures still outstanding;
   `panicle initiation/booting` deliberately unmapped pending PCIC's
   days-per-stage table; not yet deployed on PCIC hardware.
