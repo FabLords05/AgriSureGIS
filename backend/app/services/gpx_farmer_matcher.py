@@ -39,6 +39,9 @@ class GpxMatchResult:
 # A single letter, optionally dotted -- the shape a middle initial takes in every
 # real PCIC name field seen so far ("C.", "J", "S.").
 _INITIAL_RE = re.compile(r"^[A-Za-z]\.?$")
+# A name extension that ends the name when there is no middle name
+# ('CRUZ, JUAN JR.') -- never read as a full middle name.
+_SUFFIX_RE = re.compile(r"^(JR|SR|II|III|IV|V)\.?$", re.IGNORECASE)
 
 
 class GpxFarmerMatcherService:
@@ -53,7 +56,9 @@ class GpxFarmerMatcherService:
     """
 
     @staticmethod
-    def parse_farmer_name(name: str) -> tuple[str | None, str | None, str | None]:
+    def parse_farmer_name(
+        name: str, *, full_middle_name: bool = False
+    ) -> tuple[str | None, str | None, str | None]:
         """Splits a 'LAST, FIRST [MIDDLE] M.' name into (last, first, middle_initial).
         Shared by the GPX filename parser below, GeoPackage ingestion and CSV
         ingestion, all of which carry the same convention -- the GPKG and the newer
@@ -67,6 +72,13 @@ class GpxFarmerMatcherService:
         one (a single letter, optionally dotted); otherwise it is part of the first
         name, so 'SMITH, JOHN PAUL' keeps both words rather than reading 'PAUL' as
         an initial.
+
+        `full_middle_name=True` is for CSV layouts that write the whole middle name
+        ('DIMALANTA, EDUARDO MENDOZA', the official Region III export, 2026-10-22):
+        a last word that isn't an initial is then the middle name, so the third
+        value is 'MENDOZA' rather than None. 'ATILANO JR. TAYAG' keeps 'JR.' on the
+        first name. A two-word middle name ('DELA CRUZ') or a compound first name
+        with no middle name will split on the last word.
         """
         last_name = first_name = middle_initial = None
         if "," in name:
@@ -74,7 +86,10 @@ class GpxFarmerMatcherService:
             last_name = last_raw.strip() or None
             pieces = rest.strip().split()
             if pieces:
-                if len(pieces) > 1 and _INITIAL_RE.match(pieces[-1]):
+                last_is_middle = _INITIAL_RE.match(pieces[-1]) or (
+                    full_middle_name and not _SUFFIX_RE.match(pieces[-1])
+                )
+                if len(pieces) > 1 and last_is_middle:
                     middle_initial = pieces[-1].rstrip(".") or None
                     pieces = pieces[:-1]
                 first_name = " ".join(pieces) or None

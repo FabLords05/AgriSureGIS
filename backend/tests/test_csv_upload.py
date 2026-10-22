@@ -5,7 +5,7 @@ from decimal import Decimal
 
 import pandas as pd
 
-from app.api.upload import _normalize_header, prepare_row_payload
+from app.api.upload import _normalize_header, _repair_enye, prepare_row_payload
 
 
 class CsvUploadPreparationTests(unittest.TestCase):
@@ -288,6 +288,114 @@ class NewPabsGpxLayoutTests(unittest.TestCase):
 
         self.assertEqual(payload["insurance"]["amount_cover"], Decimal("56485.20"))
         self.assertIsNone(payload["farm"]["area_size"])
+
+
+_REGION_III_HEADER = (
+    "Georef ID,Farmers ID,Farmer Name,Barangay Address,Municipality Address,Province Address,Mobile No.,"
+    "Policy No.,IR ID,Policy Date Issued,Area,Commodity,Amount Cover,varietyName,VarietyID,StgeCode,"
+    "Stage of Crop,Type of Planting,Date of Sowing,Date of Transplant,Date of Harvest,Date Effectivity,"
+    "Date Expiry,Insurance Status,GPX From:,Tenurial Status,Farm Name,FarmID,trackFileName,imageFileName,Track date\n"
+)
+_REGION_III_ROWS = (
+    ',87932,"DIMALANTA, EDUARDO MENDOZA",CARMENCITA,FLORIDABLANCA,PAMPANGA,(0918) 534-9848,2124465,,'
+    "7/10/2026,0.7406,Rice/Palay,,RICE120DAYS,416,,Mn. Tl. Stg. (EARLY VEGETATIVE),Transplant,7/25/2026,"
+    "8/20/2026,11/22/2026,7/10/2026,12/18/2026,ACTIVE INSURANCE,PPI,Owner,FARM 694946 - GPX,694946,"
+    '"TAB_DIMALANTA, EDUARDO M._87932_694946_2025-05-17.gpx",87932_694946_2025-06-08.jpg,\n'
+    ',199787,"BARIAS, ATILANO JR. TAYAG",SAN NICOLAS (POB.),CONCEPCION,TARLAC,(0916) 754-6759,2119786,,'
+    "6/16/2026,0.9445,Rice/Palay,\"21,000.00\",RICE120DAYS,416,,Mn. Tl. Stg. (EARLY VEGETATIVE),Direct Seeding,"
+    "7/30/2026,7/30/2026,11/27/2026,6/16/2026,11/27/2026,ACTIVE INSURANCE,PPI,Owner,FARM 969118 - GPX,969118,"
+    '"TAB_BARIAS, ATILANO JR. T._199787_969118_2026-02-14.gpx",0_969118_2026-04-07.jpg,\n'
+    ',64167,"BULAUN, MAGDALENA SIMBULAN",SANTO NIÑO,MAGALANG,PAMPANGA,(0965) 428-4105,2121781,,6/26/2026,'
+    "0.7501,Rice/Palay,,RICE120DAYS,416,,Mn. Tl. Stg. (EARLY VEGETATIVE),Direct Seeding,7/30/2026,7/30/2026,"
+    "11/27/2026,6/26/2026,11/27/2026,ACTIVE INSURANCE,PPI,Owner,FARM 671586 - GPX,671586,"
+    '"TAB_BULAUN, MAGDALENA S._64167_671586_2025-05-14",64167_671586_2025-06-07.jpg,\n'
+)
+
+
+class RegionIIIOfficialLayoutTests(unittest.TestCase):
+    """docs/Region III List of Farms with GPX File_Corrected Format.csv -- the
+    official ingestion layout (2026-10-22). Read as upload_csv() reads it: the
+    real file is cp1252, so 'SANTO NIÑO' is a single 0xD1 byte."""
+
+    def setUp(self):
+        raw = (_REGION_III_HEADER + _REGION_III_ROWS).encode("cp1252")
+        self.df = pd.read_csv(io.BytesIO(raw), encoding="cp1252")
+
+    def _payload(self, index):
+        return prepare_row_payload(self.df.iloc[index])
+
+    def test_core_fields_map(self):
+        payload = self._payload(0)
+
+        self.assertEqual(payload["boundary"], {
+            "province": "PAMPANGA", "municipality": "FLORIDABLANCA", "barangay": "CARMENCITA",
+        })
+        self.assertEqual(payload["farmer"]["farmers_id"], "87932")
+        self.assertEqual(payload["farm"]["csv_farm_reference"], "694946")
+        self.assertEqual(payload["farm"]["area_size"], Decimal("0.7406"))
+        self.assertIsNone(payload["farm"]["georef_id"])
+        self.assertEqual(
+            payload["farm"]["track_file_name"], "TAB_DIMALANTA, EDUARDO M._87932_694946_2025-05-17.gpx"
+        )
+        self.assertEqual(payload["insurance"]["policy_no"], "2124465")
+        self.assertEqual(payload["insurance"]["product_name"], "RICE120DAYS")
+        self.assertEqual(payload["insurance"]["effectivity_date"], date(2026, 7, 10))
+        self.assertEqual(payload["insurance"]["expiry_date"], date(2026, 12, 18))
+        self.assertFalse(payload["repaired_enye"])
+
+    def test_amount_cover_header_is_read(self):
+        # Blank -> None (the Admin Panel rate applies in _ingest_row); filled -> used.
+        self.assertIsNone(self._payload(0)["insurance"]["amount_cover"])
+        self.assertEqual(self._payload(1)["insurance"]["amount_cover"], Decimal("21000.00"))
+
+    def test_full_middle_name_is_split_off(self):
+        farmer = self._payload(0)["farmer"]
+        self.assertEqual((farmer["last_name"], farmer["first_name"], farmer["middle_name"]),
+                         ("DIMALANTA", "EDUARDO", "MENDOZA"))
+
+        farmer = self._payload(1)["farmer"]
+        self.assertEqual((farmer["last_name"], farmer["first_name"], farmer["middle_name"]),
+                         ("BARIAS", "ATILANO JR.", "TAYAG"))
+
+    def test_stage_comes_from_the_label_and_stgecode_is_not_read(self):
+        seed = self._payload(0)["crop_stage_seed"]
+        self.assertIsNone(seed["stage_code"])
+        self.assertEqual(seed["stage_label"], "Mn. Tl. Stg. (EARLY VEGETATIVE)")
+
+    def test_cp1252_enye_survives(self):
+        self.assertEqual(self._payload(2)["boundary"]["barangay"], "SANTO NIÑO")
+
+    def test_parenthetical_barangay_is_kept_for_the_psgc_fallback(self):
+        self.assertEqual(self._payload(1)["boundary"]["barangay"], "SAN NICOLAS (POB.)")
+
+
+class RepairEnyeTests(unittest.TestCase):
+    """A Ñ lost to a lossy re-save arrives as '�' (U+FFFD)."""
+
+    def test_uppercase_context_gets_capital_enye(self):
+        self.assertEqual(_repair_enye("SANTO NI�O"), "SANTO NIÑO")
+
+    def test_first_letter_of_a_word_gets_capital_enye(self):
+        self.assertEqual(_repair_enye("�ANO"), "ÑANO")
+        self.assertEqual(_repair_enye("Dela �eve"), "Dela Ñeve")
+
+    def test_lowercase_context_gets_small_enye(self):
+        self.assertEqual(_repair_enye("Santo Ni�o"), "Santo Niño")
+        self.assertEqual(_repair_enye("Pe�a"), "Peña")
+
+    def test_text_without_the_marker_is_untouched(self):
+        self.assertEqual(_repair_enye("SAN ISIDRO"), "SAN ISIDRO")
+
+    def test_payload_is_repaired_and_flagged(self):
+        raw = (_REGION_III_HEADER + _REGION_III_ROWS.splitlines()[2].replace("Ñ", "�") + "\n")
+        raw = raw.replace("BULAUN", "PE�A")
+        df = pd.read_csv(io.StringIO(raw))
+
+        payload = prepare_row_payload(df.iloc[0])
+
+        self.assertEqual(payload["boundary"]["barangay"], "SANTO NIÑO")
+        self.assertEqual(payload["farmer"]["last_name"], "PEÑA")
+        self.assertTrue(payload["repaired_enye"])
 
 
 class NormalizeHeaderTests(unittest.TestCase):
