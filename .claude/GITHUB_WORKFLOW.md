@@ -5,10 +5,14 @@
 - **`develop`:** Integration branch. All feature branches merge here first via PR. Represents the current, shared state of development. Also protected — never commit directly.
 - **`<username>/<area>/<slug>`:** Individual feature branches, branched off `develop`. `area` is the part of the system you're touching. Examples:
   - `fabio/db/recsap-matrix-table`
+  - `fabio/backend/csv-crop-stage-mapping`
   - `cristian/backend/pagasa-scraper`
-  - `james/frontend/leaflet-integration`
-  - `karylle/docs/api-contract`
-  - `albritch/analysis/payout-requirements`
+  - `cristian/frontend/leaflet-integration`
+  - `james/design/assessment-screen-layout`
+  - `albritch/docs/api-contract`
+
+  The prefix is the owner's, per `.claude/TEAM_RESPONSIBILITIES.md`. Only
+  `fabio/*` and `cristian/*` branches carry system code.
 
 ## Phase 1 — Before Coding
 1. Update your local `develop`:

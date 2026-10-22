@@ -63,6 +63,331 @@ when an admin activates or deactivates their account.
 
 ---
 
+## [2026-10-18] - Docs: SAR Phase 1 vs Phase 2 Explainer for the Documenter
+
+Per Fabio: a standalone document for Albritch (Documenter & System Analyst) so
+the SAR feature can be written about correctly without reading the backend.
+Documentation only — no code, schema or API surface touched.
+
+### 1. File: `docs/SAR_PHASE1_VS_PHASE2.md` (new)
+* Explicitly **non-normative**: it names `docs/SAR_ISPLANTED_METHOD.md` as the
+  spec that wins on any disagreement, so the two cannot drift into rival
+  sources of truth.
+* **Phase 1 vs Phase 2 comparison table** plus a plain-language walkthrough of
+  each: Phase 1's 24-day `VV − VH` composite read by eye (`POST /api/sar/layer`,
+  manual verdict in `tbl_planted_verification`), and Phase 2's 150-day VH /
+  VV-VH-ratio time series scored by the five conditions (`POST /api/sar/check`,
+  `tbl_sar_observation` / `tbl_sar_fetch_coverage` / `tbl_sar_planted_check`).
+* **Why Phase 2 superseded Phase 1**, stated as four defects rather than
+  preferences: a 24-day median cannot express a temporal signature; one orbit
+  for all farms left farms silently uncoloured; Earth Engine cost; and operator
+  load. Records that Phase 1 survives as an optional overlay and that
+  `/api/sar/verifications` is retired-but-readable (no frontend caller).
+* **§5 "Why not NDVI"** — written because NDVI appears in
+  `ui-prototype/.../AOISARPanel.tsx` as mock data and is easy to mistake for a
+  built feature. Notes the category error (NDVI is Sentinel-2 optical, not SAR),
+  the cloud-cover problem in the pre-event window, and that NDVI cannot express
+  C1/C3/C4 because standing water and bare soil both read low. The one
+  legitimate future use (corroborating a yellow farm) is named as unplanned.
+* **§6 "Known gaps — do not document these as finished"**: the §3.2 percentage
+  (what FR 3.4 literally asks for) is unimplemented; `RISE_VH_DB` /
+  `DROP_RATIO_DB` are still uncalibrated literature values against §6's
+  prohibition; the §7 sparkline is missing; Sentinel-1 revisit is unverified;
+  `tbl_planted_verification` is absent from the ERD.
+* **§7 verification pointers** to the method doc, `API_CONTRACT.md` §4c, the
+  classifier, the Earth Engine service, the routes and the panel, plus the two
+  source papers — so claims can be checked rather than taken on trust.
+* **§8** points at `CLAUDE.md` / `TEAM.md` for the same session's team-role
+  change instead of restating it.
+
+### Status / Next Steps
+* Nothing to test. Accurate as of commit `20c3d5e`.
+* `docs/README.md` left alone — it describes categories, not a file index.
+
+---
+
+## [2026-10-18] - Team Roles: Two Core Developers, Design and Documentation Split Out
+
+Per Fabio: the team docs described a five-person split that no longer matches
+who actually builds the system. Fabio and Cristian are the only two writing
+code; James contributes frontend *design* rather than frontend development;
+Albritch becomes the documenter of the system on top of his analyst work;
+Karylle is removed. No application code changed — `.claude/` governance only.
+
+### 1. File: `.claude/TEAM.md` (rewritten)
+* Split into **Core Developers** and **Supporting Roles**, with an explicit
+  statement that only the two core developers implement the system.
+* **Fabio** — Core Developer, Database & Backend. Keeps the DB ownership
+  (Postgres + PostGIS schema, spatial indexing, query optimization, backup and
+  recovery, the local PostgreSQL service and provisioning) and gains the
+  backend over that schema: models, migrations, ingestion, and the API routes
+  reading and writing them. Branches `fabio/db/*`, `fabio/backend/*`.
+* **Cristian** — Core Developer, Backend Logic & Frontend. Keeps FastAPI
+  architecture and API design, the PAGASA scraping pipeline and the Python GIS
+  libraries, named as owner of the assessment / exposure / SAR / payout
+  computational core, and gains frontend implementation (React components,
+  Leaflet integration, wiring screens to the API). Branches
+  `cristian/backend/*`, `cristian/frontend/*`.
+* **James** — changed from *Frontend Developer* to **Frontend Design**: the
+  `ui-prototype/` layouts, dashboard and visualization screen design, and map
+  UI presentation. A design-to-implementation boundary is stated: James
+  authors the design, the core developers implement it. Branches
+  `james/design/*` (was `james/frontend/*`).
+* **Albritch** — changed from *System Analyst* to **Documenter & System
+  Analyst**. Documentation is now his primary role and absorbs what was
+  Karylle's (architecture docs, API contract, setup/workflow guides,
+  development plan, environment guide, project context, user guides); the
+  analyst duties (payout/export requirements, use-case and workflow analysis)
+  are retained. Branches `albritch/docs/*` (was `albritch/analysis/*`).
+* **Karylle Anne Maagad** removed.
+* **Ownership is equal and undivided** (Fabio, 2026-10-18): Fabio and Cristian
+  own the whole system jointly, with no per-area owner. The listed areas are
+  labelled **Focus**, not *Owns* — where each carries the deeper context —
+  and either works anywhere in the codebase as the task requires. This also
+  keeps the existing `fabio/frontend/*` branches consistent with the doc.
+
+### 2. File: `.claude/TEAM_RESPONSIBILITIES.md` (rewritten)
+* Same split in short form, each entry carrying its branch prefixes.
+* New **design-to-implementation boundary** paragraph: `ui-prototype/` is the
+  design source of truth, and a change in appearance starts as a prototype
+  change rather than a frontend commit — making explicit whose authority
+  `CLAUDE.md`'s existing Scope Guard is enforcing.
+* `FUNCTION_CHANGES.md` is called out as the exception to Albritch's
+  documentation ownership: the developer making a change writes its entry in
+  the same commit, since it records detail only the author has.
+* States that the two hold equal ownership of the whole system and that the
+  area descriptions are focus areas, not ownership boundaries; either reviews
+  the other's PR.
+* Review workflow: the existing "DB changes go to Fabio" rule kept (he holds
+  the `sudo` and DB superuser access, which is operational, not an ownership
+  claim); a parallel rule added for appearance changes going to James; the
+  one-reviewer PR rule now says plainly that with two core developers it means
+  Fabio and Cristian review each other. The `main`/`develop` freeze rule is
+  unchanged.
+
+### 3. File: `.claude/GITHUB_WORKFLOW.md`
+* Branch-name examples updated: `james/frontend/*` and `karylle/docs/*` out;
+  `fabio/backend/*`, `cristian/frontend/*`, `james/design/*` and
+  `albritch/docs/*` in. Added a note that the prefix is the owner's and that
+  only `fabio/*` and `cristian/*` branches carry system code.
+
+### 4. File: `.claude/CLAUDE.md`
+* The opening profile lines now say Fabio is a **Core Developer (Database
+  Administrator and Backend)** and name Cristian as the other core developer.
+* **Developer Profile** role changed from "Database Admin" to "Core Developer
+  — Database Administrator & Backend".
+* New **Team at a Glance** section between Developer Profile and Current
+  Status: the two core developers named as equal owners of the whole system
+  with their focus areas, the two supporting roles, and pointers to `TEAM.md`
+  / `TEAM_RESPONSIBILITIES.md`.
+* The `sudo`/`psql` execution rule still refers to Fabio as DB Admin, which
+  remains accurate — he administers the database regardless of the wider
+  developer title.
+
+### Status / Next Steps
+* Documentation only; nothing to test. No application code, schema or API
+  surface touched.
+* Historical credits in this changelog and the existing
+  `gayla/frontend/admin-user-management` remote branch are left as they are —
+  they record what happened, not the current team. The documented prefix for
+  James stays `james/*`.
+
+---
+
+## [2026-10-18] - `.claude/` Docs Reconciled Against the Codebase (docs only, branch: develop)
+
+Fabio's ask: bring every applicable `.claude/` file back in sync with the code as
+it actually stands, starting with `API_CONTRACT.md`. **No code, schema, endpoint or
+workflow was changed** — this entry documents documentation edits only. Status was
+derived by reading `backend/app/api/`, `backend/app/core/`, `backend/app/services/`,
+`models.py`, `init_schema.sql`, `migrations/`, `frontend/src/`, and this changelog,
+at commit `a47517c` (2026-10-13).
+
+### 1. File: `.claude/API_CONTRACT.md` (rewritten)
+The worst-drifted file. It still claimed *"Authentication: not implemented in code
+yet"* and documented a planned `/api/auth/login/` with a JWT blacklist, roughly two
+months after real auth shipped.
+* **Corrected conventions:** authentication **is** implemented — router-level
+  `Depends(get_current_user)` on every protected router, `require_admin` on the
+  admin surfaces, stateless HS256 JWT with no server-side blocklist, `is_active`
+  re-checked per request, and the exact 401/403 messages. Documented the public
+  endpoints (`/users/register`, `/users/login`, `/`, `/api/test-db`), the activity-log
+  middleware, and the `Content-Disposition` CORS requirement.
+* **Corrected "Pagination: not implemented on any list endpoint yet"** — keyset
+  pagination (`limit`/`after_id`) has existed on `GET /farms/` since 2026-08-17.
+* **Documented ~20 endpoints that existed with no contract entry at all:** the whole
+  `/api/users` router (register/login/logout/list/create/`PATCH /me`/`PATCH /{id}`),
+  `GET /activity-log/`, `GET`+`PUT /bulletins/settings`, `POST /bulletins/upload`,
+  `POST /bulletins/{tcb_id}/compute-exposure`, `GET /bulletins/{tcb_id}/signals`,
+  `GET /bulletins/typhoon/{id}/summary`, `GET /typhoons/active`,
+  `GET /assessments/summary`, `GET /farms/municipalities`, `GET /farms/farmers`,
+  `GET /sar/field-verify`, `GET /sar/field-verify/export`,
+  `GET /upload/csv/status/{job_id}`, `GET /` and `GET /api/test-db`.
+* **Fixed `POST /api/upload/csv`**, which was documented with its pre-2026-08-16
+  synchronous response (`rows_processed`/`failures`). It has been an async job since:
+  it returns `{status: "processing", job_id, total_rows}` and the old fields now
+  arrive in the status endpoint's `result`. Added the 2026-10-13 wrong-file column
+  check and the cp1252 decode fallback.
+* **Filled in query params and response shapes** for `GET /farms/` (incl.
+  `has_geometry` being a boolean, not a GeoJSON blob), `GET /farms/geometry`,
+  `GET /assessments/`, `GET /assessments/export` and `GET /insurance/usage`.
+* **New §12 "Not implemented"**, recording that `DatabaseBackupModule.tsx` makes no
+  API calls (backup/restore is `pg_dump`/`pg_restore` outside the app), that nothing
+  persists a global Amount of Cover, and that GeoServer layers bypass FastAPI.
+* Noted the `/bulletins/settings` caveat: the interval is persisted and
+  reschedulable, but startup uses `scheduler.FIXED_POLL_INTERVAL_MINUTES`.
+
+### 2. Files: `.claude/DEVELOPMENT_PLAN.md` (merged) and `.claude/DEVELOPMENT_PHASE.md` (deleted)
+Per Fabio: merge into one. These two were ~95% duplicates that **disagreed with each
+other on the indemnity formula**, which is the exact failure mode a duplicate invites.
+* `DEVELOPMENT_PLAN.md` is now the single plan file (it is #2 in `CLAUDE.md`'s
+  required reading order; `DEVELOPMENT_PHASE.md` was referenced by nothing).
+* Every Sprint 1-3 task is marked **[Done]** against the file that implements it;
+  Sprint 4 is **[Mostly done]** — the payout engine and both CSV exports shipped,
+  but end-to-end manual validation against real PCIC figures has not been done.
+* **Removed the `I = (AC / 1000) * IF * Area` formula** from the old Phase 4. Area is
+  not a factor (`indemnity_calc.py:39-49`; corrected with Fabio 2026-07-23).
+* New **"Beyond the original plan — shipped, unplanned"** table, so nobody reads a
+  sprint list and concludes auth, user management, the activity log, SAR/Earth
+  Engine, email alerts, async ingestion, the PWA or the Tailscale deployment don't
+  exist.
+* New **"Known gaps"** section: no backup endpoint, `panicle initiation/booting`
+  deliberately unmapped pending PCIC, dead `PAGASA_SCRAPE_URL`, the polling-interval
+  caveat, inconsistent response envelopes.
+* **Sprint pointer deliberately left unasserted** — per Fabio, "we don't know what
+  sprint we are." The file says so explicitly and tells the reader to ask rather
+  than inferring one from a stale marker.
+
+### 3. File: `.claude/BACKEND_DATABASE_WORKFLOW.md`
+* **§2 schema list** went from 11 tables to all 21 plus the materialized view,
+  grouped into core data / reference / typhoon-bulletin / usage-audit-SAR / views.
+  Previously missing entirely: `tbl_indemnity_factor_matrix`,
+  `tbl_crop_stage_mapping`, `tbl_insurance_usage`, `tbl_parser_settings`,
+  `tbl_activity_log`, `tbl_planted_verification`, `tbl_sar_observation`,
+  `tbl_sar_fetch_coverage`, `tbl_sar_planted_check`, `mv_farm_latest_insurance`.
+  Pointed at `init_schema.sql`/`models.py`/the ERD as authoritative, and documented
+  `backend/migrations/` (14 dated files, each since folded into `init_schema.sql`).
+* Fixed the `tbl_insurance_record` → `tbl_insurance_records` typo.
+* **§3** no longer labels Sprint 1 "(Current)"; added a status note pointing at
+  `DEVELOPMENT_PLAN.md`.
+* **§4 payout formula**: dropped `\times \text{Area}`, and corrected the claim that
+  `IF` comes from `tbl_recsap_matrix` — it is a two-step lookup through
+  `tbl_indemnity_factor_matrix`, with exposure hours bucketed down to 6/12/24.
+* **Reset section** now leads with `seed_all.py`, adds the three seeders it was
+  missing (`seed_system_users.py` — **nothing can log in without it**,
+  `seed_active_insurance.py`, `prepare_ingestion_demo.py`/`reset-demo-data.bat`), and
+  mentions applying `migrations/` as the non-destructive alternative to re-running
+  `init_schema.sql`.
+
+### 4. File: `.claude/PROJECT_CONTEXT.md`
+* **Stack** gained what is actually installed and used: PyJWT + bcrypt, APScheduler,
+  `earthengine-api`, Redis, SMTP, gpxpy, httpx, the TypeScript/Radix/MUI/Recharts
+  frontend reality, the PWA, and the Tailscale Funnel + Caddy deployment. Marked
+  GeoServer, Redis, SMTP and Earth Engine as genuinely optional.
+* **Corrected `AC`**: it is read per policy from `tbl_insurance_records.amount_cover`,
+  **not** "configured in Settings" — no endpoint persists a global value. Added the
+  eligibility gate and the separate `estimated_damage` formula.
+* **Roles** now note that the two role strings are the only ones the backend accepts
+  (`ALLOWED_ROLES`), that enforcement is server-side rather than a UI convention,
+  and that backup/restore happens outside the app.
+* **Features** gained per-typhoon insurance usage locking, the advisory-only SAR
+  check, access control/activity logging, and the two export shapes.
+
+### 5. File: `.claude/MASTER_DEVELOPMENT_CONTEXT.md`
+* §2 architecture gained the scheduler, Earth Engine, auth/activity-log enforcement,
+  viewport-based geometry fetching, Redis and the materialized view.
+* **New explicit note that exposure is not a geometric footprint intersection** — it
+  is a `(province, municipality)` text join against `tbl_tcb_signals`, so it is
+  municipality-granular. Both this file and the old phase doc implied otherwise.
+* §3 now distinguishes the two crop-stage taxonomies (3-value `crop_stage_no` vs
+  PCIC's 5 groups) and why they are resolved independently.
+
+### 6. File: `.claude/GEOSERVER_SETUP.md` (rewritten host-agnostic)
+Per Fabio: "make a general setup of it." The file was written against one specific
+box (Docker on `192.168.1.41`, with Windows-console and `host.docker.internal`
+particulars) and contradicted `LOCAL_SERVER_SETUP.md`, which describes a native
+install on a different machine. It also cited *"`PROJECT_CONTEXT.md`'s remote-server
+notes"*, which do not exist in that file.
+* Now a placeholder-based runbook (`<GEOSERVER_HOST>`, `<DB_HOST>`) covering **both**
+  native and Docker installs, explicitly deferring machine-specific particulars to
+  `LOCAL_SERVER_SETUP.md`.
+* Added a `<DB_HOST>` decision table — the most common setup mistake — and noted that
+  the `agrisuregis` workspace name is load-bearing for `GISLeafletMap.tsx`.
+* States up front that GeoServer is optional and what the map falls back to.
+* Kept what remains true: the datastore/layer publishing steps, the
+  `/geoserver-proxy` CORS approach and why GeoServer's own CORS filter stays off, the
+  verification URLs, and the scope notes. Dropped the dangling cross-reference.
+
+### 7. File: `.claude/ENV_GUIDE.md`
+* `PAGASA_SCRAPE_URL` is now marked a **dead variable** — nothing reads it; the index
+  URL is hardcoded as `PAGASA_INDEX_URL` in `bulletin_parser.py`. Left in the table
+  rather than deleted because it is still in `backend/.env.example`, which is outside
+  the `.claude/`-only scope Fabio set for this pass; flagged to either wire up or drop.
+
+### 8. File: `.claude/CLAUDE.md`
+* **Current Status** replaced. It had said "Sprint 3 … Build the GPX boundary parser,
+  GeoJSON mapping, geoprocessing of storm trajectories, and exposure calculations" —
+  all four of which shipped. Now: an explicit "sprint pointer unknown, ask Fabio",
+  a summary of what is built, the known gaps, and a statement that the current-task
+  line is not a reliable source.
+
+### 9. Files: `.claude/TEAM.md`, `.claude/TEAM_RESPONSIBILITIES.md`
+Realigned with the roster `CLAUDE.md` gained during this session (which now names
+them as the authority): two **core developers who own the system equally** (Fabio —
+DB/backend; Cristian — backend logic/frontend), with focus areas explicitly "not
+boundaries"; James as frontend **design** (`ui-prototype/` as design source of
+truth); Albritch as documenter **and** system analyst. Branch-name examples updated
+to match. Karylle's entry was **kept and flagged** rather than removed, since
+`CLAUDE.md`'s roster omits her — an open question for Fabio, not a decision to make
+unilaterally. Added a practice note that history contains explicitly-authorized
+direct pushes to `develop`, so the PR rule reads as the default rather than as
+violated.
+
+### 10. Files deleted: three resolved handoff docs
+Per Fabio. All three described branches long since merged into `develop`
+(`fabio/backend/farmer-name-backfill` → `cdca63c`,
+`fabio/backend/csv-crop-stage-mapping` → the 2026-10-09 entry below,
+`fabio/frontend/affected-only-sar-filter` → `538a22d`):
+* `HANDOFF_2026-10-09_CSV_CROP_STAGE.md`
+* `HANDOFF_2026-10-09_FARMER_NAME_BACKFILL.md`
+* `HANDOFF_2026-10-12_AFFECTED_FILTER_SAR.md`
+
+`LOCAL_SERVER_SETUP.md` §8 referenced the first of these for the
+`crop_stage_no = NULL` explanation; that reasoning (Table 11 Note 1, no PCIC
+days-after-transplanting threshold, day 66 rejected as a guess, the one-statement
+`UPDATE` that enables it) was **inlined there** before deletion so nothing was lost.
+
+### 11. Also in this commit, from a parallel session (not part of the doc-sync pass)
+Fabio made these edits in another Claude Code instance while the above was in
+progress; they are committed together because they touch the same files. Items 8
+and 9 above were written to agree with them rather than overwrite them.
+* **`.claude/CLAUDE.md`** — new roster framing: Fabio restyled from "Database Admin"
+  to **Core Developer (Database Administrator & Backend)**, Cristian Aton named as
+  the other core developer (backend logic + frontend), with both stated to **own the
+  system equally — "no part of it is mine rather than his."** New "Team at a Glance"
+  section separating the two implementers from the supporting roles (James —
+  frontend design, `ui-prototype/` as design source of truth; Albritch — documenter
+  and system analyst).
+* **`.claude/GITHUB_WORKFLOW.md`** — branch-prefix examples reworked to match that
+  roster: added `fabio/backend/*`, moved `frontend/leaflet-integration` from `james/`
+  to `cristian/`, James moved to `james/design/*`, docs moved from `karylle/docs/*`
+  to `albritch/docs/*`, and a new note that the prefix is the owner's and that
+  **only `fabio/*` and `cristian/*` branches carry system code.**
+
+### Not changed
+`LOCAL_SERVER_SETUP.md` (beyond the inline above), `Initial Documentations.md`
+(interview notes — historical record), `settings.json`, and everything outside
+`.claude/` (`docs/WINDOWS_SETUP.md` also mentions the dead `PAGASA_SCRAPE_URL`;
+`backend/.env.example` still carries it) — Fabio scoped this pass to `.claude/` only.
+
+Deliberately left out of this commit: `backend/app/__pycache__/__init__.cpython-314.pyc`
+(a tracked bytecode artifact that keeps showing dirty — `__pycache__/` is gitignored
+but this file predates that, so it needs `git rm --cached` sometime), and the two
+cited SAR reference PDFs sitting untracked in `docs/` (Fabio's call, 2026-10-18:
+leave them untracked, consistent with the gitignored `USTP CAPSTONE/` copies).
+
+---
+
 ## [2026-10-13] - Assessment & Reporting: Export the SAR Field Verification List (Sprint 3)
 
 Per Cristian: a way to export the farmers the automatic SAR planted check

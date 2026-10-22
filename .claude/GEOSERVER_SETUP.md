@@ -5,211 +5,189 @@ sitting between the Presentation Layer (React/Leaflet) and the Database Layer
 (PostgreSQL/PostGIS). It serves map layers directly to the frontend via WMS/WFS,
 separate from FastAPI's business-logic API.
 
-**As of 2026-08-11, this runs as a Docker container on the remote mock server**
-(192.168.1.41), a third service in `backend/docker-compose.yml` alongside `backend`
-and `redis` — not a native local install. This supersedes the original native/JDK
-approach: the database GeoServer needs to query now lives on that box (see
-`.claude/PROJECT_CONTEXT.md`'s remote-server notes), so colocating GeoServer with
-Postgres avoids a network hop on every internal PostGIS query GeoServer makes,
-and reuses the Docker/Postgres-reachability groundwork already laid for the
-`backend` container (`host.docker.internal`, the Docker-subnet `pg_hba.conf`/
-firewall rules) instead of opening new surface area.
+**GeoServer is optional.** With `VITE_GEOSERVER_URL` unset or unreachable, the map
+falls back to the bundled static boundary file (`frontend/public/data/region10-boundaries.geojson`)
+and simply hides the GeoServer farm overlay. Nothing else in the app depends on it.
+
+> **This runbook is deliberately host-agnostic** (rewritten 2026-10-18). It used to
+> be written against one specific machine and install method, which went stale as
+> soon as the stack moved. Substitute your own values for:
+>
+> | Placeholder | Meaning |
+> |---|---|
+> | `<GEOSERVER_HOST>` | Host:port serving GeoServer, e.g. `localhost:8080` |
+> | `<DB_HOST>` | How GeoServer reaches Postgres — see §4 |
+>
+> For the machine-specific particulars of whichever box is currently hosting the
+> stack (ports, service names, Tailscale addresses, firewall rules), see
+> `.claude/LOCAL_SERVER_SETUP.md` — that file tracks the live host; this one tracks
+> the procedure.
 
 Every command below runs either as a normal local repo edit, or as a handoff to
-Fabio's own SSH session on the remote box — same rigor as the rest of `.claude/
-CLAUDE.md`'s Database/venv/Docker execution rules. Building/pulling the
-`docker.osgeo.org/geoserver` image needs the **physical console** on that box, not
-SSH — a known limitation of this specific Windows machine (Windows Credential
-Manager/DPAPI needs an interactive logon session that SSH-created sessions don't
-have), already worked around the same way for the `backend` image.
+Fabio on the host — same rigor as the rest of `.claude/CLAUDE.md`'s
+Database/venv/frontend execution rules. Nothing here is run via a tool call.
 
 ---
 
 ## 1. Prerequisites
 
-- Docker Desktop already installed and working on 192.168.1.41 (it is, as of the
-  backend containerization work — see `backend/Dockerfile`/`docker-compose.yml`).
-- The existing `agrisure_db` PostgreSQL/PostGIS database, native on that same box,
-  already running and reachable from its Docker network (already true — the
-  `backend` container already connects to it via `host.docker.internal`).
-- `tbl_admin_boundaries.boundary_geom` column applied (see `backend/init_schema.sql`)
-  and backfilled (see step 4 below) — needed before the boundary layer can be published.
+- GeoServer installed by either route (both work; pick one and record which in
+  `LOCAL_SERVER_SETUP.md`):
+  - **Native:** the platform-independent binary + a JDK (Temurin 17 is known-good).
+  - **Docker:** the `docker.osgeo.org/geoserver` image. A service definition exists
+    in `backend/docker-compose.yml`.
+- The `agrisure_db` PostgreSQL/PostGIS database running and reachable **from
+  wherever GeoServer runs**.
+- `tbl_admin_boundaries.boundary_geom` present (it is part of
+  `backend/init_schema.sql`) **and backfilled** — see §3. Without the backfill the
+  boundary layer publishes empty.
 
-## 2. Add the `geoserver` service and bring it up
+## 2. Install and start
 
-The service definition already exists in `backend/docker-compose.yml`:
+### Native
+1. Extract the binary, set `JAVA_HOME`, start it (`bin/startup.sh` / `startup.bat`).
+2. Log in at `http://<GEOSERVER_HOST>/geoserver/web` with the default
+   `admin`/`geoserver` and **change the password immediately**.
 
-```yaml
-  geoserver:
-    image: docker.osgeo.org/geoserver:3.0.x
-    restart: unless-stopped
-    ports:
-      - "8080:8080"
-    env_file:
-      - .env
-    environment:
-      GEOSERVER_DATA_DIR: /opt/geoserver_data
-      EXTRA_JAVA_OPTS: "-Xms512m -Xmx1g"
-      SKIP_DEMO_DATA: "true"
-    volumes:
-      - geoserver-data:/opt/geoserver_data
-```
-
-1. On the remote box, in `backend/.env` (gitignored, edited in place — never
-   committed), add:
+### Docker
+1. In `backend/.env` (gitignored — never committed), set:
    ```
    GEOSERVER_ADMIN_USER=admin
-   GEOSERVER_ADMIN_PASSWORD=<pick a real password, not the "geoserver" default>
+   GEOSERVER_ADMIN_PASSWORD=<a real password, not the "geoserver" default>
    ```
-   The image reads these on first boot and provisions the admin account with
-   them directly — no separate "log in with the default and change it" step
-   the native install needed.
-2. Add a Windows Firewall inbound rule for port 8080 (this is genuinely new —
-   only 8000 (backend) and 5432 (Postgres, Docker-subnet-scoped) have been
-   opened so far):
-   ```
-   New-NetFirewallRule -DisplayName "GeoServer" -Direction Inbound -Protocol TCP -LocalPort 8080 -RemoteAddress 172.16.0.0/12,192.168.1.0/24 -Action Allow
-   ```
-3. **At the physical console** (not SSH — see the note above): `cd` into
-   `backend/` and run `docker compose build` if anything changed, then
-   `docker compose up -d`. This also (re)creates `backend` and `redis` if they
-   aren't already running — `docker compose up -d` only touches services that
-   changed, so this is safe to run even with the stack already up.
-4. Confirm it's up: `docker compose ps` should show `geoserver` as `Up`, and
-   `docker compose logs geoserver` should show it finish startup (first boot
-   is slower than restarts — GeoServer initializes its data directory).
-5. Open `http://192.168.1.41:8080/geoserver/web` and log in with the
-   `GEOSERVER_ADMIN_USER`/`PASSWORD` you set in step 1.
+   The image reads these on first boot and provisions the admin account directly,
+   so there is no "log in with the default, then change it" step.
+2. From `backend/`: `docker compose up -d` (add `docker compose build` first if
+   anything changed). This also starts the other services defined there if they
+   aren't already up.
+3. Confirm with `docker compose ps` (`geoserver` should be `Up`) and
+   `docker compose logs geoserver`. First boot is slower than restarts — it
+   initializes its data directory.
 
-## 3. Apply the schema change
+Either way, open a firewall rule for GeoServer's port if it must be reachable from
+other machines, scoped to the LAN/tailnet rather than left open.
 
-`boundary_geom` (and its GIST index) is now part of `backend/init_schema.sql`. Re-apply
-it against `agrisure_db` the same way you normally apply schema updates — **on the
-remote box**, since that's where `agrisure_db` lives now, not a local venv.
+## 3. Backfill the boundary geometry
 
-> **Note:** `init_schema.sql` starts with `DROP TABLE ... CASCADE` for every table, so
-> re-running it wipes **all** data (farmers, farms, insurance records, assessments,
-> bulletins, everything) — not just `tbl_admin_boundaries`. You'll need to reseed
-> afterward (step 4). If you'd rather not wipe existing data, run this targeted
-> `ALTER TABLE` against the live DB instead of re-applying the full file:
-> ```sql
-> ALTER TABLE tbl_admin_boundaries ADD COLUMN boundary_geom GEOMETRY(MultiPolygon, 4326);
-> CREATE INDEX idx_admin_boundaries_boundary_geom ON tbl_admin_boundaries USING GIST(boundary_geom);
-> ```
+From `backend/`, in the host's project venv — **Fabio runs this himself**:
 
-## 4. Reseed (if you re-ran the full schema) and backfill region boundary geometry
-
-Both of these run **on the remote box** (SSH, its own venv), against its own local
-`agrisure_db` — no new network path needed, same as any other backend script there.
-
-If you re-ran the full `init_schema.sql`, reseed first so `tbl_admin_boundaries` has
-rows for the backfill to match against:
-```
-python seed_database.py
-```
-
-Then, from `backend/`, using the remote box's project venv:
-```
+```bash
 python backfill_admin_boundary_geom.py
 ```
+
 This reads `frontend/public/data/region10-boundaries.geojson` and populates
 `boundary_geom` for every matching `(province, municipality)` in
-`tbl_admin_boundaries`. It prints any geojson municipalities that had no matching
-rows (municipalities with no seeded farms yet) — that's expected, not an error.
+`tbl_admin_boundaries`. It prints any GeoJSON municipalities with no matching rows
+(municipalities with no seeded farms yet) — that is expected, not an error.
 
-## 5. Create the workspace + PostGIS datastore
+If `tbl_admin_boundaries` is empty, seed it first (`seed_admin_boundaries.py`, or
+`seed_all.py` for the whole sequence — see `.claude/BACKEND_DATABASE_WORKFLOW.md` §4).
 
-In the GeoServer admin UI (`http://192.168.1.41:8080/geoserver/web`):
+## 4. Create the workspace + PostGIS datastore
+
+In the GeoServer admin UI (`http://<GEOSERVER_HOST>/geoserver/web`):
+
 1. **Data > Workspaces > Add new workspace**
    - Name: `agrisuregis`
-   - Namespace URI: `http://agrisuregis.local` (placeholder, not publicly resolved)
+   - Namespace URI: `http://agrisuregis.local` (a placeholder; not publicly resolved)
 2. **Data > Stores > Add new Store > PostGIS**
    - Workspace: `agrisuregis`
    - Data Source Name: `agrisure_db`
-   - Connection params: **host `host.docker.internal`**, port `5432`, database
-     `agrisure_db`, same user/password as `backend/.env`'s `DATABASE_URL` — this
-     is the same Docker Desktop DNS indirection the `backend` container already
-     uses to reach native Postgres from inside a container, not `localhost`
-     (that would mean "inside the GeoServer container," which has no Postgres
-     of its own).
+   - Connection: host `<DB_HOST>`, port `5432`, database `agrisure_db`, and the same
+     user/password as `backend/.env`'s `DATABASE_URL`.
 
-## 6. Publish the layers
+**Choosing `<DB_HOST>`** — this is the single most common setup mistake:
+
+| GeoServer runs | Postgres runs | `<DB_HOST>` |
+|---|---|---|
+| Natively, same machine | Natively, same machine | `localhost` |
+| In Docker | Natively on the host | `host.docker.internal` (Docker Desktop) |
+| In Docker | In Docker, same compose file | the Postgres service name |
+| Anywhere | A different machine | that machine's LAN/tailnet IP |
+
+From inside a container, `localhost` means "this container", which has no Postgres
+of its own. If Postgres is native and GeoServer is containerized, the Docker subnet
+also needs a `pg_hba.conf` entry and a firewall rule for 5432.
+
+The workspace name `agrisuregis` is **not** arbitrary — `GISLeafletMap.tsx` builds
+its WMS/WFS URLs from it. Changing it means changing that file too.
+
+## 5. Publish the layers
 
 Under the `agrisure_db` store, **Publish** these two tables:
 
 | Table | Geometry column | Layer name | Purpose |
 |---|---|---|---|
-| `tbl_farms` | `location_geom` | `agrisuregis:tbl_farms` | Optional WMS reference overlay (frontend keeps its existing interactive farm layer from FastAPI — see step 7) |
-| `tbl_admin_boundaries` | `boundary_geom` | `agrisuregis:tbl_admin_boundaries` | Replaces the static `region10-boundaries.geojson` bundled file as a live WFS source |
+| `tbl_farms` | `location_geom` | `agrisuregis:tbl_farms` | Optional WMS reference overlay (the frontend keeps its own interactive farm layer from FastAPI — see §7) |
+| `tbl_admin_boundaries` | `boundary_geom` | `agrisuregis:tbl_admin_boundaries` | Live WFS source, replacing the bundled static `region10-boundaries.geojson` |
 
-For each: in the "Publish" tab, click **Compute from data** and **Compute from
-native bounds** to auto-fill the bounding box, then Save.
+For each: on the "Publish" tab, click **Compute from data** and **Compute from
+native bounds** to fill the bounding box, then Save.
 
-(Optional) Under the "Publishing" tab you can attach an SLD style for
-`tbl_farms` matching the frontend's existing color scheme (`#1e3a5f` fill), but
-this only affects the optional WMS overlay, not the interactive GeoJSON layer.
+(Optional) On the "Publishing" tab you can attach an SLD style for `tbl_farms`
+matching the frontend's colour scheme (`#1e3a5f` fill). This only affects the
+optional WMS overlay, not the interactive layer.
 
-## 7. CORS — handled by the frontend dev proxy, not GeoServer
+## 6. CORS — handled by the frontend dev proxy, not GeoServer
 
-The browser blocks cross-origin `fetch` calls (frontend dev server on `:5173` calling
-GeoServer on `:8080`) unless GeoServer sends CORS headers — visiting a GeoServer URL
-directly in the browser address bar works regardless (page navigation isn't subject
-to CORS), which can make this look fine until the frontend actually tries it.
+The browser blocks cross-origin `fetch` calls (frontend dev server on `:5173`
+calling GeoServer on another port) unless GeoServer sends CORS headers. Visiting a
+GeoServer URL directly in the address bar works regardless — page navigation isn't
+subject to CORS — which can make this look fine until the frontend actually tries it.
 
-The Docker image does support this natively (`CORS_ENABLED=true` and related
-`CORS_ALLOWED_*` env vars) — **deliberately not used here**. `frontend/vite.config.ts`
-already proxies `/geoserver-proxy/*` to `VITE_GEOSERVER_URL` server-side (see
-`server.proxy` in that file), so every GeoServer request from `GISLeafletMap.tsx`
-goes through that same-origin proxy path and the browser never makes a genuinely
-cross-origin request — CORS never applies either way. Keeping this the single
-source of truth avoids maintaining the same policy in two places, and sidesteps
-depending on GeoServer's own CORS filter at all (the native install's version of
-this filter was a real, previously-hit failure mode — see the git history of this
-file — enabling GeoServer-side CORS unnecessarily reintroduces that surface for no
-benefit here). This proxy only covers `npm run dev` — a production static
-build/reverse-proxy setup (not built yet) will need its own equivalent (e.g. an
-nginx location block proxying `/geoserver` to GeoServer, alongside whatever proxies
-`/api` to FastAPI).
+`frontend/vite.config.ts` already proxies `/geoserver-proxy/*` to
+`VITE_GEOSERVER_URL` server-side (see `server.proxy`), so every GeoServer request
+from `GISLeafletMap.tsx` goes through a same-origin path and the browser never makes
+a genuinely cross-origin request. CORS never applies either way.
 
-## 8. Point the frontend at it
+**Do not enable GeoServer's own CORS filter** (`CORS_ENABLED=true` and friends on the
+Docker image). Keeping the proxy as the single source of truth avoids maintaining
+the same policy in two places, and the native install's version of that filter was a
+real, previously-hit failure mode — see this file's git history.
+
+This proxy only covers `npm run dev`. A production static build behind a reverse
+proxy (not built yet) needs its own equivalent — e.g. an nginx `location` block
+proxying `/geoserver` to GeoServer, alongside whatever proxies `/api` to FastAPI.
+
+## 7. Point the frontend at it
 
 In `frontend/.env`:
-```
-VITE_GEOSERVER_URL=http://192.168.1.41:8080/geoserver
-```
-(or the Tailscale address, `http://100.80.128.92:8080/geoserver`, if working
-away from the LAN — see `.claude/CLAUDE.md`'s remote-server/Tailscale notes.)
-Restart the frontend dev server after changing this — Vite reads `.env` at
-server start, not live.
 
-## 9. Verify
+```
+VITE_GEOSERVER_URL=http://<GEOSERVER_HOST>/geoserver
+```
 
-- `docker compose ps` on the remote box shows `geoserver` as `Up`.
-- WMS capabilities: `http://192.168.1.41:8080/geoserver/agrisuregis/wms?service=WMS&version=1.3.0&request=GetCapabilities`
-- WFS GetFeature test for boundaries (should return GeoJSON):
+Restart the frontend dev server afterward — Vite reads `.env` at server start, not
+live. (Hand that restart to Fabio; see `CLAUDE.md`'s Frontend Local Environment rule.)
+
+## 8. Verify
+
+- GeoServer is up: the admin UI loads, or `docker compose ps` shows it `Up`.
+- WMS capabilities:
+  `http://<GEOSERVER_HOST>/geoserver/agrisuregis/wms?service=WMS&version=1.3.0&request=GetCapabilities`
+- WFS GetFeature for boundaries (should return GeoJSON, not an empty collection —
+  an empty one means §3's backfill didn't run):
   ```
-  http://192.168.1.41:8080/geoserver/agrisuregis/ows?service=WFS&version=2.0.0&request=GetFeature&typeName=agrisuregis:tbl_admin_boundaries&outputFormat=application/json
+  http://<GEOSERVER_HOST>/geoserver/agrisuregis/ows?service=WFS&version=2.0.0&request=GetFeature&typeName=agrisuregis:tbl_admin_boundaries&outputFormat=application/json
   ```
-- With `VITE_GEOSERVER_URL` set (step 8) and the frontend dev server restarted,
-  the map should load region boundaries from GeoServer (falling back to the
-  static file if GeoServer is unreachable) and show a "GeoServer overlay"
-  toggle for farm boundaries.
+- With `VITE_GEOSERVER_URL` set and the dev server restarted, the map loads region
+  boundaries from GeoServer (falling back to the static file if unreachable) and
+  shows a "GeoServer overlay" toggle for farm boundaries.
 
 ## Notes / current scope
 
-- The wind-footprint overlay is **not** published through GeoServer — it's computed
-  on the fly by `GeoPandas`/`Shapely` at request time, not a stored PostGIS geometry,
-  so there's no table for GeoServer to publish it from.
-- The typhoon-center marker is a single lat/lng point already returned by the
-  bulletins API — not worth a dedicated GeoServer layer.
-- `tbl_farms` publishing is additive only. The frontend's primary farm rendering
-  (click-to-select, popups, per-farm styling) still comes from `GET /api/farms/`
-  via FastAPI, unchanged, to avoid losing that interactivity (WMS returns raster
-  tiles, not clickable features).
-- `EXTRA_JAVA_OPTS` is set conservatively (`-Xms512m -Xmx1g`) since this box also
-  runs `backend`, `redis`, native Postgres, and Docker Desktop itself. Raise it if
-  `docker compose logs geoserver` shows memory pressure under real concurrent WMS
-  tile rendering.
-- `docker compose build`/`up` for this service needs the physical console on
-  192.168.1.41, same known limitation as the `backend` image — day-to-day
-  management (`restart`, `logs`, `ps`) works fine over SSH once it's built.
+- **The wind-footprint overlay is not published through GeoServer.** Exposure is a
+  `(province, municipality)` text join against parsed TCWS areas, not a stored
+  PostGIS geometry, so there is no table to publish. See
+  `MASTER_DEVELOPMENT_CONTEXT.md` §2.
+- **The typhoon track** comes from `GET /api/typhoons/{id}/track` as plain
+  coordinates and is drawn client-side by `TyphoonTrackLayer.tsx` — not worth a
+  GeoServer layer.
+- **`tbl_farms` publishing is additive only.** The frontend's primary farm rendering
+  (click-to-select, popups, per-farm styling) still comes from
+  `GET /api/farms/geometry` via FastAPI, to avoid losing that interactivity — WMS
+  returns raster tiles, not clickable features.
+- **Memory:** if GeoServer shares a box with Postgres, the backend and Redis, keep
+  its heap conservative (`EXTRA_JAVA_OPTS: "-Xms512m -Xmx1g"` in the compose file).
+  Raise it only if the logs show memory pressure under real concurrent WMS tile
+  rendering.
